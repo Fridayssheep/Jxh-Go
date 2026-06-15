@@ -4,15 +4,15 @@
 
 ## 目标
 
-把 `MangoGovo/qqbot-JXH` 从 Python/Sanic + Lagrange.OneBot 重构为 Go + NapCat。
+把 `MangoGovo/qqbot-JXH` 从 Python/Sanic + Lagrange.OneBot 重构为 Go + NapCat，并使用 `Penryn/napcat-sdk` 作为 NapCat/OneBot 11 接入层。
 
-本次只迁移旧项目当前代码已经实现的功能，不实现 `/ai`，不新增管理后台、长期记忆、MCP、多模态、主动聊天等能力。`SugarMGP/MumuBot` 只作为 Go 工程实现参考：OneBot 客户端、`echo` 响应匹配、消息段解析、YAML 配置、结构化日志和缓存实践。
+本次只迁移旧项目当前代码已经实现的功能，不实现 `/ai`，不新增管理后台、长期记忆、MCP、多模态、主动聊天等能力。`SugarMGP/MumuBot` 只作为 Go 工程分层参考；NapCat 连接、事件解析、消息段构造和 `echo` 响应匹配优先使用 `napcat-sdk`。
 
 核心边界：
 
 - NapCat 负责 QQ 登录、扫码、会话保持、重连和 OneBot v11 协议。
 - Go 服务负责旧 bot 的业务逻辑。
-- Go 服务继续通过 OneBot v11 与协议端通信，默认使用反向 WebSocket。
+- Go 服务通过 `napcat-sdk` 与 NapCat 通信，默认使用 SDK 的反向 WebSocket server。
 - 部署只考虑单个 Go bot 实例；不做多实例、分布式锁、选主或跨实例任务协调。
 
 ## 保留功能
@@ -53,7 +53,7 @@
 NapCatQQ
   -> OneBot v11 Reverse WebSocket
   -> Go Bot
-       -> onebot: 连接、事件解析、API 调用
+       -> napcat: SDK client、事件流、API 调用
        -> bot: 消息管线、黑名单、命令分发、关键词 fallback
        -> commands: admin / reload / q / test
        -> reply: WPS Excel 加载和回复规则缓存
@@ -68,7 +68,7 @@ NapCatQQ
 cmd/bot
 internal/config
 internal/logger
-internal/onebot
+internal/napcat
 internal/bot
 internal/commands
 internal/reply
@@ -78,7 +78,7 @@ internal/quote
 internal/cache
 ```
 
-## OneBot 设计
+## NapCat SDK 设计
 
 NapCat 配置 WebSocket Client，连接 Go 服务：
 
@@ -86,26 +86,48 @@ NapCat 配置 WebSocket Client，连接 Go 服务：
 ws://bot:8080/onebot/v11/ws
 ```
 
-Go 侧实现反向 WebSocket endpoint。所有 OneBot API 调用必须使用 `echo` 匹配响应：
+Go 侧使用 `napcat-sdk` 的反向 WebSocket server：
 
-```text
-Call(action, params)
-  -> 生成 echo
-  -> 写入 pending map
-  -> 发送 action frame
-  -> 收到 response frame
-  -> 按 echo 找到等待方
-  -> 超时清理 pending
+```go
+err := napcat.ServeReverseWebSocket(ctx, ":8080", func(client *napcat.Client) {
+    for ev := range client.Events() {
+        // 转成内部事件后交给 bot pipeline
+    }
+}, napcat.WithToken(token), napcat.WithRequestTimeout(apiTimeout))
 ```
 
-首版封装的 OneBot API：
+SDK 的 Go module 路径以 `go.mod` 为准：
+
+```text
+github.com/phlin/napcat-sdk
+```
+
+`internal/napcat` 只做一层很薄的适配，把 SDK 类型转换成业务层接口，业务模块不直接依赖 SDK 细节。
+
+业务层需要的接口：
 
 - `send_group_msg`
 - `get_msg`
 - `set_group_ban`
 - `set_restart`
 
-消息段至少解析：
+对应 SDK 强类型方法：
+
+- `client.API().SendGroupMsg(ctx, api.SendGroupMsgRequest{...})`
+- `client.API().GetMsg(ctx, api.GetMsgRequest{...})`
+- `client.API().SetGroupBan(ctx, api.SetGroupBanRequest{...})`
+- `client.API().SetRestart(ctx, api.SetRestartRequest{...})`
+
+SDK 已实现 WebSocket `echo` 匹配和事件流，Go bot 不再手写 pending map。项目只需要测试业务适配层是否正确调用 SDK 封装接口。
+
+消息段构造优先使用 SDK 的 `message` 包：
+
+- `message.Text(...)`
+- `message.At(...)`
+- `message.Reply(...)`
+- `message.Image(...)`
+
+事件解析优先使用 SDK 的 `event` 包。业务层至少消费：
 
 - `text`
 - `at`
@@ -118,10 +140,9 @@ Call(action, params)
 
 | 用途 | 选型 |
 | --- | --- |
-| Go 版本 | Go 1.24+ |
-| HTTP 路由 | `github.com/go-chi/chi/v5` |
-| WebSocket | `github.com/gorilla/websocket` |
-| JSON | `github.com/bytedance/sonic` |
+| Go 版本 | Go 1.25+ |
+| HTTP/WebSocket | 由 `napcat-sdk` 基于标准 HTTP server 和 `coder/websocket` 提供 |
+| NapCat SDK | `github.com/phlin/napcat-sdk` |
 | 日志 | `go.uber.org/zap` |
 | 配置 | `gopkg.in/yaml.v3` |
 | ORM | `gorm.io/gorm` |
@@ -130,6 +151,8 @@ Call(action, params)
 | Excel | `github.com/xuri/excelize/v2` |
 | 定时任务 | `github.com/robfig/cron/v3` |
 | 缓存 | `github.com/jellydator/ttlcache/v3` |
+
+WebSocket、JSON、OneBot action 绑定、事件解析和消息段构造由 `napcat-sdk` 负责；项目代码不再直接依赖 `gorilla/websocket`、`go-chi` 或手写 OneBot action envelope。
 
 数据库使用 MySQL，访问层使用 GORM。MySQL 只作为单实例 bot 的持久化存储，不承担多实例协调职责；定时任务也只由当前唯一 Go bot 进程调度。
 
@@ -216,7 +239,7 @@ GORM 模型需要显式设置表名和字段类型，避免自动命名造成迁
 
 ```text
 OneBot event
-  -> parse group message
+  -> SDK event 转内部 group message
   -> 黑名单检查
   -> 命令解析
   -> 命令执行
@@ -327,12 +350,13 @@ services:
 
 ## 迁移阶段
 
-### Phase 1：骨架与 OneBot
+### Phase 1：骨架与 NapCat SDK
 
 - 初始化 Go module。
-- 建立配置、日志、HTTP server、反向 WebSocket endpoint。
-- 实现 OneBot 事件解析和 `echo` API 调用。
-- 测试 `get_msg` 不会误读普通事件。
+- 建立配置、日志和 `napcat-sdk` 反向 WebSocket server。
+- 实现 `internal/napcat` 适配层，把 SDK event 转成内部消息事件。
+- 封装业务需要的 `SendGroupMsg`、`GetMsg`、`SetGroupBan`、`SetRestart`。
+- 测试业务层通过适配接口调用 SDK，不直接依赖 WebSocket 细节。
 
 ### Phase 2：存储与基础消息
 
@@ -373,8 +397,8 @@ services:
 
 必须覆盖：
 
-- OneBot `echo` 响应匹配。
-- OneBot 消息段解析。
+- `internal/napcat` 事件适配。
+- `internal/napcat` API 调用封装。
 - 命令解析。
 - 管理员权限。
 - 黑名单过滤。
@@ -383,7 +407,7 @@ services:
 - 定时任务每天/单次语义。
 - repository 持久化。
 
-CI 使用 fake OneBot transport、fake quote server、测试 MySQL，不依赖真实 QQ、NapCat、WPS。
+CI 使用 fake NapCat adapter、fake quote server、测试 MySQL，不依赖真实 QQ、NapCat、WPS。
 
 ## 验收
 

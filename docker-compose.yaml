@@ -24,6 +24,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${JXH_MYSQL_ROOT_PASSWORD:-root_password}
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./deploy/mysql/init/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
     ports:
       - "3306:3306"
     healthcheck:

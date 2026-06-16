@@ -108,8 +108,64 @@ func newTestStore(t *testing.T) *storage.Store {
 		t.Fatal(err)
 	}
 	store := storage.NewStore(db)
-	if err := store.AutoMigrate(); err != nil {
+	mustExec(t, db, `
+CREATE TABLE knowledge_entries (
+  id integer PRIMARY KEY AUTOINCREMENT,
+  source_key text NOT NULL UNIQUE,
+  keyword text NOT NULL,
+  entry_type text NOT NULL,
+  path text,
+  aliases_json text,
+  category text,
+  tags_json text,
+  answer text NOT NULL,
+  content text NOT NULL,
+  enabled boolean NOT NULL,
+  exact_reply boolean NOT NULL,
+  ai_enabled boolean NOT NULL,
+  content_hash text NOT NULL,
+  vector_status text NOT NULL DEFAULT 'pending',
+  vector_content_hash text,
+  vector_synced_at datetime,
+  last_import_run_id integer,
+  source_updated_at datetime,
+  created_at datetime,
+  updated_at datetime
+)`)
+	mustExec(t, db, `
+CREATE TABLE admins (
+  user_id integer PRIMARY KEY,
+  created_at datetime
+)`)
+	mustExec(t, db, `
+CREATE TABLE blacklists (
+  user_id integer PRIMARY KEY,
+  created_at datetime
+)`)
+	mustExec(t, db, `
+CREATE TABLE scheduled_jobs (
+  id integer PRIMARY KEY AUTOINCREMENT,
+  type text NOT NULL,
+  time_hhmm text NOT NULL,
+  group_id integer NOT NULL,
+  message text NOT NULL,
+  enabled boolean NOT NULL,
+  last_run_at datetime,
+  created_at datetime,
+  updated_at datetime
+)`)
+	mustExec(t, db, `
+CREATE TABLE processed_events (
+  event_key text PRIMARY KEY,
+  processed_at datetime
+)`)
+	mustExec(t, db, `CREATE INDEX idx_processed_events_processed_at ON processed_events (processed_at)`)
+	return store
+}
+
+func mustExec(t *testing.T, db *gorm.DB, query string) {
+	t.Helper()
+	if err := db.Exec(query).Error; err != nil {
 		t.Fatal(err)
 	}
-	return store
 }

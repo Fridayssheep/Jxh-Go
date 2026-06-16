@@ -1,19 +1,4 @@
 # 精小弘 Go bot 示例配置。
-# 使用方式：
-#   cp config.example.yaml config.yaml
-#   按实际部署修改 config.yaml
-#
-# 常用敏感字段也可以通过环境变量覆盖：
-#   JXH_ONEBOT_TOKEN
-#   JXH_ONEBOT_WS_URL
-#   JXH_WPS_SID
-#   JXH_MYSQL_PASSWORD
-#   JXH_MYSQL_DSN
-#   JXH_AI_BASE_URL
-#   JXH_AI_API_KEY
-#   JXH_EMBEDDING_BASE_URL
-#   JXH_EMBEDDING_API_KEY
-
 app:
   # 是否开启调试模式。当前主要作为运行环境标记保留。
   debug: false
@@ -31,8 +16,10 @@ onebot:
   # NapCat OneBot 11 正向 WebSocket 地址。
   # compose 中 NapCat 默认把 3001 暴露到宿主机，因此本地单独运行 bot 时使用 127.0.0.1。
   ws_url: "ws://127.0.0.1:3001"
-  # OneBot 访问令牌，需要和 NapCat 端配置一致。为空表示不校验。
-  access_token: ""
+  # OneBot 访问令牌，需要和 NapCat WebSocket 服务端配置的 token 完全一致。
+  # bot 会在 WebSocket 握手和 API 调用中发送 Authorization: Bearer <access_token>。
+  # 不建议留空；如果 NapCat 端配置了 token，这里留空会连接失败。
+  access_token: "change-me"
   # bot 调用 OneBot API 等待响应的超时时间，单位秒。
   api_timeout_sec: 30
   # 正向 WebSocket 断开后的重连间隔，单位秒。

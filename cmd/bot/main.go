@@ -40,9 +40,6 @@ func main() {
 		log.Fatalf("open db: %v", err)
 	}
 	store := storage.NewStore(db)
-	if err := store.AutoMigrate(); err != nil {
-		log.Fatalf("migrate db: %v", err)
-	}
 
 	knowledgeCache := cache.NewKnowledge()
 	eventDedupe := persistentDedupe{

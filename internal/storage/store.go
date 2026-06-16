@@ -25,17 +25,6 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func (s *Store) AutoMigrate() error {
-	return s.db.AutoMigrate(
-		&KnowledgeEntry{},
-		&KnowledgeImportRun{},
-		&Admin{},
-		&Blacklist{},
-		&ScheduledJob{},
-		&ProcessedEvent{},
-	)
-}
-
 func (s *Store) UpsertKnowledgeEntries(ctx context.Context, entries []KnowledgeEntry, runID uint64) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now()

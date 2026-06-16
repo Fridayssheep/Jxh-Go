@@ -16,6 +16,12 @@
 - MySQL：单实例 bot 的运行时持久化存储。
 - WPS：知识库维护源，供人工编辑。
 
+## 依据
+
+- Eino 官方文档将 Retriever 定义为按 query 从数据源取回相关文档，适用于知识库问答/RAG。
+- Eino 官方文档将 ChatModel 定义为向大模型发送消息并获取回答的组件。
+- `github.com/zjutjh/napcat-sdk` 提供 NapCat/OneBot 11 的 HTTP、正向 WebSocket、反向 WebSocket server、事件解析、消息段构造和强类型 action。
+
 ## 设计决策
 
 WPS 回复表和 AI 知识库必须合并成同一套数据，不再维护两套表。
@@ -170,6 +176,7 @@ github.com/zjutjh/napcat-sdk
 | H | `ai_enabled` | 是否参与 `/ai` 检索，空值按启用处理 |
 | I | `content` | 扩展知识正文，空值时使用 `answer` |
 | J | `updated_at` | 人工维护时间，可空 |
+| K | `source_id` | 可选稳定 ID；为空时用规范化后的 `keyword` |
 
 兼容规则：
 
@@ -178,6 +185,7 @@ github.com/zjutjh/napcat-sdk
 - `aliases` 参与 `/ai` 检索，也可参与关键词匹配。
 - `exact_reply=false` 的条目不做普通关键词回复，但可给 `/ai` 使用。
 - `ai_enabled=false` 的条目可做关键词回复，但不进入 `/ai`。
+- 修改 `keyword` 时如果想保留同一条记录，应填写稳定的 `source_id`。
 
 ### MySQL 表
 
@@ -197,6 +205,7 @@ knowledge_entries(
   exact_reply BOOLEAN NOT NULL,
   ai_enabled BOOLEAN NOT NULL,
   content_hash CHAR(64) NOT NULL,
+  last_import_run_id BIGINT NULL,
   source_updated_at DATETIME NULL,
   created_at DATETIME NOT NULL,
   updated_at DATETIME NOT NULL,
@@ -252,9 +261,11 @@ processed_events(event_key VARCHAR(128) PRIMARY KEY, processed_at DATETIME NOT N
 导入策略：
 
 - `source_key` 用 `keyword` 规范化后生成；如果同一 keyword 重复，后出现的行跳过并记录日志。
+- 如果 WPS 行提供 `source_id`，`source_key` 优先使用 `source_id`；否则使用规范化后的 `keyword`。
 - 空 `keyword` 或空 `answer` 跳过。
 - WPS 下载失败不清空已有知识。
 - 成功导入后才替换内存缓存，避免半更新状态。
+- 每次成功导入记录 `last_import_run_id`；当前 WPS 中不存在的旧条目设为 `enabled=false`，避免知识库残留已删除内容。
 
 ## 关键词回复
 
@@ -316,6 +327,8 @@ MySQL retriever 采用混合文本检索：
 2. `FULLTEXT(keyword, answer, content)` 检索。
 3. 必要时 fallback 到 `LIKE`。
 4. 只返回 `enabled=true AND ai_enabled=true` 的条目。
+
+MySQL 中文全文检索效果取决于部署环境和分词配置。首版不能依赖全文检索作为唯一召回手段；精确匹配、aliases 和 `LIKE` fallback 必须可用。
 
 返回文档格式：
 

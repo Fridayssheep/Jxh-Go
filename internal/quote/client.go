@@ -11,12 +11,20 @@ import (
 	"time"
 )
 
-type Payload struct {
-	MessageID  int64  `json:"message_id"`
-	RawMessage string `json:"raw_message"`
-	Nickname   string `json:"nickname,omitempty"`
-	AvatarURL  string `json:"avatar_url,omitempty"`
+type MessageSegment struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+	URL  string `json:"url,omitempty"`
 }
+
+type Message struct {
+	UserID       int64  `json:"user_id"`
+	UserNickname string `json:"user_nickname"`
+	Avatar       string `json:"avatar,omitempty"`
+	Message      any    `json:"message"`
+}
+
+type Payload []Message
 
 type Client struct {
 	baseURL string

@@ -2,6 +2,7 @@ package bot_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
@@ -47,23 +48,45 @@ func TestPipelineAdminCommandUsesHandler(t *testing.T) {
 }
 
 func TestPipelineQCommandGeneratesQuoteImage(t *testing.T) {
-	sender := &fakeSender{}
+	sender := &fakeSender{
+		quoted: bot.QuotedMessage{
+			UserID:     12345,
+			Nickname:   "张三",
+			RawMessage: "被引用的消息",
+		},
+	}
+	quoteGen := &capturingQuote{result: "base64-image"}
 	p := bot.NewPipeline(bot.Options{
 		Sender: sender,
-		Quote:  bot.StaticQuote{Result: "base64-image"},
+		Quote:  quoteGen,
 	})
 	if err := p.HandleGroupMessage(context.Background(), bot.GroupMessage{
 		GroupID:        1,
 		UserID:         2,
 		Text:           "/q",
 		ReplyMessageID: 99,
-		RawMessage:     "hello",
+		RawMessage:     "/q",
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if sender.requestedQuoteMessageID != 99 {
+		t.Fatalf("requestedQuoteMessageID = %d", sender.requestedQuoteMessageID)
+	}
+	data, err := json.Marshal(quoteGen.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPayload := `[{"user_id":12345,"user_nickname":"张三","message":"被引用的消息"}]`
+	if string(data) != wantPayload {
+		t.Fatalf("payload = %s, want %s", data, wantPayload)
 	}
 	msg, ok := sender.lastMessage.(map[string]any)
 	if !ok || msg["type"] != "image" {
 		t.Fatalf("message = %#v", sender.lastMessage)
+	}
+	file := msg["data"].(map[string]any)["file"]
+	if file != "base64://base64-image" {
+		t.Fatalf("image file = %q", file)
 	}
 }
 
@@ -85,9 +108,11 @@ func TestPipelineAICommandUsesService(t *testing.T) {
 }
 
 type fakeSender struct {
-	lastGroupID int64
-	lastText    string
-	lastMessage any
+	lastGroupID             int64
+	lastText                string
+	lastMessage             any
+	quoted                  bot.QuotedMessage
+	requestedQuoteMessageID int64
 }
 
 func (f *fakeSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
@@ -106,6 +131,23 @@ func (f *fakeSender) SendGroupMessage(ctx context.Context, groupID int64, messag
 		f.lastText = text
 	}
 	return nil
+}
+
+func (f *fakeSender) GetQuoteMessage(ctx context.Context, messageID int64) (bot.QuotedMessage, error) {
+	_ = ctx
+	f.requestedQuoteMessageID = messageID
+	return f.quoted, nil
+}
+
+type capturingQuote struct {
+	result  string
+	payload quote.Payload
+}
+
+func (q *capturingQuote) Generate(ctx context.Context, payload quote.Payload) (string, error) {
+	_ = ctx
+	q.payload = payload
+	return q.result, nil
 }
 
 var _ = quote.Payload{}

@@ -31,6 +31,16 @@ type QuoteGenerator interface {
 	Generate(ctx context.Context, payload quote.Payload) (string, error)
 }
 
+type QuoteMessageGetter interface {
+	GetQuoteMessage(ctx context.Context, messageID int64) (QuotedMessage, error)
+}
+
+type QuotedMessage struct {
+	UserID     int64
+	Nickname   string
+	RawMessage string
+}
+
 type Moderator interface {
 	SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error
 	SetRestart(ctx context.Context) error
@@ -122,11 +132,26 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		if msg.ReplyMessageID == 0 {
 			return sender.SendGroupText(ctx, msg.GroupID, "请回复一条消息后使用 /q")
 		}
-		image, err := p.quote.Generate(ctx, quote.Payload{MessageID: msg.ReplyMessageID, RawMessage: msg.RawMessage})
-		if err != nil {
-			return err
+		getter, ok := sender.(QuoteMessageGetter)
+		if !ok {
+			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 消息接口未初始化")
 		}
-		return sender.SendGroupMessage(ctx, msg.GroupID, map[string]any{"type": "image", "data": map[string]any{"file": image}})
+		quoted, err := getter.GetQuoteMessage(ctx, msg.ReplyMessageID)
+		if err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败："+err.Error())
+		}
+		if strings.TrimSpace(quoted.RawMessage) == "" {
+			return sender.SendGroupText(ctx, msg.GroupID, "被引用消息内容为空")
+		}
+		image, err := p.quote.Generate(ctx, quote.Payload{{
+			UserID:       quoted.UserID,
+			UserNickname: quoteNickname(quoted.Nickname),
+			Message:      quoted.RawMessage,
+		}})
+		if err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败："+err.Error())
+		}
+		return sender.SendGroupMessage(ctx, msg.GroupID, map[string]any{"type": "image", "data": map[string]any{"file": quoteImageFile(image)}})
 	case strings.HasPrefix(text, "/ai"):
 		question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
 		if p.ai == nil {
@@ -186,6 +211,22 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 	}
 	return nil
+}
+
+func quoteNickname(nickname string) string {
+	nickname = strings.TrimSpace(nickname)
+	if nickname == "" {
+		return "匿名"
+	}
+	return nickname
+}
+
+func quoteImageFile(image string) string {
+	image = strings.TrimSpace(image)
+	if strings.HasPrefix(image, "base64://") || strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://") || strings.HasPrefix(image, "file://") {
+		return image
+	}
+	return "base64://" + image
 }
 
 func parseBanDuration(raw string) (time.Duration, error) {

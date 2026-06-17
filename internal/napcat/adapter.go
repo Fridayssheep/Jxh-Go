@@ -90,7 +90,9 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			if s.Dedupe != nil && s.Dedupe.SeenOrMark(eventKey(ev)) {
 				continue
 			}
-			_ = s.handleEvent(ctx, ev)
+			if err := s.handleEvent(ctx, client, ev); err != nil {
+				log.Printf("handle napcat event failed: %v", err)
+			}
 		}
 	}
 }
@@ -106,12 +108,15 @@ func sleepContext(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-func (s Server) handleEvent(ctx context.Context, ev event.Event) error {
+func (s Server) handleEvent(ctx context.Context, client *napcatsdk.Client, ev event.Event) error {
 	if s.Handler == nil {
 		return nil
 	}
 	switch e := ev.(type) {
 	case *event.GroupMessage:
+		if err := markGroupMessageRead(ctx, client, e); err != nil {
+			log.Printf("mark group message as read failed: %v", err)
+		}
 		return s.Handler.HandleGroupMessage(ctx, bot.GroupMessage{
 			GroupID:        e.GroupID,
 			UserID:         e.UserID,
@@ -137,6 +142,17 @@ func (s Server) handleEvent(ctx context.Context, ev event.Event) error {
 		}
 	}
 	return nil
+}
+
+func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *event.GroupMessage) error {
+	if client == nil || e == nil || e.MessageID == 0 {
+		return nil
+	}
+	_, err := client.API().MarkGroupMsgAsRead(ctx, api.MarkGroupMsgAsReadRequest{
+		GroupID:   strconv.FormatInt(e.GroupID, 10),
+		MessageID: strconv.FormatInt(e.MessageID, 10),
+	})
+	return err
 }
 
 func eventKey(ev event.Event) string {
@@ -181,8 +197,16 @@ func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg any)
 	return err
 }
 
-func (s SDKSender) GetMsg(ctx context.Context, messageID int64) (*api.GetMsgResponse, error) {
-	return s.client.API().GetMsg(ctx, api.GetMsgRequest{MessageID: messageID})
+func (s SDKSender) GetQuoteMessage(ctx context.Context, messageID int64) (bot.QuotedMessage, error) {
+	msg, err := s.client.API().GetMsg(ctx, api.GetMsgRequest{MessageID: messageID})
+	if err != nil {
+		return bot.QuotedMessage{}, err
+	}
+	return bot.QuotedMessage{
+		UserID:     anyInt64(msg.UserID),
+		Nickname:   senderNickname(msg.Sender),
+		RawMessage: msg.RawMessage,
+	}, nil
 }
 
 func (s SDKSender) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
@@ -212,4 +236,30 @@ func extractAtUsers(chain message.Chain) []int64 {
 		}
 	}
 	return out
+}
+
+func senderNickname(sender map[string]any) string {
+	if card, ok := sender["card"].(string); ok && card != "" {
+		return card
+	}
+	if nickname, ok := sender["nickname"].(string); ok {
+		return nickname
+	}
+	return ""
+}
+
+func anyInt64(v any) int64 {
+	switch value := v.(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case float64:
+		return int64(value)
+	case string:
+		id, _ := strconv.ParseInt(value, 10, 64)
+		return id
+	default:
+		return 0
+	}
 }

@@ -39,6 +39,7 @@ type QuotedMessage struct {
 	UserID     int64
 	Nickname   string
 	RawMessage string
+	Message    any
 }
 
 type Moderator interface {
@@ -140,13 +141,14 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败："+err.Error())
 		}
-		if strings.TrimSpace(quoted.RawMessage) == "" {
+		content := quoteMessageContent(quoted.RawMessage, quoted.Message)
+		if isEmptyQuoteContent(content) {
 			return sender.SendGroupText(ctx, msg.GroupID, "被引用消息内容为空")
 		}
 		image, err := p.quote.Generate(ctx, quote.Payload{{
 			UserID:       quoted.UserID,
 			UserNickname: quoteNickname(quoted.Nickname),
-			Message:      quoted.RawMessage,
+			Message:      content,
 		}})
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败："+err.Error())

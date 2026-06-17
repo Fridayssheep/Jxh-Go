@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
@@ -198,15 +199,94 @@ func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg any)
 }
 
 func (s SDKSender) GetQuoteMessage(ctx context.Context, messageID int64) (bot.QuotedMessage, error) {
-	msg, err := s.client.API().GetMsg(ctx, api.GetMsgRequest{MessageID: messageID})
-	if err != nil {
+	var msg struct {
+		UserID     any            `json:"user_id"`
+		RawMessage string         `json:"raw_message"`
+		Sender     map[string]any `json:"sender"`
+		Message    any            `json:"message"`
+	}
+	if err := s.client.API().Call(ctx, string(api.ActionGetMsg), api.GetMsgRequest{MessageID: messageID}, &msg); err != nil {
 		return bot.QuotedMessage{}, err
 	}
+	message := s.enrichQuoteMessageImages(ctx, msg.Message)
 	return bot.QuotedMessage{
 		UserID:     anyInt64(msg.UserID),
 		Nickname:   senderNickname(msg.Sender),
 		RawMessage: msg.RawMessage,
+		Message:    message,
 	}, nil
+}
+
+func (s SDKSender) enrichQuoteMessageImages(ctx context.Context, raw any) any {
+	segments, ok := raw.([]any)
+	if !ok {
+		return raw
+	}
+	out := make([]any, len(segments))
+	copy(out, segments)
+	for i, item := range out {
+		segment, ok := item.(map[string]any)
+		if !ok || !quoteImageSegmentType(anyString(segment["type"])) {
+			continue
+		}
+		data, ok := segment["data"].(map[string]any)
+		if !ok || usableImageSource(anyString(data["url"])) {
+			continue
+		}
+		file := anyString(data["file"])
+		if file == "" || usableImageSource(file) {
+			continue
+		}
+		url := s.quoteImageURL(ctx, file)
+		if url == "" {
+			continue
+		}
+		newData := cloneAnyMap(data)
+		newData["url"] = url
+		newSegment := cloneAnyMap(segment)
+		newSegment["data"] = newData
+		out[i] = newSegment
+	}
+	return out
+}
+
+func (s SDKSender) quoteImageURL(ctx context.Context, file string) string {
+	var data map[string]any
+	if err := s.client.API().Call(ctx, "get_image", map[string]any{"file": file}, &data); err != nil {
+		log.Printf("get quote image url failed: %v", err)
+		return ""
+	}
+	if url := anyString(data["url"]); url != "" {
+		return url
+	}
+	return anyString(data["file"])
+}
+
+func quoteImageSegmentType(segmentType string) bool {
+	switch segmentType {
+	case "image", "mface", "marketface", "emoji":
+		return true
+	default:
+		return false
+	}
+}
+
+func usableImageSource(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "data:image/") ||
+		strings.HasPrefix(lower, "base64://") ||
+		strings.HasPrefix(lower, "file://") ||
+		strings.HasPrefix(lower, "/")
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func (s SDKSender) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
@@ -246,6 +326,21 @@ func senderNickname(sender map[string]any) string {
 		return nickname
 	}
 	return ""
+}
+
+func anyString(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case float64:
+		return strconv.FormatInt(int64(value), 10)
+	case int:
+		return strconv.Itoa(value)
+	case int64:
+		return strconv.FormatInt(value, 10)
+	default:
+		return ""
+	}
 }
 
 func anyInt64(v any) int64 {

@@ -342,6 +342,9 @@ func timeFromPtr(value *time.Time) time.Time {
 }
 
 func timePtr(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
 	return &value
 }
 

@@ -160,6 +160,19 @@ func TestStoreSeenOrMarkProcessedEvent(t *testing.T) {
 	}
 }
 
+func TestKnowledgeEntryToModelOmitsZeroTimestamps(t *testing.T) {
+	entry := KnowledgeEntry{SourceKey: "faq:zero-time", Keyword: "zero", EntryType: "knowledge"}
+
+	got := knowledgeEntryToModel(entry)
+
+	if got.CreatedAt != nil {
+		t.Fatalf("CreatedAt = %v, want nil for zero time", got.CreatedAt)
+	}
+	if got.UpdatedAt != nil {
+		t.Fatalf("UpdatedAt = %v, want nil for zero time", got.UpdatedAt)
+	}
+}
+
 func TestStoreAdminBlacklistAndScheduledJobs(t *testing.T) {
 	db := openTestDB(t)
 	store := NewStore(db)

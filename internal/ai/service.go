@@ -9,6 +9,7 @@ import (
 )
 
 const EmptyKnowledgeAnswer = "知识库里没有找到相关内容"
+const DisabledAnswer = "AI 问答未启用"
 
 type Document struct {
 	ID       string

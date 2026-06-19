@@ -30,10 +30,10 @@ docker compose up -d mysql
 
 ```bash
 export JXH_GORMGEN_DSN="jxh:jxh_password@tcp(127.0.0.1:3306)/jxh_bot?charset=utf8mb4&parseTime=True&loc=Local"
-go generate ./internal/storage
+make gormgen
 ```
 
-生成参数固定在 `scripts/gormgen.sh`。不要手动拼临时 `gentool` 参数更新仓库代码。
+`make gormgen` 会通过 `go generate ./internal/storage` 调用 `scripts/gormgen.sh`。生成参数固定在脚本里，不要手动拼临时 `gentool` 参数更新仓库代码。
 
 ## Model ownership
 

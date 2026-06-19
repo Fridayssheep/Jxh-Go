@@ -35,7 +35,7 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	text := strings.TrimSpace(msg.Text)
 	switch {
 	case text == "/test":
-		return true, sender.SendGroupText(ctx, msg.GroupID, "ddd")
+		return true, sender.SendGroupText(ctx, msg.GroupID, "精小弘正常")
 	case text == "/reload":
 		return true, r.handleReload(ctx, msg, sender)
 	case text == "/q":
@@ -96,7 +96,7 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
 	question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
 	if r.ai == nil {
-		return sender.SendGroupText(ctx, msg.GroupID, ai.EmptyKnowledgeAnswer)
+		return sender.SendGroupText(ctx, msg.GroupID, ai.DisabledAnswer)
 	}
 	answer, err := r.ai.Answer(ctx, question)
 	if err != nil {

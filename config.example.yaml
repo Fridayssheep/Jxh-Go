@@ -63,7 +63,7 @@ database:
   dsn: ""
 
 ai:
-  # 是否启用 /ai 入口。当前代码会创建 AI 服务；如果模型未配置，会使用抽取式 fallback。
+  # 是否启用 /ai 入口。关闭后 /ai 会直接返回未启用；启用但模型未配置时使用抽取式 fallback。
   enabled: true
   # ChatModel 提供方。支持 openai 和 ark；空值按 openai 处理。
   provider: "openai"

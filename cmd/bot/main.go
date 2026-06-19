@@ -78,25 +78,10 @@ func main() {
 		}
 	}
 
-	chat := ai.Chat(ai.ExtractiveChat{})
-	if shouldCreateEinoChat(cfg.AI) {
-		einoChat, err := ai.NewEinoChat(ctx, ai.EinoChatConfig{
-			Provider: cfg.AI.Provider,
-			BaseURL:  cfg.AI.BaseURL,
-			APIKey:   cfg.AI.APIKey,
-			Model:    cfg.AI.Model,
-		})
-		if err != nil {
-			log.Fatalf("create eino chat: %v", err)
-		}
-		chat = einoChat
+	aiSvc, err := newAIService(ctx, cfg, aiRetriever)
+	if err != nil {
+		log.Fatalf("create ai service: %v", err)
 	}
-	aiSvc := ai.NewService(ai.Options{
-		Retriever:        aiRetriever,
-		Chat:             chat,
-		TopK:             cfg.AI.TopK,
-		MaxQuestionChars: cfg.AI.MaxQuestionChars,
-	})
 	pipeline := bot.NewPipeline(bot.Options{
 		Knowledge: knowledgeCache,
 		AI:        aiSvc,
@@ -139,6 +124,31 @@ func shouldCreateEinoChat(cfg config.AIConfig) bool {
 		return true
 	}
 	return false
+}
+
+func newAIService(ctx context.Context, cfg config.Config, retriever ai.Retriever) (*ai.Service, error) {
+	if !cfg.AI.Enabled {
+		return nil, nil
+	}
+	chat := ai.Chat(ai.ExtractiveChat{})
+	if shouldCreateEinoChat(cfg.AI) {
+		einoChat, err := ai.NewEinoChat(ctx, ai.EinoChatConfig{
+			Provider: cfg.AI.Provider,
+			BaseURL:  cfg.AI.BaseURL,
+			APIKey:   cfg.AI.APIKey,
+			Model:    cfg.AI.Model,
+		})
+		if err != nil {
+			return nil, err
+		}
+		chat = einoChat
+	}
+	return ai.NewService(ai.Options{
+		Retriever:        retriever,
+		Chat:             chat,
+		TopK:             cfg.AI.TopK,
+		MaxQuestionChars: cfg.AI.MaxQuestionChars,
+	}), nil
 }
 
 type persistentDedupe struct {

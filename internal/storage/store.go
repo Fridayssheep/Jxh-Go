@@ -71,6 +71,10 @@ func (s *Store) UpsertKnowledgeEntries(ctx context.Context, entries []KnowledgeE
 	})
 }
 
+func (s *Store) UpsertKnowledge(ctx context.Context, entries []knowledge.Entry, runID uint64) error {
+	return s.UpsertKnowledgeEntries(ctx, FromKnowledgeEntries(entries), runID)
+}
+
 func (s *Store) ListEnabledKnowledge(ctx context.Context) ([]KnowledgeEntry, error) {
 	var entries []KnowledgeEntry
 	err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id ASC").Find(&entries).Error

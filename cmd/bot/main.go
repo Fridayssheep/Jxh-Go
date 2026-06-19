@@ -54,9 +54,21 @@ func main() {
 	domainEntries := storage.ToKnowledgeEntries(entries)
 	knowledgeCache.Replace(knowledge.NewKeywordIndex(domainEntries))
 	aiRetriever := ai.NewRetrieverRef(ai.NewKnowledgeRetriever(domainEntries))
-	reload := reloader{cfg: cfg, store: store, cache: knowledgeCache, aiRetriever: aiRetriever}
+	knowledgeSync := knowledge.NewSyncer(knowledge.SyncerOptions{
+		Source: knowledge.WPSClient{
+			ShareURL:  cfg.WPS.ShareURL,
+			SID:       cfg.WPS.SID,
+			CacheFile: cfg.WPS.CacheFile,
+		},
+		Sheet: cfg.WPS.Sheet,
+		Store: store,
+		OnSynced: func(entries []knowledge.Entry) {
+			knowledgeCache.Replace(knowledge.NewKeywordIndex(entries))
+			aiRetriever.Set(ai.NewKnowledgeRetriever(entries))
+		},
+	})
 	if cfg.WPS.SyncOnStart && cfg.WPS.ShareURL != "" {
-		if err := reload.Reload(ctx); err != nil {
+		if err := knowledgeSync.Reload(ctx); err != nil {
 			log.Printf("sync wps on start failed: %v", err)
 		}
 	}
@@ -84,11 +96,16 @@ func main() {
 		Knowledge: knowledgeCache,
 		AI:        aiSvc,
 		Blacklist: store,
-		Reloader:  reload,
+		Reloader:  knowledgeSync,
 		Admin:     commands.NewAdminHandler(store),
 		Quote:     quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 	})
-	go runScheduledJobs(ctx, store, pipeline, cfg)
+	go scheduler.NewRuntime(scheduler.RuntimeOptions{
+		Store:    store,
+		Send:     pipeline.SendGroupText,
+		Location: schedulerLocation(cfg),
+		Logf:     log.Printf,
+	}).Run(ctx)
 
 	server := napcat.Server{
 		Addr:           cfg.Server.Addr,
@@ -163,7 +180,7 @@ func cleanupProcessedEvents(ctx context.Context, store *storage.Store, cfg confi
 	}
 }
 
-func runScheduledJobs(ctx context.Context, store *storage.Store, pipeline *bot.Pipeline, cfg config.Config) {
+func schedulerLocation(cfg config.Config) *time.Location {
 	loc := time.Local
 	if cfg.Scheduler.Timezone != "" {
 		if loaded, err := time.LoadLocation(cfg.Scheduler.Timezone); err == nil {
@@ -172,38 +189,7 @@ func runScheduledJobs(ctx context.Context, store *storage.Store, pipeline *bot.P
 			log.Printf("load scheduler timezone failed: %v", err)
 		}
 	}
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	run := func() {
-		now := time.Now().In(loc)
-		jobs, err := store.ListActiveSchedulerJobs(ctx)
-		if err != nil {
-			log.Printf("list scheduled jobs failed: %v", err)
-			return
-		}
-		for _, job := range jobs {
-			if !scheduler.IsDue(job, now) {
-				continue
-			}
-			if err := pipeline.SendGroupText(ctx, job.GroupID, job.Message); err != nil {
-				log.Printf("send scheduled job %d failed: %v", job.ID, err)
-				continue
-			}
-			disable := job.Type == scheduler.JobTypeOnce
-			if err := store.MarkScheduledJobRan(ctx, job.ID, now, disable); err != nil {
-				log.Printf("mark scheduled job %d failed: %v", job.ID, err)
-			}
-		}
-	}
-	run()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			run()
-		}
-	}
+	return loc
 }
 
 func openDB(cfg config.Config) (*gorm.DB, error) {
@@ -230,36 +216,4 @@ func itoa(v int) string {
 		v /= 10
 	}
 	return string(buf[i:])
-}
-
-type reloader struct {
-	cfg         config.Config
-	store       *storage.Store
-	cache       *cache.Knowledge
-	aiRetriever *ai.RetrieverRef
-}
-
-func (r reloader) Reload(ctx context.Context) error {
-	client := knowledge.WPSClient{
-		ShareURL:  r.cfg.WPS.ShareURL,
-		SID:       r.cfg.WPS.SID,
-		CacheFile: r.cfg.WPS.CacheFile,
-	}
-	data, err := client.Download(ctx)
-	if err != nil {
-		return err
-	}
-	result, err := knowledge.ParseWorkbook(data, r.cfg.WPS.Sheet)
-	if err != nil {
-		return err
-	}
-	runID := uint64(time.Now().UnixNano())
-	if err := r.store.UpsertKnowledgeEntries(ctx, storage.FromKnowledgeEntries(result.Entries), runID); err != nil {
-		return err
-	}
-	r.cache.Replace(knowledge.NewKeywordIndex(result.Entries))
-	if r.aiRetriever != nil {
-		r.aiRetriever.Set(ai.NewKnowledgeRetriever(result.Entries))
-	}
-	return nil
 }

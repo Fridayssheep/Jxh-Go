@@ -9,16 +9,19 @@ import (
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
+	storagemodel "github.com/zjutjh/jxh-go/internal/storage/model"
+	"github.com/zjutjh/jxh-go/internal/storage/query"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 type Store struct {
 	db *gorm.DB
+	q  *query.Query
 }
 
 func NewStore(db *gorm.DB) *Store {
-	return &Store{db: db}
+	return &Store{db: db, q: query.Use(db)}
 }
 
 func (s *Store) DB() *gorm.DB {
@@ -26,17 +29,18 @@ func (s *Store) DB() *gorm.DB {
 }
 
 func (s *Store) UpsertKnowledgeEntries(ctx context.Context, entries []KnowledgeEntry, runID uint64) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return s.q.Transaction(func(tx *query.Query) error {
 		now := time.Now()
+		ke := tx.KnowledgeEntry
 		for _, entry := range entries {
 			entry.LastImportRunID = runID
 			entry.ContentHash = hashContent(entry.Content)
 			if entry.VectorStatus == "" {
 				entry.VectorStatus = VectorStatusPending
 			}
-			var existing KnowledgeEntry
-			err := tx.Where("source_key = ?", entry.SourceKey).Take(&existing).Error
+			existingModel, err := ke.WithContext(ctx).Where(ke.SourceKey.Eq(entry.SourceKey)).Take()
 			if err == nil {
+				existing := knowledgeEntryFromModel(existingModel)
 				if existing.ContentHash == entry.ContentHash && existing.VectorStatus != "" {
 					entry.VectorStatus = existing.VectorStatus
 					entry.VectorContentHash = existing.VectorContentHash
@@ -48,7 +52,7 @@ func (s *Store) UpsertKnowledgeEntries(ctx context.Context, entries []KnowledgeE
 				}
 				entry.ID = existing.ID
 				entry.CreatedAt = existing.CreatedAt
-				if err := tx.Save(&entry).Error; err != nil {
+				if err := ke.WithContext(ctx).Save(knowledgeEntryToModel(entry)); err != nil {
 					return err
 				}
 				continue
@@ -58,14 +62,16 @@ func (s *Store) UpsertKnowledgeEntries(ctx context.Context, entries []KnowledgeE
 			}
 			entry.CreatedAt = now
 			entry.UpdatedAt = now
-			if err := tx.Create(&entry).Error; err != nil {
+			if err := ke.WithContext(ctx).Create(knowledgeEntryToModel(entry)); err != nil {
 				return err
 			}
 		}
 		if runID != 0 {
-			return tx.Model(&KnowledgeEntry{}).
-				Where("last_import_run_id <> ? OR last_import_run_id IS NULL", runID).
-				Update("enabled", false).Error
+			_, err := ke.WithContext(ctx).
+				Where(ke.LastImportRunID.Neq(runID)).
+				Or(ke.LastImportRunID.IsNull()).
+				Update(ke.Enabled, false)
+			return err
 		}
 		return nil
 	})
@@ -76,80 +82,108 @@ func (s *Store) UpsertKnowledge(ctx context.Context, entries []knowledge.Entry, 
 }
 
 func (s *Store) ListEnabledKnowledge(ctx context.Context) ([]KnowledgeEntry, error) {
-	var entries []KnowledgeEntry
-	err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id ASC").Find(&entries).Error
-	return entries, err
+	ke := s.q.KnowledgeEntry
+	entries, err := ke.WithContext(ctx).Where(ke.Enabled.Is(true)).Order(ke.ID).Find()
+	if err != nil {
+		return nil, err
+	}
+	return knowledgeEntriesFromModels(entries), nil
 }
 
 func (s *Store) AddAdmin(ctx context.Context, userID int64) error {
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Admin{UserID: userID}).Error
+	return s.q.Admin.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&storagemodel.Admin{UserID: userID})
 }
 
 func (s *Store) RemoveAdmin(ctx context.Context, userID int64) error {
-	return s.db.WithContext(ctx).Delete(&Admin{}, "user_id = ?", userID).Error
+	admin := s.q.Admin
+	_, err := admin.WithContext(ctx).Where(admin.UserID.Eq(userID)).Delete()
+	return err
 }
 
 func (s *Store) ClearAdmins(ctx context.Context) error {
-	return s.db.WithContext(ctx).Where("1 = 1").Delete(&Admin{}).Error
+	_, err := s.q.Admin.WithContext(ctx).Session(&gorm.Session{AllowGlobalUpdate: true}).Delete()
+	return err
 }
 
 func (s *Store) ListAdmins(ctx context.Context) ([]int64, error) {
-	var users []int64
-	err := s.db.WithContext(ctx).Model(&Admin{}).Order("user_id ASC").Pluck("user_id", &users).Error
-	return users, err
+	admin := s.q.Admin
+	admins, err := admin.WithContext(ctx).Order(admin.UserID).Find()
+	if err != nil {
+		return nil, err
+	}
+	users := make([]int64, 0, len(admins))
+	for _, admin := range admins {
+		users = append(users, admin.UserID)
+	}
+	return users, nil
 }
 
 func (s *Store) IsAdmin(ctx context.Context, userID int64) (bool, error) {
-	var count int64
-	err := s.db.WithContext(ctx).Model(&Admin{}).Where("user_id = ?", userID).Count(&count).Error
+	admin := s.q.Admin
+	count, err := admin.WithContext(ctx).Where(admin.UserID.Eq(userID)).Count()
 	return count > 0, err
 }
 
 func (s *Store) AddBlacklist(ctx context.Context, userID int64) error {
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Blacklist{UserID: userID}).Error
+	return s.q.Blacklist.WithContext(ctx).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&storagemodel.Blacklist{UserID: userID})
 }
 
 func (s *Store) RemoveBlacklist(ctx context.Context, userID int64) error {
-	return s.db.WithContext(ctx).Delete(&Blacklist{}, "user_id = ?", userID).Error
+	blacklist := s.q.Blacklist
+	_, err := blacklist.WithContext(ctx).Where(blacklist.UserID.Eq(userID)).Delete()
+	return err
 }
 
 func (s *Store) ClearBlacklist(ctx context.Context) error {
-	return s.db.WithContext(ctx).Where("1 = 1").Delete(&Blacklist{}).Error
+	_, err := s.q.Blacklist.WithContext(ctx).Session(&gorm.Session{AllowGlobalUpdate: true}).Delete()
+	return err
 }
 
 func (s *Store) ListBlacklist(ctx context.Context) ([]int64, error) {
-	var users []int64
-	err := s.db.WithContext(ctx).Model(&Blacklist{}).Order("user_id ASC").Pluck("user_id", &users).Error
-	return users, err
+	blacklist := s.q.Blacklist
+	blacklists, err := blacklist.WithContext(ctx).Order(blacklist.UserID).Find()
+	if err != nil {
+		return nil, err
+	}
+	users := make([]int64, 0, len(blacklists))
+	for _, blacklist := range blacklists {
+		users = append(users, blacklist.UserID)
+	}
+	return users, nil
 }
 
 func (s *Store) IsBlacklisted(ctx context.Context, userID int64) (bool, error) {
-	var count int64
-	err := s.db.WithContext(ctx).Model(&Blacklist{}).Where("user_id = ?", userID).Count(&count).Error
+	blacklist := s.q.Blacklist
+	count, err := blacklist.WithContext(ctx).Where(blacklist.UserID.Eq(userID)).Count()
 	return count > 0, err
 }
 
 func (s *Store) MarkProcessedEvent(ctx context.Context, key string, at time.Time) error {
-	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+	return s.q.ProcessedEvent.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "event_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{"processed_at"}),
-	}).Create(&ProcessedEvent{EventKey: key, ProcessedAt: at}).Error
+	}).Create(&storagemodel.ProcessedEvent{EventKey: key, ProcessedAt: &at})
 }
 
 func (s *Store) HasProcessedEvent(ctx context.Context, key string) (bool, error) {
-	var count int64
-	err := s.db.WithContext(ctx).Model(&ProcessedEvent{}).Where("event_key = ?", key).Count(&count).Error
+	event := s.q.ProcessedEvent
+	count, err := event.WithContext(ctx).Where(event.EventKey.Eq(key)).Count()
 	return count > 0, err
 }
 
 func (s *Store) CleanupProcessedEvents(ctx context.Context, before time.Time) (int64, error) {
-	result := s.db.WithContext(ctx).Where("processed_at < ?", before).Delete(&ProcessedEvent{})
-	return result.RowsAffected, result.Error
+	event := s.q.ProcessedEvent
+	result, err := event.WithContext(ctx).Where(event.ProcessedAt.Lt(before)).Delete()
+	return result.RowsAffected, err
 }
 
 func (s *Store) SeenOrMarkProcessedEvent(ctx context.Context, key string, at time.Time) (bool, error) {
-	var existing ProcessedEvent
-	err := s.db.WithContext(ctx).Where("event_key = ?", key).Take(&existing).Error
+	event := s.q.ProcessedEvent
+	_, err := event.WithContext(ctx).Where(event.EventKey.Eq(key)).Take()
 	if err == nil {
 		return true, nil
 	}
@@ -160,30 +194,34 @@ func (s *Store) SeenOrMarkProcessedEvent(ctx context.Context, key string, at tim
 }
 
 func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobView, error) {
-	var jobs []ScheduledJob
-	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id ASC").Find(&jobs).Error; err != nil {
+	job := s.q.ScheduledJob
+	jobs, err := job.WithContext(ctx).Where(job.Enabled.Is(true)).Order(job.ID).Find()
+	if err != nil {
 		return nil, err
 	}
 	out := make([]commands.ScheduledJobView, 0, len(jobs))
 	for _, job := range jobs {
-		out = append(out, commands.ScheduledJobView{ID: job.ID, Type: job.Type, TimeHHMM: job.TimeHHMM, GroupID: job.GroupID, Message: job.Message, Enabled: job.Enabled})
+		out = append(out, commands.ScheduledJobView{ID: job.ID, Type: job.Type, TimeHHMM: job.TimeHhmm, GroupID: job.GroupID, Message: job.Message, Enabled: job.Enabled})
 	}
 	return out, nil
 }
 
 func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJobInput) (uint64, error) {
-	job := ScheduledJob{Type: input.Type, TimeHHMM: input.TimeHHMM, GroupID: input.GroupID, Message: input.Message, Enabled: true}
-	err := s.db.WithContext(ctx).Create(&job).Error
+	job := &storagemodel.ScheduledJob{Type: input.Type, TimeHhmm: input.TimeHHMM, GroupID: input.GroupID, Message: input.Message, Enabled: true}
+	err := s.q.ScheduledJob.WithContext(ctx).Create(job)
 	return job.ID, err
 }
 
 func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) error {
-	return s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false).Error
+	job := s.q.ScheduledJob
+	_, err := job.WithContext(ctx).Where(job.ID.Eq(id)).Update(job.Enabled, false)
+	return err
 }
 
 func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, error) {
-	var jobs []ScheduledJob
-	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id ASC").Find(&jobs).Error; err != nil {
+	job := s.q.ScheduledJob
+	jobs, err := job.WithContext(ctx).Where(job.Enabled.Is(true)).Order(job.ID).Find()
+	if err != nil {
 		return nil, err
 	}
 	out := make([]scheduler.Job, 0, len(jobs))
@@ -193,7 +231,7 @@ func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, e
 			Type:      job.Type,
 			GroupID:   job.GroupID,
 			Message:   job.Message,
-			TimeHHMM:  job.TimeHHMM,
+			TimeHHMM:  job.TimeHhmm,
 			Enabled:   job.Enabled,
 			LastRunAt: job.LastRunAt,
 		})
@@ -206,7 +244,105 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 	if disable {
 		updates["enabled"] = false
 	}
-	return s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Updates(updates).Error
+	job := s.q.ScheduledJob
+	_, err := job.WithContext(ctx).Where(job.ID.Eq(id)).Updates(updates)
+	return err
+}
+
+func knowledgeEntriesFromModels(entries []*storagemodel.KnowledgeEntry) []KnowledgeEntry {
+	out := make([]KnowledgeEntry, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, knowledgeEntryFromModel(entry))
+	}
+	return out
+}
+
+func knowledgeEntryToModel(entry KnowledgeEntry) *storagemodel.KnowledgeEntry {
+	return &storagemodel.KnowledgeEntry{
+		ID:                entry.ID,
+		SourceKey:         entry.SourceKey,
+		Keyword:           entry.Keyword,
+		EntryType:         entry.EntryType,
+		Path:              stringPtr(entry.Path),
+		AliasesJSON:       stringPtr(entry.AliasesJSON),
+		Category:          stringPtr(entry.Category),
+		TagsJSON:          stringPtr(entry.TagsJSON),
+		Answer:            entry.Answer,
+		Content:           entry.Content,
+		Enabled:           entry.Enabled,
+		ExactReply:        entry.ExactReply,
+		AiEnabled:         entry.AIEnabled,
+		ContentHash:       entry.ContentHash,
+		VectorStatus:      entry.VectorStatus,
+		VectorContentHash: stringPtr(entry.VectorContentHash),
+		VectorSyncedAt:    entry.VectorSyncedAt,
+		LastImportRunID:   uint64Ptr(entry.LastImportRunID),
+		SourceUpdatedAt:   entry.SourceUpdatedAt,
+		CreatedAt:         timePtr(entry.CreatedAt),
+		UpdatedAt:         timePtr(entry.UpdatedAt),
+	}
+}
+
+func knowledgeEntryFromModel(entry *storagemodel.KnowledgeEntry) KnowledgeEntry {
+	if entry == nil {
+		return KnowledgeEntry{}
+	}
+	return KnowledgeEntry{
+		ID:                entry.ID,
+		SourceKey:         entry.SourceKey,
+		Keyword:           entry.Keyword,
+		EntryType:         entry.EntryType,
+		Path:              stringFromPtr(entry.Path),
+		AliasesJSON:       stringFromPtr(entry.AliasesJSON),
+		Category:          stringFromPtr(entry.Category),
+		TagsJSON:          stringFromPtr(entry.TagsJSON),
+		Answer:            entry.Answer,
+		Content:           entry.Content,
+		Enabled:           entry.Enabled,
+		ExactReply:        entry.ExactReply,
+		AIEnabled:         entry.AiEnabled,
+		ContentHash:       entry.ContentHash,
+		VectorStatus:      entry.VectorStatus,
+		VectorContentHash: stringFromPtr(entry.VectorContentHash),
+		VectorSyncedAt:    entry.VectorSyncedAt,
+		LastImportRunID:   uint64FromPtr(entry.LastImportRunID),
+		SourceUpdatedAt:   entry.SourceUpdatedAt,
+		CreatedAt:         timeFromPtr(entry.CreatedAt),
+		UpdatedAt:         timeFromPtr(entry.UpdatedAt),
+	}
+}
+
+func stringFromPtr(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func uint64FromPtr(value *uint64) uint64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
+}
+
+func timeFromPtr(value *time.Time) time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	return *value
+}
+
+func timePtr(value time.Time) *time.Time {
+	return &value
 }
 
 func hashContent(content string) string {

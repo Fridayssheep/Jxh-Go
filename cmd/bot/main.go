@@ -59,6 +59,7 @@ func main() {
 			ShareURL:  cfg.WPS.ShareURL,
 			SID:       cfg.WPS.SID,
 			CacheFile: cfg.WPS.CacheFile,
+			Timeout:   time.Duration(cfg.WPS.TimeoutSec) * time.Second,
 		},
 		Sheet: cfg.WPS.Sheet,
 		Store: store,

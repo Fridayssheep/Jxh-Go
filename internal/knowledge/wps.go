@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,13 +17,18 @@ type WPSClient struct {
 	ShareURL  string
 	SID       string
 	CacheFile string
+	Timeout   time.Duration
 	HTTP      *http.Client
 }
 
 func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 	client := c.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		timeout := c.Timeout
+		if timeout <= 0 {
+			timeout = 120 * time.Second
+		}
+		client = &http.Client{Timeout: timeout}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.ShareURL, nil)
 	if err != nil {
@@ -34,7 +40,7 @@ func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, wrapWPSError("share request", client.Timeout, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -59,7 +65,7 @@ func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 	}
 	resp, err = client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, wrapWPSError("file download", client.Timeout, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -73,6 +79,16 @@ func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	return data, c.save(data)
+}
+
+func wrapWPSError(stage string, timeout time.Duration, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) {
+		if timeout > 0 {
+			return fmt.Errorf("wps %s timed out after %s; WPS may be slow or temporarily unavailable, retry later or increase wps.timeout_sec: %w", stage, timeout, err)
+		}
+		return fmt.Errorf("wps %s timed out; WPS may be slow or temporarily unavailable: %w", stage, err)
+	}
+	return err
 }
 
 func ensureXLSX(data []byte) error {

@@ -37,6 +37,8 @@ wps:
   sheet: "release"
   # 下载后的 xlsx 本地缓存路径，便于排查导入问题。
   cache_file: "./data/cache/knowledge.xlsx"
+  # WPS 请求超时时间，单位秒。WPS 导出接口偶尔较慢，过短会导致 /reload 等待响应头超时。
+  timeout_sec: 120
   # 启动时是否自动从 WPS 同步一次知识库。share_url 为空时不会同步。
   sync_on_start: true
 

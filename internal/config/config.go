@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strconv"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -47,6 +48,7 @@ type WPSConfig struct {
 	SID         string `yaml:"sid"`
 	Sheet       string `yaml:"sheet"`
 	CacheFile   string `yaml:"cache_file"`
+	TimeoutSec  int    `yaml:"timeout_sec"`
 	SyncOnStart bool   `yaml:"sync_on_start"`
 }
 
@@ -145,6 +147,7 @@ func Default() Config {
 		WPS: WPSConfig{
 			Sheet:       "release",
 			CacheFile:   "./data/cache/knowledge.xlsx",
+			TimeoutSec:  120,
 			SyncOnStart: true,
 		},
 		Database: DatabaseConfig{
@@ -195,6 +198,11 @@ func applyEnv(cfg *Config) {
 	override("JXH_ONEBOT_TOKEN", func(v string) { cfg.OneBot.AccessToken = v })
 	override("JXH_ONEBOT_WS_URL", func(v string) { cfg.OneBot.WSURL = v })
 	override("JXH_WPS_SID", func(v string) { cfg.WPS.SID = v })
+	override("JXH_WPS_TIMEOUT_SEC", func(v string) {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.WPS.TimeoutSec = parsed
+		}
+	})
 	override("JXH_MYSQL_PASSWORD", func(v string) { cfg.Database.Password = v })
 	override("JXH_MYSQL_DSN", func(v string) { cfg.Database.DSN = v })
 	override("JXH_AI_PROVIDER", func(v string) { cfg.AI.Provider = v })
@@ -211,6 +219,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.WPS.Sheet == "" {
 		cfg.WPS.Sheet = "release"
+	}
+	if cfg.WPS.TimeoutSec <= 0 {
+		cfg.WPS.TimeoutSec = 120
 	}
 	if cfg.OneBot.APITimeoutSec <= 0 {
 		cfg.OneBot.APITimeoutSec = 30

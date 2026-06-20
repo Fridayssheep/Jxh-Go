@@ -164,7 +164,11 @@ go run ./cmd/bot -config config.yaml
 | `JXH_ONEBOT_WS_URL` | NapCat 正向 WebSocket 地址 |
 | `JXH_WPS_SID` | WPS 登录态 sid |
 | `JXH_WPS_TIMEOUT_SEC` | WPS 请求超时时间 |
-| `JXH_MYSQL_PASSWORD` | MySQL 密码 |
+| `MYSQL_DATABASE` | MySQL 数据库名，compose 部署使用 |
+| `MYSQL_USER` | MySQL 用户名，compose 部署使用 |
+| `MYSQL_PASSWORD` | MySQL 密码，compose 部署使用 |
+| `MYSQL_ROOT_PASSWORD` | MySQL root 密码，compose 部署使用 |
+| `JXH_MYSQL_PASSWORD` | bot 直连运行时的 MySQL 密码；compose 部署通常用 `MYSQL_PASSWORD` |
 | `JXH_MYSQL_DSN` | 完整 MySQL DSN，设置后优先使用 |
 | `JXH_AI_PROVIDER` | ChatModel 提供方，支持 `openai`、`ark` |
 | `JXH_AI_BASE_URL` | ChatModel base URL |

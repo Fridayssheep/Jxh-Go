@@ -4,10 +4,10 @@ services:
     container_name: jxh-mysql
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: jxh_bot
-      MYSQL_USER: jxh
-      MYSQL_PASSWORD: ${JXH_MYSQL_PASSWORD:-jxh_password}
-      MYSQL_ROOT_PASSWORD: ${JXH_MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-jxh_bot}
+      MYSQL_USER: ${MYSQL_USER:-jxh}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-jxh_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
     ports:
       - "3306:3306"
     volumes:
@@ -58,7 +58,7 @@ services:
     environment:
       JXH_ONEBOT_WS_URL: ws://napcat:3001
       JXH_ONEBOT_TOKEN: ${JXH_ONEBOT_TOKEN:-change-me}
-      JXH_MYSQL_DSN: ${JXH_MYSQL_DSN:-jxh:${JXH_MYSQL_PASSWORD:-jxh_password}@tcp(mysql:3306)/jxh_bot?charset=utf8mb4&parseTime=True&loc=Local}
+      JXH_MYSQL_DSN: ${JXH_MYSQL_DSN:-${MYSQL_USER:-jxh}:${MYSQL_PASSWORD:-jxh_password}@tcp(mysql:3306)/${MYSQL_DATABASE:-jxh_bot}?charset=utf8mb4&parseTime=True&loc=Local}
       JXH_QUOTE_BASE_URL: http://quote:5000
       JXH_WPS_SHARE_URL: ${JXH_WPS_SHARE_URL:-}
       JXH_WPS_SID: ${JXH_WPS_SID:-}

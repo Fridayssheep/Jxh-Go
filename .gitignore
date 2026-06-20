@@ -1,5 +1,6 @@
 .serena
 
+.env
 data/cache/knowledge.xlsx
 config.yaml
 data/mysql/

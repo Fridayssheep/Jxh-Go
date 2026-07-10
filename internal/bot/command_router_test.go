@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
+	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/knowledge"
 )
 
 type recordingSender struct {
@@ -62,8 +64,8 @@ func TestGroupCommandRouterIgnoresBareSlashCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	if handled {
-		t.Fatal("Handle handled bare /test without mentioning self")
+	if !handled {
+		t.Fatal("Handle did not swallow bare /test without mentioning self")
 	}
 	if sender.text != "" {
 		t.Fatalf("sent text = %q, want no response", sender.text)
@@ -86,8 +88,36 @@ func TestGroupCommandRouterIgnoresCommandWhenMentioningAnotherUser(t *testing.T)
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	if handled {
-		t.Fatal("Handle handled /test even though the message mentions another user")
+	if !handled {
+		t.Fatal("Handle did not swallow /test when the message mentions another user")
+	}
+	if sender.text != "" {
+		t.Fatalf("sent text = %q, want no response", sender.text)
+	}
+}
+
+func TestPipelineSwallowsBareSlashCommandBeforeKnowledgeLookup(t *testing.T) {
+	knowledgeCache := cache.NewKnowledge()
+	knowledgeCache.Replace(knowledge.NewKeywordIndex([]knowledge.Entry{{
+		SourceKey:  "slash-test",
+		Keyword:    "/test",
+		Answer:     "不应该触发",
+		Enabled:    true,
+		ExactReply: true,
+	}}))
+	sender := &recordingSender{}
+	pipeline := NewPipeline(Options{
+		Knowledge: knowledgeCache,
+		Sender:    sender,
+	})
+
+	err := pipeline.HandleGroupMessage(context.Background(), GroupMessage{
+		GroupID: 123,
+		Text:    "/test",
+	})
+
+	if err != nil {
+		t.Fatalf("HandleGroupMessage returned error: %v", err)
 	}
 	if sender.text != "" {
 		t.Fatalf("sent text = %q, want no response", sender.text)
@@ -130,8 +160,8 @@ func TestGroupCommandRouterIgnoresBareAICommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	if handled {
-		t.Fatal("Handle handled bare /ai without mentioning self")
+	if !handled {
+		t.Fatal("Handle did not swallow bare /ai without mentioning self")
 	}
 	if sender.text != "" {
 		t.Fatalf("sent text = %q, want no response", sender.text)
@@ -262,6 +292,48 @@ func TestGroupCommandRouterRejectsBanWhenNotAuthorized(t *testing.T) {
 		t.Fatalf("ban was requested for unauthorized user: %d", sender.bannedUserID)
 	}
 	if sender.text != "~你好像没有权限执行该项操作耶~" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+type countingAdminStore struct {
+	*commands.MemoryAdminStore
+	isAdminCalls int
+}
+
+func (s *countingAdminStore) IsAdmin(ctx context.Context, userID int64) (bool, error) {
+	s.isAdminCalls++
+	return s.MemoryAdminStore.IsAdmin(ctx, userID)
+}
+
+func TestGroupCommandRouterChecksPermissionOnceForRegularAdminCommand(t *testing.T) {
+	sender := &recordingModerator{}
+	store := &countingAdminStore{MemoryAdminStore: commands.NewMemoryAdminStore()}
+	if err := store.AddAdmin(context.Background(), 456); err != nil {
+		t.Fatalf("AddAdmin returned error: %v", err)
+	}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(store),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 所有管理员",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle /admin 所有管理员")
+	}
+	if store.isAdminCalls != 1 {
+		t.Fatalf("IsAdmin calls = %d, want 1", store.isAdminCalls)
+	}
+	if sender.text != "当前管理员：456" {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 }

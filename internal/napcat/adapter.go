@@ -117,16 +117,7 @@ func (s Server) handleEvent(ctx context.Context, client *napcatsdk.Client, ev ev
 		if err := markGroupMessageRead(ctx, client, e); err != nil {
 			log.Printf("mark group message as read failed: %v", err)
 		}
-		return s.Handler.HandleGroupMessage(ctx, bot.GroupMessage{
-			GroupID:        e.GroupID,
-			UserID:         e.UserID,
-			Text:           e.Message.Text(),
-			RawMessage:     e.RawMessage,
-			MessageID:      e.MessageID,
-			ReplyMessageID: extractReplyID(e.Message),
-			IsSelf:         e.UserID == e.SelfID(),
-			AtUsers:        extractAtUsers(e.Message),
-		})
+		return s.Handler.HandleGroupMessage(ctx, toGroupMessage(e))
 	case *event.UnknownEvent:
 		var notice struct {
 			PostType   string `json:"post_type"`
@@ -142,6 +133,21 @@ func (s Server) handleEvent(ctx context.Context, client *napcatsdk.Client, ev ev
 		}
 	}
 	return nil
+}
+
+func toGroupMessage(e *event.GroupMessage) bot.GroupMessage {
+	return bot.GroupMessage{
+		GroupID:        e.GroupID,
+		UserID:         e.UserID,
+		SelfID:         e.SelfID(),
+		Text:           e.Message.Text(),
+		RawMessage:     e.RawMessage,
+		MessageID:      e.MessageID,
+		ReplyMessageID: extractReplyID(e.Message),
+		IsSelf:         e.UserID == e.SelfID(),
+		IsOwner:        e.Sender.Role == "owner",
+		AtUsers:        extractAtUsers(e.Message),
+	}
 }
 
 func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *event.GroupMessage) error {

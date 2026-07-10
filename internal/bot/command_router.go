@@ -33,6 +33,9 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		return false, nil
 	}
 	text := strings.TrimSpace(msg.Text)
+	if isSlashCommand(text) && !mentionsSelf(msg) {
+		return false, nil
+	}
 	switch {
 	case text == "/test":
 		return true, sender.SendGroupText(ctx, msg.GroupID, "精小弘正常")
@@ -47,6 +50,22 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	default:
 		return false, nil
 	}
+}
+
+func isSlashCommand(text string) bool {
+	return strings.HasPrefix(text, "/")
+}
+
+func mentionsSelf(msg GroupMessage) bool {
+	if msg.SelfID == 0 {
+		return false
+	}
+	for _, user := range msg.AtUsers {
+		if user == msg.SelfID {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *GroupCommandRouter) handleReload(ctx context.Context, msg GroupMessage, sender Sender) error {
@@ -106,7 +125,22 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 }
 
 func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	if r.admin == nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
+	}
 	adminText := strings.TrimSpace(strings.TrimPrefix(text, "/admin"))
+	adminInput := commands.AdminInput{
+		ActorID: msg.UserID,
+		Text:    adminText,
+		AtUsers: targetAtUsers(msg),
+		IsOwner: msg.IsOwner,
+	}
+	if resp, err := r.admin.PermissionMessage(ctx, adminInput); resp != "" || err != nil {
+		if err != nil {
+			return err
+		}
+		return sender.SendGroupText(ctx, msg.GroupID, resp)
+	}
 	if adminText == "restart" {
 		moderator, ok := sender.(Moderator)
 		if !ok {
@@ -122,31 +156,37 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		if !ok {
 			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 管理接口未初始化")
 		}
-		if len(msg.AtUsers) == 0 {
+		atUsers := targetAtUsers(msg)
+		if len(atUsers) == 0 {
 			return sender.SendGroupText(ctx, msg.GroupID, "请 @ 要禁言的用户")
 		}
 		duration, err := parseBanDuration(strings.TrimSpace(strings.TrimPrefix(adminText, "ban ")))
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "禁言时间格式不正确")
 		}
-		if err := moderator.SetGroupBan(ctx, msg.GroupID, msg.AtUsers[0], duration); err != nil {
+		if err := moderator.SetGroupBan(ctx, msg.GroupID, atUsers[0], duration); err != nil {
 			return err
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
 	}
-	if r.admin == nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
-	}
-	resp, err := r.admin.Handle(ctx, commands.AdminInput{
-		ActorID: msg.UserID,
-		Text:    adminText,
-		AtUsers: msg.AtUsers,
-		IsOwner: msg.IsOwner,
-	})
+	resp, err := r.admin.Handle(ctx, adminInput)
 	if err != nil {
 		return err
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, resp)
+}
+
+func targetAtUsers(msg GroupMessage) []int64 {
+	if msg.SelfID == 0 {
+		return msg.AtUsers
+	}
+	out := make([]int64, 0, len(msg.AtUsers))
+	for _, user := range msg.AtUsers {
+		if user != msg.SelfID {
+			out = append(out, user)
+		}
+	}
+	return out
 }
 
 func parseBanDuration(raw string) (time.Duration, error) {

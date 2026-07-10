@@ -176,6 +176,9 @@ go run ./cmd/bot -config config.yaml
 | `JXH_AI_BASE_URL` | ChatModel base URL |
 | `JXH_AI_API_KEY` | ChatModel API Key |
 | `JXH_AI_MODEL` | ChatModel 模型名；openai 填模型名，ark 填方舟推理接入点 ID |
+| `QUOTE_TZ` | 引用图服务时区，默认 `Asia/Shanghai` |
+| `QUOTE_POOL_SIZE` | 引用图 Chromium 渲染池大小，默认 `4` |
+| `QQ_QUOTE_REF` | 构建引用图服务使用的 `Penryn/qq-quote-generator` 分支或 tag |
 
 AI 行为：
 
@@ -185,13 +188,7 @@ AI 行为：
 
 ## 引用图服务
 
-引用图服务默认不启动。需要 `/q` 时执行：
-
-```bash
-docker compose --profile quote up -d quote
-```
-
-compose 内 bot 对应配置：
+配置引用图服务:
 
 ```yaml
 quote:

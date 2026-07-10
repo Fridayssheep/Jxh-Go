@@ -135,13 +135,11 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		AtUsers: targetAtUsers(msg),
 		IsOwner: msg.IsOwner,
 	}
-	if needsRouterAdminPermission(adminText) {
-		if resp, err := r.admin.PermissionMessage(ctx, adminInput); resp != "" || err != nil {
-			if err != nil {
-				return err
-			}
-			return sender.SendGroupText(ctx, msg.GroupID, resp)
+	if resp, err := r.admin.PermissionMessage(ctx, adminInput); resp != "" || err != nil {
+		if err != nil {
+			return err
 		}
+		return sender.SendGroupText(ctx, msg.GroupID, resp)
 	}
 	if adminText == "restart" {
 		moderator, ok := sender.(Moderator)
@@ -171,15 +169,11 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
 	}
-	resp, err := r.admin.Handle(ctx, adminInput)
+	resp, err := r.admin.ExecuteAuthorized(ctx, adminInput)
 	if err != nil {
 		return err
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, resp)
-}
-
-func needsRouterAdminPermission(adminText string) bool {
-	return adminText == "restart" || strings.HasPrefix(adminText, "ban ")
 }
 
 func targetAtUsers(msg GroupMessage) []int64 {

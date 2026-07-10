@@ -79,6 +79,11 @@ func (h *AdminHandler) Handle(ctx context.Context, input AdminInput) (string, er
 	if msg, err := h.PermissionMessage(ctx, input); msg != "" || err != nil {
 		return msg, err
 	}
+	return h.ExecuteAuthorized(ctx, input)
+}
+
+// 在admin执行命令鉴权
+func (h *AdminHandler) ExecuteAuthorized(ctx context.Context, input AdminInput) (string, error) {
 	text := strings.TrimSpace(input.Text)
 	switch {
 	case text == "添加管理员":

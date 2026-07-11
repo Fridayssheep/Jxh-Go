@@ -11,19 +11,19 @@ RUN git clone --depth 1 --branch "${QQ_QUOTE_REF}" "${QQ_QUOTE_REPO}" .
 RUN go mod download
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/qq-quote-go .
 
-FROM debian:trixie-slim
+FROM alpine:3.19
 
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        chromium \
-        fonts-freefont-ttf \
-        fonts-noto-cjk \
-        tzdata \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+    ca-certificates \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ttf-freefont \
+    font-noto-cjk \
+    tzdata
 
-ENV ROD_BROWSER_BIN=/usr/bin/chromium
+ENV ROD_BROWSER_BIN=/usr/bin/chromium-browser
 ENV TZ=Asia/Shanghai
 ENV POOL_SIZE=4
 ENV PORT=5000

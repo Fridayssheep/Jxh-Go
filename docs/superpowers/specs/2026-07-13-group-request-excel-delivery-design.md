@@ -67,6 +67,8 @@ NapCat 上传失败时回复：
 
 不使用 `send_online_file`，因为当前 SDK 的该接口只接受 `user_id`，用于私聊文件，不支持群聊目标。
 
+NapCat 进程负责读取 `File` 路径。镜像 entrypoint 启动 QQ 前会切换到 `/app/napcat`，因此 Compose 将宿主机 `./data/exports` 挂载到 NapCat 的 `/app/napcat/data/exports:ro`。bot 容器仍通过 `./data:/app/data` 写入同一宿主目录，双方使用相对路径 `data/exports/...` 访问同一文件。
+
 ## 错误处理
 
 - Excel 生成失败：保持现有行为，返回错误，不尝试上传。
@@ -87,5 +89,6 @@ NapCat 上传失败时回复：
 
 - 自动化测试通过。
 - Docker bot 镜像构建成功。
+- Compose 展开配置中 NapCat 对 `/app/napcat/data/exports` 的挂载为只读。
 - 使用真实 NapCat 时，命令生成 Excel 并在当前群产生可下载的群文件通知或卡片。
 - 上传失败不会删除导出的 Excel，群内反馈包含可排查的错误信息和本地路径。

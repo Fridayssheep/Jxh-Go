@@ -7,10 +7,36 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/zjutjh/jxh-go/internal/bot"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
+	"github.com/zjutjh/napcat-sdk/api"
 	"github.com/zjutjh/napcat-sdk/event"
 	"github.com/zjutjh/napcat-sdk/message"
 )
+
+type recordingHandler struct {
+	groupRequest grouprequest.Record
+}
+
+func (h *recordingHandler) HandleGroupMessage(ctx context.Context, msg bot.GroupMessage) error {
+	_ = ctx
+	_ = msg
+	return nil
+}
+
+func (h *recordingHandler) HandleGroupIncrease(ctx context.Context, groupID int64, userID int64) error {
+	_ = ctx
+	_ = groupID
+	_ = userID
+	return nil
+}
+
+func (h *recordingHandler) HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
+	_ = ctx
+	h.groupRequest = record
+	return nil
+}
 
 func TestToGroupMessageMarksOwnerAndExtractsMentions(t *testing.T) {
 	ev := &event.GroupMessage{
@@ -41,6 +67,71 @@ func TestToGroupMessageMarksOwnerAndExtractsMentions(t *testing.T) {
 	}
 	if msg.Text != "/test" {
 		t.Fatalf("Text = %q, want /test", msg.Text)
+	}
+}
+
+func TestHandleEventRecordsGroupJoinRequest(t *testing.T) {
+	raw := []byte(`{"time":1780000000,"post_type":"request","request_type":"group","sub_type":"add","self_id":999,"group_id":1001,"user_id":2002,"comment":"申请入群","flag":"flag-1"}`)
+	handler := &recordingHandler{}
+	server := Server{Handler: handler}
+
+	err := server.handleEvent(context.Background(), nil, &event.UnknownEvent{Base: event.Base{
+		EventTime:     1780000000,
+		EventPostType: "request",
+		EventSelfID:   999,
+		RawData:       raw,
+	}})
+
+	if err != nil {
+		t.Fatalf("handleEvent returned error: %v", err)
+	}
+	if handler.groupRequest.RequestKey != "flag-1" {
+		t.Fatalf("recorded request = %+v", handler.groupRequest)
+	}
+}
+
+func TestSDKSenderUploadsGroupFile(t *testing.T) {
+	var request api.UploadGroupFileRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/upload_group_file" {
+			t.Errorf("path = %q, want /upload_group_file", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","retcode":0,"data":{"file_id":"file-1"}}`))
+	}))
+	defer server.Close()
+
+	client, err := napcatsdk.NewHTTPClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewHTTPClient returned error: %v", err)
+	}
+	sender := SDKSender{client: client}
+
+	err = sender.UploadGroupFile(context.Background(), 123, "data/exports/group_requests/test.xlsx", "test.xlsx")
+
+	if err != nil {
+		t.Fatalf("UploadGroupFile returned error: %v", err)
+	}
+	if request.GroupID != "123" {
+		t.Fatalf("group id = %q, want 123", request.GroupID)
+	}
+	if request.File != "data/exports/group_requests/test.xlsx" {
+		t.Fatalf("file = %q", request.File)
+	}
+	if request.Name != "test.xlsx" {
+		t.Fatalf("name = %q, want test.xlsx", request.Name)
+	}
+	if !request.UploadFile {
+		t.Fatal("upload_file = false, want true")
+	}
+	if request.Folder != "" || request.FolderID != "" {
+		t.Fatalf("folder/folder_id = %q/%q, want root", request.Folder, request.FolderID)
 	}
 }
 

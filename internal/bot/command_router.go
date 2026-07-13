@@ -3,31 +3,47 @@ package bot
 import (
 	"context"
 	"fmt"
+	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/triggerstats"
 )
 
 type GroupCommandRouter struct {
-	ai       *ai.Service
-	reloader Reloader
-	admin    *commands.AdminHandler
-	quote    QuoteGenerator
+	ai            *ai.Service
+	reloader      Reloader
+	admin         *commands.AdminHandler
+	quote         QuoteGenerator
+	groupRequests *grouprequest.Service
+	triggerStats  *triggerstats.Service
 }
 
 const maxQuoteMessages = 10
 
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	return &GroupCommandRouter{
-		ai:       opts.AI,
-		reloader: opts.Reloader,
-		admin:    opts.Admin,
-		quote:    opts.Quote,
+		ai:            opts.AI,
+		reloader:      opts.Reloader,
+		admin:         opts.Admin,
+		quote:         opts.Quote,
+		groupRequests: opts.GroupRequests,
+		triggerStats:  opts.TriggerStats,
 	}
+}
+
+type GroupRequestFetcher interface {
+	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
+}
+
+type GroupFileUploader interface {
+	UploadGroupFile(ctx context.Context, groupID int64, path, name string) error
 }
 
 func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
@@ -140,9 +156,25 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	if r.ai == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, ai.DisabledAnswer)
 	}
-	answer, err := r.ai.Answer(ctx, question)
+	answer, docs, err := r.ai.AnswerWithDocuments(ctx, question)
 	if err != nil {
 		return err
+	}
+	if r.triggerStats != nil {
+		for _, doc := range docs {
+			if err := r.triggerStats.RecordAIRetrieval(ctx, triggerstats.AIRetrievalInput{
+				SourceKey: doc.ID,
+				Keyword:   doc.Metadata["keyword"],
+				GroupID:   msg.GroupID,
+				UserID:    msg.UserID,
+				MessageID: msg.MessageID,
+				Question:  question,
+				Score:     doc.Score,
+			}); err != nil {
+				// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
+				log.Printf("record ai retrieval trigger failed: %v", err)
+			}
+		}
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, answer)
 }
@@ -163,6 +195,12 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 			return err
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, resp)
+	}
+	if strings.HasPrefix(adminText, "群申请 ") {
+		return r.handleGroupRequestAdmin(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "群申请 ")))
+	}
+	if strings.HasPrefix(adminText, "词条统计") {
+		return r.handleTriggerStats(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "词条统计")))
 	}
 	if adminText == "restart" {
 		moderator, ok := sender.(Moderator)
@@ -199,6 +237,70 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 	return sender.SendGroupText(ctx, msg.GroupID, resp)
 }
 
+func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	if r.groupRequests == nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "群申请登记未初始化")
+	}
+	switch {
+	case strings.HasPrefix(text, "导出"):
+		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "导出")))
+		if err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [全部|最近N]")
+		}
+		result, err := r.groupRequests.Export(ctx, limit)
+		if err != nil {
+			return err
+		}
+		uploader, ok := sender.(GroupFileUploader)
+		if !ok {
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但群文件上传接口未初始化。文件保存在：%s", result.Count, result.Path))
+		}
+		if err := uploader.UploadGroupFile(ctx, msg.GroupID, result.Path, filepath.Base(result.Path)); err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但上传群文件失败：%v。文件保存在：%s", result.Count, err, result.Path))
+		}
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，Excel 已发送到群文件", result.Count))
+	case strings.HasPrefix(text, "同步"):
+		fetcher, ok := sender.(GroupRequestFetcher)
+		if !ok {
+			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 群申请接口未初始化")
+		}
+		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "同步")))
+		if err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 同步 [数量]")
+		}
+		if limit <= 0 {
+			limit = 20
+		}
+		records, err := fetcher.FetchGroupJoinRequests(ctx, limit)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if err := r.groupRequests.Record(ctx, record); err != nil {
+				return err
+			}
+		}
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已同步群申请 %d 条", len(records)))
+	default:
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 <同步|导出>")
+	}
+}
+
+func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	if r.triggerStats == nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "词条统计未初始化")
+	}
+	since, err := parseStatsSince(text, time.Now())
+	if err != nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 词条统计 [7d|30d|全部]")
+	}
+	summaries, err := r.triggerStats.Summaries(ctx, since, 10)
+	if err != nil {
+		return err
+	}
+	return sender.SendGroupText(ctx, msg.GroupID, triggerstats.FormatSummaries(summaries))
+}
+
 func targetAtUsers(msg GroupMessage) []int64 {
 	if msg.SelfID == 0 {
 		return msg.AtUsers
@@ -225,4 +327,36 @@ func parseBanDuration(raw string) (time.Duration, error) {
 		return 0, err
 	}
 	return time.Duration(seconds) * time.Second, nil
+}
+
+func parseOptionalLimit(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "全部" {
+		return 0, nil
+	}
+	raw = strings.TrimPrefix(raw, "最近")
+	limit, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || limit < 0 {
+		return 0, fmt.Errorf("invalid limit")
+	}
+	return limit, nil
+}
+
+func parseStatsSince(raw string, now time.Time) (*time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "7d"
+	}
+	if raw == "全部" {
+		return nil, nil
+	}
+	if !strings.HasSuffix(raw, "d") {
+		return nil, fmt.Errorf("invalid range")
+	}
+	days, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
+	if err != nil || days <= 0 {
+		return nil, fmt.Errorf("invalid range")
+	}
+	since := now.Add(-time.Duration(days) * 24 * time.Hour)
+	return &since, nil
 }

@@ -85,36 +85,41 @@ func NewService(opts Options) *Service {
 }
 
 func (s *Service) Answer(ctx context.Context, question string) (string, error) {
+	answer, _, err := s.AnswerWithDocuments(ctx, question)
+	return answer, err
+}
+
+func (s *Service) AnswerWithDocuments(ctx context.Context, question string) (string, []Document, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
-		return EmptyKnowledgeAnswer, nil
+		return EmptyKnowledgeAnswer, nil, nil
 	}
 	if len([]rune(question)) > s.maxQuestionChars {
 		question = string([]rune(question)[:s.maxQuestionChars])
 	}
 	if s.retriever == nil {
-		return EmptyKnowledgeAnswer, nil
+		return EmptyKnowledgeAnswer, nil, nil
 	}
 	docs, err := s.retriever.Retrieve(ctx, question, s.topK)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(docs) == 0 {
-		return EmptyKnowledgeAnswer, nil
+		return EmptyKnowledgeAnswer, nil, nil
 	}
 	prompt := BuildPrompt(question, docs)
 	if s.chat == nil {
-		return EmptyKnowledgeAnswer, nil
+		return EmptyKnowledgeAnswer, docs, nil
 	}
 	answer, err := s.chat.Generate(ctx, prompt)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	answer = strings.TrimSpace(answer)
 	if answer == "" {
-		return EmptyKnowledgeAnswer, nil
+		return EmptyKnowledgeAnswer, docs, nil
 	}
-	return answer, nil
+	return answer, docs, nil
 }
 
 func BuildPrompt(question string, docs []Document) string {

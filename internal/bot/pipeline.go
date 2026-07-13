@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -9,7 +10,9 @@ import (
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/triggerstats"
 )
 
 type Sender interface {
@@ -47,13 +50,15 @@ type Moderator interface {
 }
 
 type Options struct {
-	Knowledge *cache.Knowledge
-	Sender    Sender
-	AI        *ai.Service
-	Reloader  Reloader
-	Blacklist Blacklist
-	Admin     *commands.AdminHandler
-	Quote     QuoteGenerator
+	Knowledge     *cache.Knowledge
+	Sender        Sender
+	AI            *ai.Service
+	Reloader      Reloader
+	Blacklist     Blacklist
+	Admin         *commands.AdminHandler
+	Quote         QuoteGenerator
+	GroupRequests *grouprequest.Service
+	TriggerStats  *triggerstats.Service
 }
 
 type Pipeline struct {
@@ -61,6 +66,8 @@ type Pipeline struct {
 	knowledge     *cache.Knowledge
 	sender        Sender
 	blacklist     Blacklist
+	groupRequests *grouprequest.Service
+	stats         *triggerstats.Service
 	commandRouter *GroupCommandRouter
 }
 
@@ -88,6 +95,8 @@ func NewPipeline(opts Options) *Pipeline {
 		knowledge:     opts.Knowledge,
 		sender:        opts.Sender,
 		blacklist:     opts.Blacklist,
+		groupRequests: opts.GroupRequests,
+		stats:         opts.TriggerStats,
 		commandRouter: NewGroupCommandRouter(opts),
 	}
 }
@@ -118,6 +127,19 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	}
 	if p.knowledge != nil {
 		if entry, ok := p.knowledge.Lookup(text); ok {
+			if p.stats != nil {
+				if err := p.stats.RecordKeywordReply(ctx, triggerstats.KeywordReplyInput{
+					SourceKey: entry.SourceKey,
+					Keyword:   entry.Keyword,
+					GroupID:   msg.GroupID,
+					UserID:    msg.UserID,
+					MessageID: msg.MessageID,
+					Text:      text,
+				}); err != nil {
+					// 统计是附加能力，失败时不能阻断原本的关键词回复。
+					log.Printf("record keyword reply trigger failed: %v", err)
+				}
+			}
 			return sender.SendGroupText(ctx, msg.GroupID, entry.Answer)
 		}
 	}
@@ -134,6 +156,13 @@ func (p *Pipeline) HandleGroupIncrease(ctx context.Context, groupID int64, userI
 		map[string]any{"type": "text", "data": map[string]any{"text": "欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单 哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"}},
 	}
 	return sender.SendGroupMessage(ctx, groupID, message)
+}
+
+func (p *Pipeline) HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
+	if p.groupRequests == nil {
+		return nil
+	}
+	return p.groupRequests.Record(ctx, record)
 }
 
 func (p *Pipeline) SendGroupText(ctx context.Context, groupID int64, text string) error {

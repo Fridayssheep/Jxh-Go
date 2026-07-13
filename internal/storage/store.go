@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
 	storagemodel "github.com/zjutjh/jxh-go/internal/storage/model"
@@ -234,6 +235,43 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 	return err
 }
 
+func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
+	model := groupJoinRequestToModel(record)
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "request_key"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"flag":         model.Flag,
+			"group_id":     model.GroupID,
+			"user_id":      model.UserID,
+			"student_id":   model.StudentID,
+			"student_name": model.StudentName,
+			"sub_type":     model.SubType,
+			"comment":      model.Comment,
+			"status":       model.Status,
+			"source":       model.Source,
+			"raw_json":     model.RawJSON,
+			"requested_at": model.RequestedAt,
+			"last_seen_at": model.LastSeenAt,
+		}),
+	}).Create(&model).Error
+}
+
+func (s *Store) ListGroupJoinRequests(ctx context.Context, limit int) ([]grouprequest.Record, error) {
+	var models []GroupJoinRequest
+	query := s.db.WithContext(ctx).Order("last_seen_at DESC").Order("id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&models).Error; err != nil {
+		return nil, err
+	}
+	records := make([]grouprequest.Record, 0, len(models))
+	for _, model := range models {
+		records = append(records, groupJoinRequestFromModel(model))
+	}
+	return records, nil
+}
+
 func knowledgeEntriesFromModels(entries []*storagemodel.KnowledgeEntry) []KnowledgeEntry {
 	out := make([]KnowledgeEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -365,4 +403,44 @@ func ToKnowledgeEntries(entries []KnowledgeEntry) []knowledge.Entry {
 		})
 	}
 	return out
+}
+
+func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
+	return GroupJoinRequest{
+		ID:          record.ID,
+		RequestKey:  record.RequestKey,
+		Flag:        record.Flag,
+		GroupID:     record.GroupID,
+		UserID:      record.UserID,
+		StudentID:   record.StudentID,
+		StudentName: record.StudentName,
+		SubType:     record.SubType,
+		Comment:     record.Comment,
+		Status:      record.Status,
+		Source:      record.Source,
+		RawJSON:     record.RawJSON,
+		RequestedAt: record.RequestedAt,
+		FirstSeenAt: record.FirstSeenAt,
+		LastSeenAt:  record.LastSeenAt,
+	}
+}
+
+func groupJoinRequestFromModel(model GroupJoinRequest) grouprequest.Record {
+	return grouprequest.Record{
+		ID:          model.ID,
+		RequestKey:  model.RequestKey,
+		Flag:        model.Flag,
+		GroupID:     model.GroupID,
+		UserID:      model.UserID,
+		StudentID:   model.StudentID,
+		StudentName: model.StudentName,
+		SubType:     model.SubType,
+		Comment:     model.Comment,
+		Status:      model.Status,
+		Source:      model.Source,
+		RawJSON:     model.RawJSON,
+		RequestedAt: model.RequestedAt,
+		FirstSeenAt: model.FirstSeenAt,
+		LastSeenAt:  model.LastSeenAt,
+	}
 }

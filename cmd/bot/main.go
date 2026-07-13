@@ -9,16 +9,19 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/bot"
 	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/config"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/napcat"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
 	"github.com/zjutjh/jxh-go/internal/storage"
+	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -82,13 +85,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("create ai service: %v", err)
 	}
+	triggerStats, closeTriggerStats, err := newTriggerStatsService(ctx, cfg)
+	if err != nil {
+		log.Fatalf("connect redis: %v", err)
+	}
+	defer closeTriggerStats()
+	groupRequests := grouprequest.NewService(store, grouprequest.Options{ExportDir: "./data/exports/group_requests"})
 	pipeline := bot.NewPipeline(bot.Options{
-		Knowledge: knowledgeCache,
-		AI:        aiSvc,
-		Blacklist: store,
-		Reloader:  knowledgeSync,
-		Admin:     commands.NewAdminHandler(store),
-		Quote:     quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
+		Knowledge:     knowledgeCache,
+		AI:            aiSvc,
+		Blacklist:     store,
+		Reloader:      knowledgeSync,
+		Admin:         commands.NewAdminHandler(store),
+		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
+		GroupRequests: groupRequests,
+		TriggerStats:  triggerStats,
 	})
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,
@@ -149,6 +160,27 @@ func newAIService(ctx context.Context, cfg config.Config, retriever ai.Retriever
 		TopK:             cfg.AI.TopK,
 		MaxQuestionChars: cfg.AI.MaxQuestionChars,
 	}), nil
+}
+
+func newTriggerStatsService(ctx context.Context, cfg config.Config) (*triggerstats.Service, func(), error) {
+	if cfg.Redis.Addr == "" {
+		return nil, func() {}, nil
+	}
+	client := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		_ = client.Close()
+		return nil, nil, err
+	}
+	store := triggerstats.NewRedisStore(client, triggerstats.RedisStoreOptions{
+		DailyRetention: time.Duration(cfg.Redis.DailyRetentionDays) * 24 * time.Hour,
+	})
+	return triggerstats.NewService(store, triggerstats.Options{}), func() { _ = client.Close() }, nil
 }
 
 type persistentDedupe struct {

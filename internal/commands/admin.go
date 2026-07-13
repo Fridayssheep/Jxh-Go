@@ -58,19 +58,32 @@ func NewAdminHandler(store AdminStore) *AdminHandler {
 	return &AdminHandler{store: store}
 }
 
-func (h *AdminHandler) Handle(ctx context.Context, input AdminInput) (string, error) {
+func (h *AdminHandler) PermissionMessage(ctx context.Context, input AdminInput) (string, error) {
 	if h.store == nil {
 		return "管理员存储未初始化", nil
 	}
-	if !input.IsOwner {
-		ok, err := h.store.IsAdmin(ctx, input.ActorID)
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "~你好像没有权限执行该项操作耶~", nil
-		}
+	if input.IsOwner {
+		return "", nil
 	}
+	ok, err := h.store.IsAdmin(ctx, input.ActorID)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "~你好像没有权限执行该项操作耶~", nil
+	}
+	return "", nil
+}
+
+func (h *AdminHandler) Handle(ctx context.Context, input AdminInput) (string, error) {
+	if msg, err := h.PermissionMessage(ctx, input); msg != "" || err != nil {
+		return msg, err
+	}
+	return h.ExecuteAuthorized(ctx, input)
+}
+
+// 在admin执行命令鉴权
+func (h *AdminHandler) ExecuteAuthorized(ctx context.Context, input AdminInput) (string, error) {
 	text := strings.TrimSpace(input.Text)
 	switch {
 	case text == "添加管理员":

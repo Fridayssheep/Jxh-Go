@@ -73,6 +73,7 @@ func (p *Pipeline) SetSender(sender Sender) {
 type GroupMessage struct {
 	GroupID        int64
 	UserID         int64
+	SelfID         int64
 	Text           string
 	RawMessage     string
 	MessageID      int64

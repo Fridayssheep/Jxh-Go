@@ -177,8 +177,7 @@ go run ./cmd/bot -config config.yaml
 | `JXH_AI_API_KEY` | ChatModel API Key |
 | `JXH_AI_MODEL` | ChatModel 模型名；openai 填模型名，ark 填方舟推理接入点 ID |
 | `QUOTE_TZ` | 引用图服务时区，默认 `Asia/Shanghai` |
-| `QUOTE_POOL_SIZE` | 引用图 Chromium 渲染池大小，默认 `4` |
-| `QQ_QUOTE_REF` | 构建引用图服务使用的 `Penryn/qq-quote-generator` 分支或 tag |
+| `QQ_QUOTE_REF` | 构建引用图服务使用的 `SugarMGP/qq-quote-generator` 分支或 tag，默认 `main` |
 
 AI 行为：
 
@@ -187,6 +186,8 @@ AI 行为：
 - `ai.provider: ark` 时，`ai.model` 填方舟推理接入点 ID，例如 `ep-xxxxxxxx`。
 
 ## 引用图服务
+
+引用图由 `SugarMGP/qq-quote-generator` 提供。该实现使用 SVG 和 resvg 生成 PNG，运行时不依赖 Chromium。
 
 配置引用图服务:
 

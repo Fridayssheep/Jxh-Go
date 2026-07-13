@@ -46,7 +46,6 @@ services:
     restart: unless-stopped
     environment:
       TZ: ${QUOTE_TZ:-Asia/Shanghai}
-      POOL_SIZE: ${QUOTE_POOL_SIZE:-4}
     ports:
       - "5000:5000"
 

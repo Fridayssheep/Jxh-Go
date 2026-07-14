@@ -116,14 +116,14 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 	}
 	text := strings.TrimSpace(msg.Text)
-	if text == "" {
-		return nil
-	}
 	if p.commandRouter != nil {
 		handled, err := p.commandRouter.Handle(ctx, msg, sender)
 		if handled || err != nil {
 			return err
 		}
+	}
+	if text == "" {
+		return nil
 	}
 	if p.knowledge != nil {
 		if entry, ok := p.knowledge.Lookup(text); ok {

@@ -10,6 +10,7 @@ import (
 type memoryTriggerStore struct {
 	events    []Event
 	summaries []Summary
+	since     *time.Time
 }
 
 func (s *memoryTriggerStore) RecordKnowledgeTrigger(ctx context.Context, event Event) error {
@@ -20,7 +21,7 @@ func (s *memoryTriggerStore) RecordKnowledgeTrigger(ctx context.Context, event E
 
 func (s *memoryTriggerStore) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]Summary, error) {
 	_ = ctx
-	_ = since
+	s.since = since
 	if limit > 0 && len(s.summaries) > limit {
 		return append([]Summary(nil), s.summaries[:limit]...), nil
 	}
@@ -86,6 +87,42 @@ func TestServiceBoundsLongEventKey(t *testing.T) {
 	}
 	if !strings.HasPrefix(event.EventKey, TriggerTypeAIRetrieval+":") {
 		t.Fatalf("EventKey = %q, want trigger type prefix", event.EventKey)
+	}
+}
+
+func TestServiceSummariesForDaysUsesInclusiveNaturalDays(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	now := time.Date(2026, 7, 10, 20, 30, 0, 0, location)
+	store := &memoryTriggerStore{}
+	service := NewService(store, Options{Now: func() time.Time { return now }})
+
+	if _, err := service.SummariesForDays(context.Background(), 7, 10); err != nil {
+		t.Fatalf("SummariesForDays returned error: %v", err)
+	}
+	want := time.Date(2026, 7, 4, 0, 0, 0, 0, location)
+	if store.since == nil || !store.since.Equal(want) {
+		t.Fatalf("since = %v, want %v", store.since, want)
+	}
+	if _, err := service.SummariesForDays(context.Background(), 30, 10); err != nil {
+		t.Fatalf("SummariesForDays returned error: %v", err)
+	}
+	want = time.Date(2026, 6, 11, 0, 0, 0, 0, location)
+	if store.since == nil || !store.since.Equal(want) {
+		t.Fatalf("30-day since = %v, want %v", store.since, want)
+	}
+}
+
+func TestServiceSummariesForDaysZeroUsesAllTime(t *testing.T) {
+	store := &memoryTriggerStore{}
+	service := NewService(store, Options{})
+	if _, err := service.SummariesForDays(context.Background(), 0, 10); err != nil {
+		t.Fatalf("SummariesForDays returned error: %v", err)
+	}
+	if store.since != nil {
+		t.Fatalf("since = %v, want nil", store.since)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,12 +28,18 @@ func (s *memoryGroupRequestStore) UpsertGroupJoinRequest(ctx context.Context, re
 	return nil
 }
 
-func (s *memoryGroupRequestStore) ListGroupJoinRequests(ctx context.Context, limit int) ([]Record, error) {
+func (s *memoryGroupRequestStore) ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]Record, error) {
 	_ = ctx
-	if limit > 0 && len(s.records) > limit {
-		return append([]Record(nil), s.records[:limit]...), nil
+	var records []Record
+	for _, record := range s.records {
+		if record.GroupID == groupID {
+			records = append(records, record)
+		}
 	}
-	return append([]Record(nil), s.records...), nil
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+	return append([]Record(nil), records...), nil
 }
 
 func TestRecordFromEventNormalizesGroupRequest(t *testing.T) {
@@ -121,6 +128,26 @@ func TestRecordFromEventLeavesUnlabeledStudentInfoEmpty(t *testing.T) {
 	}
 }
 
+func TestRecordsFromSystemMessagesMapsCheckedStatus(t *testing.T) {
+	records := RecordsFromSystemMessages([]map[string]any{
+		{"request_id": "pending", "group_id": 12345, "checked": false},
+		{"request_id": "observed", "group_id": 12345, "checked": true, "actor": 999},
+	}, nil, time.Now())
+
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2", len(records))
+	}
+	if records[0].Status != StatusPending {
+		t.Fatalf("pending status = %q", records[0].Status)
+	}
+	if records[1].Status != StatusSeen {
+		t.Fatalf("observed status = %q", records[1].Status)
+	}
+	if !strings.Contains(records[1].RawJSON, `"actor":999`) {
+		t.Fatalf("raw json did not preserve actor: %s", records[1].RawJSON)
+	}
+}
+
 func TestServiceExportsRequestsToXLSX(t *testing.T) {
 	now := time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local)
 	dir := t.TempDir()
@@ -145,7 +172,7 @@ func TestServiceExportsRequestsToXLSX(t *testing.T) {
 		Now:       func() time.Time { return now },
 	})
 
-	result, err := service.Export(context.Background(), 0)
+	result, err := service.Export(context.Background(), 12345, 0)
 
 	if err != nil {
 		t.Fatalf("Export returned error: %v", err)
@@ -184,5 +211,71 @@ func TestServiceExportsRequestsToXLSX(t *testing.T) {
 	}
 	if cell != "我是 24 级新生" {
 		t.Fatalf("G2 = %q, want comment", cell)
+	}
+}
+
+func TestServiceExportsOnlyRequestedGroup(t *testing.T) {
+	dir := t.TempDir()
+	store := &memoryGroupRequestStore{records: []Record{
+		{ID: 1, RequestKey: "group-1", GroupID: 1001, StudentID: "10000001"},
+		{ID: 2, RequestKey: "group-2", GroupID: 2002, StudentID: "20000002"},
+	}}
+	service := NewService(store, Options{ExportDir: dir})
+
+	result, err := service.Export(context.Background(), 1001, 0)
+	if err != nil {
+		t.Fatalf("Export returned error: %v", err)
+	}
+	if result.Count != 1 {
+		t.Fatalf("exported count = %d, want 1", result.Count)
+	}
+	f, err := excelize.OpenFile(result.Path)
+	if err != nil {
+		t.Fatalf("open export: %v", err)
+	}
+	defer f.Close()
+	studentID, _ := f.GetCellValue("群申请", "D2")
+	if studentID != "10000001" {
+		t.Fatalf("D2 = %q, want current group student", studentID)
+	}
+	other, _ := f.GetCellValue("群申请", "D3")
+	if other != "" {
+		t.Fatalf("D3 = %q, leaked another group", other)
+	}
+}
+
+func TestServiceConcurrentExportsUseUniquePaths(t *testing.T) {
+	now := time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local)
+	service := NewService(&memoryGroupRequestStore{records: []Record{{GroupID: 12345}}}, Options{
+		ExportDir: t.TempDir(),
+		Now:       func() time.Time { return now },
+	})
+
+	results := make(chan ExportResult, 2)
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := service.Export(context.Background(), 12345, 0)
+			results <- result
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Export returned error: %v", err)
+		}
+	}
+	var paths []string
+	for result := range results {
+		paths = append(paths, result.Path)
+	}
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Fatalf("export paths = %v, want two unique paths", paths)
 	}
 }

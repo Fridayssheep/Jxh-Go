@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,6 +27,26 @@ type GroupCommandRouter struct {
 }
 
 const maxQuoteMessages = 10
+
+const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
+/test - 检查精小弘是否存活！
+/reload - 重新加载知识库（刷新精小弘的记忆？！）
+/ai <问题> - 用大模型查找一些知识库中的答案（让精小弘更聪明？！）
+/q [数量] - 回复一条消息后生成最多 10 条消息的引用图（表情包生成器ww）
+/admin - 查看管理员命令和权限说明`
+
+const adminHelpText = `管理员命令（仅群主或允许的管理员可使用）：
+/admin ban <时长> @用户 - 禁言不听话的小朋友
+/admin restart - 重启 NapCat 框架
+/admin 添加管理员 @用户 / 移除管理员 @用户 / 所有管理员
+/admin 添加黑名单 @用户 / 移除黑名单 @用户 / 所有黑名单
+/admin 定时任务 查看
+/admin 定时任务 添加 <每天|单次> <HH:MM> <群号> <消息>
+/admin 定时任务 移除 <任务ID>
+/admin 群申请 同步 [数量]
+/admin 群申请 导出 [全部|最近N]
+/admin 词条统计 [7d|30d|全部]
+提示：精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
 
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	return &GroupCommandRouter{
@@ -51,6 +72,12 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		return false, nil
 	}
 	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		if mentionsSelf(msg) {
+			return true, sender.SendGroupText(ctx, msg.GroupID, botHelpText)
+		}
+		return false, nil
+	}
 	if isSlashCommand(text) && !mentionsSelf(msg) {
 		return true, nil
 	}
@@ -180,10 +207,13 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 }
 
 func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	adminText := strings.TrimSpace(strings.TrimPrefix(text, "/admin"))
+	if adminText == "" {
+		return sender.SendGroupText(ctx, msg.GroupID, adminHelpText)
+	}
 	if r.admin == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
 	}
-	adminText := strings.TrimSpace(strings.TrimPrefix(text, "/admin"))
 	adminInput := commands.AdminInput{
 		ActorID: msg.UserID,
 		Text:    adminText,
@@ -226,7 +256,8 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 			return sender.SendGroupText(ctx, msg.GroupID, "禁言时间格式不正确")
 		}
 		if err := moderator.SetGroupBan(ctx, msg.GroupID, atUsers[0], duration); err != nil {
-			return err
+			log.Printf("ban group user failed: group=%d user=%d: %v", msg.GroupID, atUsers[0], err)
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("禁言失败：%v\n提示：精小弘不能禁言群主、群管理员或机器人自己！", err))
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
 	}
@@ -247,16 +278,19 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [全部|最近N]")
 		}
-		result, err := r.groupRequests.Export(ctx, limit)
+		result, err := r.groupRequests.Export(ctx, msg.GroupID, limit)
 		if err != nil {
 			return err
 		}
 		uploader, ok := sender.(GroupFileUploader)
 		if !ok {
-			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但群文件上传接口未初始化。文件保存在：%s", result.Count, result.Path))
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但群文件上传接口未初始化。文件保存在：%s联系管理员来解决这个问题！", result.Count, result.Path))
 		}
 		if err := uploader.UploadGroupFile(ctx, msg.GroupID, result.Path, filepath.Base(result.Path)); err != nil {
-			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但上传群文件失败：%v。文件保存在：%s", result.Count, err, result.Path))
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但上传群文件失败：%v。文件保存在：%s。联系管理员来解决这个问题！", result.Count, err, result.Path))
+		}
+		if err := os.Remove(result.Path); err != nil && !os.IsNotExist(err) {
+			log.Printf("remove uploaded group request export %q failed: %v", result.Path, err)
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，Excel 已发送到群文件", result.Count))
 	case strings.HasPrefix(text, "同步"):
@@ -290,13 +324,14 @@ func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMe
 	if r.triggerStats == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "词条统计未初始化")
 	}
-	since, err := parseStatsSince(text, time.Now())
+	days, err := parseStatsDays(text)
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 词条统计 [7d|30d|全部]")
 	}
-	summaries, err := r.triggerStats.Summaries(ctx, since, 10)
+	summaries, err := r.triggerStats.SummariesForDays(ctx, days, 10)
 	if err != nil {
-		return err
+		log.Printf("query trigger stats failed: %v", err)
+		return sender.SendGroupText(ctx, msg.GroupID, "词条统计服务暂不可用")
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, triggerstats.FormatSummaries(summaries))
 }
@@ -342,21 +377,20 @@ func parseOptionalLimit(raw string) (int, error) {
 	return limit, nil
 }
 
-func parseStatsSince(raw string, now time.Time) (*time.Time, error) {
+func parseStatsDays(raw string) (int, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		raw = "7d"
 	}
 	if raw == "全部" {
-		return nil, nil
+		return 0, nil
 	}
 	if !strings.HasSuffix(raw, "d") {
-		return nil, fmt.Errorf("invalid range")
+		return 0, fmt.Errorf("invalid range")
 	}
 	days, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
 	if err != nil || days <= 0 {
-		return nil, fmt.Errorf("invalid range")
+		return 0, fmt.Errorf("invalid range")
 	}
-	since := now.Add(-time.Duration(days) * 24 * time.Hour)
-	return &since, nil
+	return days, nil
 }

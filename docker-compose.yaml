@@ -20,7 +20,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-trixie
     container_name: jxh-redis
     restart: unless-stopped
     ports:
@@ -70,7 +70,7 @@ services:
       mysql:
         condition: service_healthy
       redis:
-        condition: service_healthy
+        condition: service_started
       napcat:
         condition: service_started
       quote:
@@ -82,6 +82,7 @@ services:
       JXH_REDIS_ADDR: ${JXH_REDIS_ADDR:-redis:6379}
       JXH_REDIS_PASSWORD: ${JXH_REDIS_PASSWORD:-}
       JXH_REDIS_DB: ${JXH_REDIS_DB:-0}
+      JXH_REDIS_DAILY_RETENTION_DAYS: ${JXH_REDIS_DAILY_RETENTION_DAYS:-180}
       JXH_QUOTE_BASE_URL: http://quote:5000
       JXH_WPS_SHARE_URL: ${JXH_WPS_SHARE_URL:-}
       JXH_WPS_SID: ${JXH_WPS_SID:-}

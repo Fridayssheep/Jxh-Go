@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xuri/excelize/v2"
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
@@ -42,6 +43,7 @@ type recordingModerator struct {
 	bannedUserID int64
 	bannedGroup  int64
 	banDuration  int64
+	banErr       error
 	restarted    bool
 }
 
@@ -75,12 +77,18 @@ func (s *botGroupRequestStore) UpsertGroupJoinRequest(ctx context.Context, recor
 	return nil
 }
 
-func (s *botGroupRequestStore) ListGroupJoinRequests(ctx context.Context, limit int) ([]grouprequest.Record, error) {
+func (s *botGroupRequestStore) ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]grouprequest.Record, error) {
 	_ = ctx
-	if limit > 0 && len(s.records) > limit {
-		return append([]grouprequest.Record(nil), s.records[:limit]...), nil
+	var records []grouprequest.Record
+	for _, record := range s.records {
+		if record.GroupID == groupID {
+			records = append(records, record)
+		}
 	}
-	return append([]grouprequest.Record(nil), s.records...), nil
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+	return append([]grouprequest.Record(nil), records...), nil
 }
 
 type groupRequestSyncSender struct {
@@ -116,7 +124,7 @@ func (s *recordingModerator) SetGroupBan(ctx context.Context, groupID, userID in
 	s.bannedGroup = groupID
 	s.bannedUserID = userID
 	s.banDuration = int64(duration.Seconds())
-	return nil
+	return s.banErr
 }
 
 func (s *recordingModerator) SetRestart(ctx context.Context) error {
@@ -218,6 +226,39 @@ func TestGroupCommandRouterHandlesCommandWhenMentioningSelf(t *testing.T) {
 	}
 	if sender.text != "精小弘正常" {
 		t.Fatalf("sent text = %q, want %q", sender.text, "精小弘正常")
+	}
+}
+
+func TestPipelineShowsHelpWhenOnlyMentioningBot(t *testing.T) {
+	sender := &recordingSender{}
+	pipeline := NewPipeline(Options{Sender: sender})
+
+	err := pipeline.HandleGroupMessage(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		AtUsers: []int64{999},
+	})
+
+	if err != nil {
+		t.Fatalf("HandleGroupMessage returned error: %v", err)
+	}
+	for _, want := range []string{"/test", "/reload", "/ai <问题>", "/q", "/admin", "普通关键词和别名"} {
+		if !strings.Contains(sender.text, want) {
+			t.Fatalf("bot help %q does not contain %q", sender.text, want)
+		}
+	}
+}
+
+func TestPipelineIgnoresEmptyMessageWithoutMention(t *testing.T) {
+	sender := &recordingSender{}
+	pipeline := NewPipeline(Options{Sender: sender})
+
+	if err := pipeline.HandleGroupMessage(context.Background(), GroupMessage{GroupID: 123, UserID: 456, SelfID: 999}); err != nil {
+		t.Fatalf("HandleGroupMessage returned error: %v", err)
+	}
+	if sender.text != "" {
+		t.Fatalf("sent text = %q, want no response", sender.text)
 	}
 }
 
@@ -350,6 +391,33 @@ func TestParseQuoteCount(t *testing.T) {
 	}
 }
 
+func TestGroupCommandRouterShowsAdminHelpWithoutPermission(t *testing.T) {
+	sender := &recordingSender{}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle bare /admin")
+	}
+	for _, want := range []string{"需要群主或已授权管理员", "/admin ban", "/admin 群申请", "/admin 词条统计", "不能禁言群主、群管理员或机器人自己"} {
+		if !strings.Contains(sender.text, want) {
+			t.Fatalf("admin help %q does not contain %q", sender.text, want)
+		}
+	}
+}
+
 func TestTargetAtUsersExcludesSelf(t *testing.T) {
 	msg := GroupMessage{
 		SelfID: 999,
@@ -451,6 +519,35 @@ func TestGroupCommandRouterRejectsBanWhenNotAuthorized(t *testing.T) {
 	}
 }
 
+func TestGroupCommandRouterExplainsNapCatBanRestrictionsOnError(t *testing.T) {
+	sender := &recordingModerator{banErr: errors.New("cannot ban admin")}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin ban 60",
+		AtUsers: []int64{999, 321},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle failed /admin ban")
+	}
+	if sender.bannedUserID != 321 {
+		t.Fatalf("ban target = %d, want 321", sender.bannedUserID)
+	}
+	if !strings.Contains(sender.text, "cannot ban admin") || !strings.Contains(sender.text, "不能禁言群主、群管理员或机器人自己") {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
 func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
 	sender := &groupRequestExportSender{}
 	store := &botGroupRequestStore{records: []grouprequest.Record{{
@@ -489,14 +586,14 @@ func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
 	if sender.uploadGroupID != 123 {
 		t.Fatalf("upload group id = %d, want 123", sender.uploadGroupID)
 	}
-	if sender.uploadName != "group_requests_20260710_203000.xlsx" {
+	if !strings.HasPrefix(sender.uploadName, "group_requests_20260710_203000_") || !strings.HasSuffix(sender.uploadName, ".xlsx") {
 		t.Fatalf("upload name = %q", sender.uploadName)
 	}
 	if filepath.Base(sender.uploadPath) != sender.uploadName {
 		t.Fatalf("upload path/name = %q/%q", sender.uploadPath, sender.uploadName)
 	}
-	if _, err := os.Stat(sender.uploadPath); err != nil {
-		t.Fatalf("uploaded file does not exist: %v", err)
+	if _, err := os.Stat(sender.uploadPath); !os.IsNotExist(err) {
+		t.Fatalf("uploaded file was not removed: %v", err)
 	}
 	if sender.text != "已导出群申请 1 条，Excel 已发送到群文件" {
 		t.Fatalf("sent text = %q", sender.text)
@@ -545,7 +642,6 @@ func TestGroupCommandRouterExportFailsUploadKeepsLocalFile(t *testing.T) {
 func TestGroupCommandRouterExportUnavailableKeepsLocalFile(t *testing.T) {
 	sender := &recordingModerator{}
 	exportDir := t.TempDir()
-	exportPath := filepath.Join(exportDir, "group_requests_20260710_203000.xlsx")
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 		GroupRequests: grouprequest.NewService(&botGroupRequestStore{records: []grouprequest.Record{{
@@ -574,11 +670,49 @@ func TestGroupCommandRouterExportUnavailableKeepsLocalFile(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle group request export")
 	}
-	if _, err := os.Stat(exportPath); err != nil {
-		t.Fatalf("exported file does not exist without uploader: %v", err)
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("read export dir: %v", err)
 	}
+	if len(entries) != 1 {
+		t.Fatalf("export dir contains %d files, want 1", len(entries))
+	}
+	exportPath := filepath.Join(exportDir, entries[0].Name())
 	if !strings.Contains(sender.text, "群文件上传接口未初始化") || !strings.Contains(sender.text, exportPath) {
 		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterExportDoesNotLeakOtherGroups(t *testing.T) {
+	sender := &groupRequestExportSender{uploadErr: errors.New("keep export for inspection")}
+	store := &botGroupRequestStore{records: []grouprequest.Record{
+		{ID: 1, RequestKey: "current", GroupID: 123, StudentID: "10000001"},
+		{ID: 2, RequestKey: "other", GroupID: 456, StudentID: "20000002"},
+	}}
+	router := NewGroupCommandRouter(Options{
+		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(store, grouprequest.Options{ExportDir: t.TempDir()}),
+	})
+
+	_, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 789, SelfID: 999, IsOwner: true,
+		Text: "/admin 群申请 导出 全部", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	f, err := excelize.OpenFile(sender.uploadPath)
+	if err != nil {
+		t.Fatalf("open export: %v", err)
+	}
+	defer f.Close()
+	studentID, _ := f.GetCellValue("群申请", "D2")
+	if studentID != "10000001" {
+		t.Fatalf("D2 = %q, want current group student", studentID)
+	}
+	other, _ := f.GetCellValue("群申请", "D3")
+	if other != "" {
+		t.Fatalf("D3 = %q, leaked another group", other)
 	}
 }
 
@@ -731,9 +865,10 @@ func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
 		Count:         3,
 		LastTriggered: time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local),
 	}}}
+	now := time.Date(2026, 7, 10, 20, 30, 0, 0, time.FixedZone("CST", 8*60*60))
 	router := NewGroupCommandRouter(Options{
 		Admin:        commands.NewAdminHandler(commands.NewMemoryAdminStore()),
-		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{}),
+		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{Now: func() time.Time { return now }}),
 	})
 
 	handled, err := router.Handle(context.Background(), GroupMessage{
@@ -753,6 +888,29 @@ func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
 	}
 	if !strings.Contains(sender.text, "菜单") || !strings.Contains(sender.text, "3 次") {
 		t.Fatalf("sent text = %q", sender.text)
+	}
+	wantSince := time.Date(2026, 7, 4, 0, 0, 0, 0, now.Location())
+	if statsStore.since == nil || !statsStore.since.Equal(wantSince) {
+		t.Fatalf("stats since = %v, want %v", statsStore.since, wantSince)
+	}
+}
+
+func TestGroupCommandRouterReportsUnavailableTriggerStats(t *testing.T) {
+	sender := &recordingModerator{}
+	router := NewGroupCommandRouter(Options{
+		Admin:        commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		TriggerStats: triggerstats.NewService(&recordingTriggerStats{err: errors.New("redis unavailable")}, triggerstats.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 456, SelfID: 999, IsOwner: true,
+		Text: "/admin 词条统计 7d", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || sender.text != "词条统计服务暂不可用" {
+		t.Fatalf("handled/text = %v/%q", handled, sender.text)
 	}
 }
 

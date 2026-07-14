@@ -135,6 +135,8 @@ go run ./cmd/bot -config config.yaml
 
 | 命令 | 说明 |
 | --- | --- |
+| `@bot` | 查看普通命令菜单；关键词和别名无需 @bot |
+| `@bot /admin` | 查看管理员命令说明和权限提示 |
 | `@bot /test` | 连通性测试 |
 | `@bot /reload` | 从 WPS 同步知识库，并刷新缓存 |
 | `@bot /ai <问题>` | 基于知识库检索回答 |
@@ -156,10 +158,14 @@ go run ./cmd/bot -config config.yaml
 | `@bot /admin 定时任务 添加 <每天|单次> <HH:MM> <群聊ID> <消息内容>` | 添加定时任务 |
 | `@bot /admin 定时任务 移除 <任务ID>` | 移除定时任务 |
 | `@bot /admin 群申请 同步 [数量]` | 从 NapCat 群系统消息补同步近期加群申请，默认 20 条 |
-| `@bot /admin 群申请 导出 [全部|最近N]` | 生成群申请 Excel 并上传到当前群文件；上传失败时保留在 `data/exports/group_requests/` |
+| `@bot /admin 群申请 导出 [全部|最近N]` | 导出当前群的申请并上传到当前群文件；上传失败时保留在 `data/exports/group_requests/` |
 | `@bot /admin 词条统计 [7d|30d|全部]` | 查看关键词回复和 `/ai` 检索命中的 Top 10 词条 |
 
 群主天然拥有管理员权限；普通管理员信息保存在 MySQL。
+
+执行管理员操作需要群主或已授权管理员权限。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
+
+群申请导出始终按当前群隔离；`全部`表示当前群的全部记录。系统消息中尚未处理的申请状态为 `pending`，已处理但无法判断批准或拒绝的状态为 `observed`。上传成功后本地临时 Excel 会被删除。
 
 Compose 会把 `data/exports/` 以只读方式挂载到 NapCat 的 `/app/napcat/data/exports`。`upload_group_file` 由 NapCat 进程在 `/app/napcat` 下读取相对文件路径，因此部署时必须保留这项共享挂载。
 
@@ -196,6 +202,8 @@ AI 行为：
 - `ai.enabled: false`：`/ai` 返回未启用。
 - 未配置 `ai.api_key` 或 `ai.model`：使用抽取式 fallback。
 - `ai.provider: ark` 时，`ai.model` 填方舟推理接入点 ID，例如 `ep-xxxxxxxx`。
+
+Redis 无法连接时 bot 会记录警告并关闭词条统计，关键词回复、AI 问答和群管理仍会继续运行。`7d` 和 `30d` 分别表示应用时区内含今天的最近 7 个和 30 个自然日。
 
 ## 引用图服务
 

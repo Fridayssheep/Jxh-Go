@@ -124,6 +124,21 @@ func (s *Service) Summaries(ctx context.Context, since *time.Time, limit int) ([
 	return s.store.ListKnowledgeTriggerSummaries(ctx, since, limit)
 }
 
+// SummariesForDays returns all-time summaries when days is zero. Positive
+// values include today and the preceding days using the service clock's zone.
+func (s *Service) SummariesForDays(ctx context.Context, days, limit int) ([]Summary, error) {
+	if days < 0 {
+		return nil, fmt.Errorf("days must not be negative")
+	}
+	if days == 0 {
+		return s.Summaries(ctx, nil, limit)
+	}
+	now := s.now()
+	year, month, day := now.Date()
+	since := time.Date(year, month, day, 0, 0, 0, 0, now.Location()).AddDate(0, 0, -days+1)
+	return s.Summaries(ctx, &since, limit)
+}
+
 func FormatSummaries(summaries []Summary) string {
 	if len(summaries) == 0 {
 		return "暂无统计数据"

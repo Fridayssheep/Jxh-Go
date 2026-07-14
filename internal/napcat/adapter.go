@@ -27,7 +27,9 @@ type groupJoinRequestHandler interface {
 }
 
 type Dedupe interface {
-	SeenOrMark(key string) bool
+	Begin(ctx context.Context, key string) (duplicate bool, err error)
+	Complete(ctx context.Context, key string) error
+	Abort(key string)
 }
 
 type Server struct {
@@ -93,14 +95,36 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			if !ok {
 				return
 			}
-			if s.Dedupe != nil && s.Dedupe.SeenOrMark(eventKey(ev)) {
-				continue
-			}
-			if err := s.handleEvent(ctx, client, ev); err != nil {
+			if err := s.processEvent(ctx, client, ev); err != nil {
 				log.Printf("handle napcat event failed: %v", err)
 			}
 		}
 	}
+}
+
+func (s Server) processEvent(ctx context.Context, client *napcatsdk.Client, ev event.Event) error {
+	key := eventKey(ev)
+	if s.Dedupe != nil {
+		duplicate, err := s.Dedupe.Begin(ctx, key)
+		if err != nil {
+			log.Printf("begin napcat event dedupe failed: %v", err)
+		}
+		if duplicate {
+			return nil
+		}
+	}
+	if err := s.handleEvent(ctx, client, ev); err != nil {
+		if s.Dedupe != nil {
+			s.Dedupe.Abort(key)
+		}
+		return err
+	}
+	if s.Dedupe != nil {
+		if err := s.Dedupe.Complete(ctx, key); err != nil {
+			log.Printf("complete napcat event dedupe failed: %v", err)
+		}
+	}
+	return nil
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) bool {

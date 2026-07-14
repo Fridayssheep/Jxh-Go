@@ -50,10 +50,49 @@ func (d *EventDedupe) SeenOrMark(key string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := time.Now()
-	if at, ok := d.seen[key]; ok && now.Sub(at) <= d.retention {
+	if d.seenLocked(key, now) {
 		return true
 	}
 	d.seen[key] = now
+	return false
+}
+
+func (d *EventDedupe) Seen(key string) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.seenLocked(key, time.Now())
+}
+
+func (d *EventDedupe) Mark(key string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.seen[key] = time.Now()
+}
+
+func (d *EventDedupe) Forget(key string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.seen, key)
+}
+
+func (d *EventDedupe) seenLocked(key string, now time.Time) bool {
+	at, ok := d.seen[key]
+	if !ok {
+		return false
+	}
+	if now.Sub(at) <= d.retention {
+		return true
+	}
+	delete(d.seen, key)
 	return false
 }
 

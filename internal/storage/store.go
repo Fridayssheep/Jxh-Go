@@ -256,9 +256,9 @@ func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.
 	}).Create(&model).Error
 }
 
-func (s *Store) ListGroupJoinRequests(ctx context.Context, limit int) ([]grouprequest.Record, error) {
+func (s *Store) ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]grouprequest.Record, error) {
 	var models []GroupJoinRequest
-	query := s.db.WithContext(ctx).Order("last_seen_at DESC").Order("id DESC")
+	query := s.db.WithContext(ctx).Where("group_id = ?", groupID).Order("last_seen_at DESC").Order("id DESC")
 	if limit > 0 {
 		query = query.Limit(limit)
 	}

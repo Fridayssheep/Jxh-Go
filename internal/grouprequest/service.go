@@ -46,7 +46,7 @@ type Record struct {
 
 type Store interface {
 	UpsertGroupJoinRequest(ctx context.Context, record Record) error
-	ListGroupJoinRequests(ctx context.Context, limit int) ([]Record, error)
+	ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]Record, error)
 }
 
 type Options struct {
@@ -85,19 +85,31 @@ func (s *Service) Record(ctx context.Context, record Record) error {
 	return s.store.UpsertGroupJoinRequest(ctx, record)
 }
 
-func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
+func (s *Service) Export(ctx context.Context, groupID int64, limit int) (ExportResult, error) {
 	if s == nil || s.store == nil {
 		return ExportResult{}, fmt.Errorf("群申请存储未初始化")
 	}
-	records, err := s.store.ListGroupJoinRequests(ctx, limit)
+	if groupID <= 0 {
+		return ExportResult{}, fmt.Errorf("群号无效")
+	}
+	records, err := s.store.ListGroupJoinRequests(ctx, groupID, limit)
 	if err != nil {
 		return ExportResult{}, err
 	}
 	if err := os.MkdirAll(s.exportDir, 0o755); err != nil {
 		return ExportResult{}, err
 	}
-	path := filepath.Join(s.exportDir, "group_requests_"+s.now().Format("20060102_150405")+".xlsx")
+	temp, err := os.CreateTemp(s.exportDir, "group_requests_"+s.now().Format("20060102_150405")+"_*.xlsx")
+	if err != nil {
+		return ExportResult{}, err
+	}
+	path := temp.Name()
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(path)
+		return ExportResult{}, err
+	}
 	if err := writeXLSX(path, records); err != nil {
+		_ = os.Remove(path)
 		return ExportResult{}, err
 	}
 	return ExportResult{Path: path, Count: len(records)}, nil
@@ -173,6 +185,10 @@ func recordFromMap(raw map[string]any, source string, fallbackTime time.Time) Re
 	comment := firstString(raw, "comment", "message", "request_content", "answer", "reason")
 	studentID, studentName := extractStudentInfo(comment)
 	rawJSON, _ := json.Marshal(raw)
+	status := StatusPending
+	if firstBool(raw, "checked") {
+		status = StatusSeen
+	}
 	return normalizeRecord(Record{
 		RequestKey:  flag,
 		Flag:        flag,
@@ -182,7 +198,7 @@ func recordFromMap(raw map[string]any, source string, fallbackTime time.Time) Re
 		StudentName: studentName,
 		SubType:     firstString(raw, "sub_type", "type"),
 		Comment:     comment,
-		Status:      StatusPending,
+		Status:      status,
 		Source:      source,
 		RawJSON:     string(rawJSON),
 		RequestedAt: requestedAt,
@@ -349,6 +365,35 @@ func firstInt64(raw map[string]any, keys ...string) int64 {
 		}
 	}
 	return 0
+}
+
+func firstBool(raw map[string]any, keys ...string) bool {
+	for _, key := range keys {
+		switch value := raw[key].(type) {
+		case bool:
+			if value {
+				return true
+			}
+		case float64:
+			if value != 0 {
+				return true
+			}
+		case int:
+			if value != 0 {
+				return true
+			}
+		case int64:
+			if value != 0 {
+				return true
+			}
+		case string:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+			if err == nil && parsed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func anyString(v any) string {

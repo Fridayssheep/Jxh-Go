@@ -14,6 +14,39 @@ import (
 
 const defaultRedisKeyPrefix = "jxh:triggerstats"
 
+var recordKnowledgeTriggerScript = redis.NewScript(`
+if redis.call("EXISTS", KEYS[1]) == 1 then
+  return 0
+end
+local all_type = redis.call("TYPE", KEYS[2])["ok"]
+local day_type = redis.call("TYPE", KEYS[3])["ok"]
+local meta_type = redis.call("TYPE", KEYS[4])["ok"]
+if all_type ~= "none" and all_type ~= "zset" then
+  return redis.error_reply("WRONGTYPE trigger stats all-time key is not a sorted set")
+end
+if day_type ~= "none" and day_type ~= "zset" then
+  return redis.error_reply("WRONGTYPE trigger stats daily key is not a sorted set")
+end
+if meta_type ~= "none" and meta_type ~= "hash" then
+  return redis.error_reply("WRONGTYPE trigger stats metadata key is not a hash")
+end
+redis.call("ZINCRBY", KEYS[2], 1, ARGV[1])
+redis.call("ZINCRBY", KEYS[3], 1, ARGV[1])
+redis.call("PEXPIRE", KEYS[3], ARGV[11])
+redis.call("HSET", KEYS[4],
+  "source_key", ARGV[2],
+  "keyword", ARGV[3],
+  "trigger_type", ARGV[4],
+  "group_id", ARGV[5],
+  "user_id", ARGV[6],
+  "message_id", ARGV[7],
+  "trigger_text", ARGV[8],
+  "score", ARGV[9],
+  "last_triggered", ARGV[10])
+redis.call("SET", KEYS[1], "1", "PX", ARGV[11])
+return 1
+`)
+
 type RedisStoreOptions struct {
 	KeyPrefix      string
 	DailyRetention time.Duration
@@ -53,28 +86,26 @@ func (s *RedisStore) RecordKnowledgeTrigger(ctx context.Context, event Event) er
 	if event.EventKey == "" {
 		event.EventKey = eventKey(event.TriggerType, event.GroupID, event.MessageID, event.SourceKey, event.TriggerText)
 	}
-	created, err := s.client.SetNX(ctx, s.eventKey(event.EventKey), "1", s.dailyRetention).Result()
-	if err != nil || !created {
-		return err
-	}
 	member := summaryMember(event)
 	dayKey := s.dayKey(event.TriggeredAt)
-	pipe := s.client.Pipeline()
-	pipe.ZIncrBy(ctx, s.allKey(), 1, member)
-	pipe.ZIncrBy(ctx, dayKey, 1, member)
-	pipe.Expire(ctx, dayKey, s.dailyRetention)
-	pipe.HSet(ctx, s.metaKey(member), map[string]any{
-		"source_key":     event.SourceKey,
-		"keyword":        event.Keyword,
-		"trigger_type":   event.TriggerType,
-		"group_id":       event.GroupID,
-		"user_id":        event.UserID,
-		"message_id":     event.MessageID,
-		"trigger_text":   event.TriggerText,
-		"score":          event.Score,
-		"last_triggered": event.TriggeredAt.UnixNano(),
-	})
-	_, err = pipe.Exec(ctx)
+	_, err := recordKnowledgeTriggerScript.Run(ctx, s.client, []string{
+		s.eventKey(event.EventKey),
+		s.allKey(),
+		dayKey,
+		s.metaKey(member),
+	},
+		member,
+		event.SourceKey,
+		event.Keyword,
+		event.TriggerType,
+		event.GroupID,
+		event.UserID,
+		event.MessageID,
+		event.TriggerText,
+		event.Score,
+		event.TriggeredAt.UnixNano(),
+		s.dailyRetention.Milliseconds(),
+	).Result()
 	return err
 }
 

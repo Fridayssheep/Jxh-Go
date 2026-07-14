@@ -131,3 +131,45 @@ func TestRedisStoreSummariesHonorSinceWindow(t *testing.T) {
 		t.Fatalf("summaries = %+v, want only new trigger", summaries)
 	}
 }
+
+func TestRedisStoreDoesNotClaimEventBeforeCounterWrite(t *testing.T) {
+	ctx := context.Background()
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+	store := NewRedisStore(client, RedisStoreOptions{KeyPrefix: "test:atomic"})
+	event := Event{
+		EventKey: "event-1", SourceKey: "menu", Keyword: "菜单",
+		TriggerType: TriggerTypeKeywordReply, TriggeredAt: time.Now(),
+	}
+
+	server.Set(store.allKey(), "wrong-type")
+	if err := store.RecordKnowledgeTrigger(ctx, event); err == nil {
+		t.Fatal("RecordKnowledgeTrigger returned nil error with wrong counter type")
+	}
+	if server.Exists(store.eventKey(event.EventKey)) {
+		t.Fatal("event was claimed even though counters were not written")
+	}
+	server.Del(store.allKey())
+	server.Set(store.dayKey(event.TriggeredAt), "wrong-type")
+	if err := store.RecordKnowledgeTrigger(ctx, event); err == nil {
+		t.Fatal("RecordKnowledgeTrigger returned nil error with wrong daily counter type")
+	}
+	if score, err := client.ZScore(ctx, store.allKey(), summaryMember(event)).Result(); err != redis.Nil || score != 0 {
+		t.Fatalf("all-time count changed before daily key validation: score %v, err %v", score, err)
+	}
+	if server.Exists(store.eventKey(event.EventKey)) {
+		t.Fatal("event was claimed after daily counter validation failed")
+	}
+	server.Del(store.dayKey(event.TriggeredAt))
+	if err := store.RecordKnowledgeTrigger(ctx, event); err != nil {
+		t.Fatalf("retry RecordKnowledgeTrigger returned error: %v", err)
+	}
+	summaries, err := store.ListKnowledgeTriggerSummaries(ctx, nil, 10)
+	if err != nil {
+		t.Fatalf("ListKnowledgeTriggerSummaries returned error: %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].Count != 1 {
+		t.Fatalf("summaries = %+v, want one count", summaries)
+	}
+}

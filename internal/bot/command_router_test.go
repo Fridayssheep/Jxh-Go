@@ -19,8 +19,11 @@ import (
 )
 
 type recordingSender struct {
-	groupID int64
-	text    string
+	groupID     int64
+	text        string
+	roles       map[int64]string
+	roleErrors  map[int64]error
+	roleQueries [][2]int64
 }
 
 func (s *recordingSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
@@ -35,6 +38,18 @@ func (s *recordingSender) SendGroupMessage(ctx context.Context, groupID int64, m
 	_ = groupID
 	_ = message
 	return nil
+}
+
+func (s *recordingSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
+	_ = ctx
+	s.roleQueries = append(s.roleQueries, [2]int64{groupID, userID})
+	if err := s.roleErrors[userID]; err != nil {
+		return "", err
+	}
+	if role := s.roles[userID]; role != "" {
+		return role, nil
+	}
+	return commands.GroupRoleMember, nil
 }
 
 type recordingModerator struct {
@@ -389,6 +404,9 @@ func TestGroupCommandRouterShowsAdminHelpWithoutPermission(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle bare /admin")
 	}
+	if len(sender.roleQueries) != 0 {
+		t.Fatalf("bare /admin queried roles: %v", sender.roleQueries)
+	}
 	for _, want := range []string{"群主", "管理员", "/admin ban", "/admin 群申请", "/admin 词条统计", "不能禁言群主、群管理员或机器人自己"} {
 		if !strings.Contains(sender.text, want) {
 			t.Fatalf("admin help %q does not contain %q", sender.text, want)
@@ -440,8 +458,165 @@ func TestGroupCommandRouterRejectsRestartWhenNotAuthorized(t *testing.T) {
 	}
 }
 
+func TestGroupCommandRouterAllowsQQGroupAdminAfterLiveRoleLookup(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roles: map[int64]string{456: commands.GroupRoleAdmin},
+	}}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin restart",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || !sender.restarted {
+		t.Fatalf("handled/restarted = %v/%v", handled, sender.restarted)
+	}
+	if len(sender.roleQueries) != 1 || sender.roleQueries[0] != [2]int64{123, 456} {
+		t.Fatalf("role queries = %v, want [[123 456]]", sender.roleQueries)
+	}
+}
+
+func TestGroupCommandRouterReportsActorRoleLookupFailure(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roleErrors: map[int64]error{456: errors.New("napcat unavailable")},
+	}}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin restart",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || sender.restarted {
+		t.Fatalf("handled/restarted = %v/%v", handled, sender.restarted)
+	}
+	if sender.text != "暂时无法确认群身份，请稍后重试" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterProtectsNativeTargetFromRemoval(t *testing.T) {
+	store := commands.NewMemoryAdminStore()
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roles: map[int64]string{
+			456: commands.GroupRoleOwner,
+			321: commands.GroupRoleAdmin,
+		},
+	}}
+	router := NewGroupCommandRouter(Options{Admin: commands.NewAdminHandler(store)})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 移除管理员",
+		AtUsers: []int64{999, 321},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || !strings.Contains(sender.text, "QQ群管理员") || !strings.Contains(sender.text, "无法移除") {
+		t.Fatalf("handled/text = %v/%q", handled, sender.text)
+	}
+	wantQueries := [][2]int64{{123, 456}, {123, 321}}
+	if len(sender.roleQueries) != len(wantQueries) || sender.roleQueries[0] != wantQueries[0] || sender.roleQueries[1] != wantQueries[1] {
+		t.Fatalf("role queries = %v, want %v", sender.roleQueries, wantQueries)
+	}
+}
+
+func TestGroupCommandRouterDoesNotGrantWhenTargetRoleLookupFails(t *testing.T) {
+	store := commands.NewMemoryAdminStore()
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roles:      map[int64]string{456: commands.GroupRoleOwner},
+		roleErrors: map[int64]error{321: errors.New("member lookup failed")},
+	}}
+	router := NewGroupCommandRouter(Options{Admin: commands.NewAdminHandler(store)})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 添加管理员",
+		AtUsers: []int64{999, 321},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || sender.text != "暂时无法确认该成员身份，请稍后重试" {
+		t.Fatalf("handled/text = %v/%q", handled, sender.text)
+	}
+	admins, err := store.ListAdmins(context.Background(), 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(admins) != 1 || admins[0].UserID != 456 {
+		t.Fatalf("admins = %+v; target must not be granted", admins)
+	}
+}
+
+func TestGroupCommandRouterManualAdminGrantAppliesOnlyToCurrentGroup(t *testing.T) {
+	store := commands.NewMemoryAdminStore()
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{
+		456: commands.GroupRoleOwner,
+		321: commands.GroupRoleMember,
+	}}}
+	router := NewGroupCommandRouter(Options{Admin: commands.NewAdminHandler(store)})
+
+	_, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 456, SelfID: 999,
+		Text: "/admin 添加管理员", AtUsers: []int64{999, 321},
+	}, sender)
+	if err != nil {
+		t.Fatalf("grant Handle returned error: %v", err)
+	}
+	if sender.text != "已添加当前群手动授权管理员" {
+		t.Fatalf("grant response = %q", sender.text)
+	}
+
+	_, err = router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 321, SelfID: 999,
+		Text: "/admin 所有管理员", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("same-group Handle returned error: %v", err)
+	}
+	if !strings.Contains(sender.text, "321（手动授权）") {
+		t.Fatalf("same-group response = %q", sender.text)
+	}
+
+	_, err = router.Handle(context.Background(), GroupMessage{
+		GroupID: 124, UserID: 321, SelfID: 999,
+		Text: "/admin 所有管理员", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("other-group Handle returned error: %v", err)
+	}
+	if sender.text != "~你好像没有权限执行该项操作耶~" {
+		t.Fatalf("other-group response = %q", sender.text)
+	}
+}
+
 func TestGroupCommandRouterAllowsRestartForOwner(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 	})
@@ -498,7 +673,10 @@ func TestGroupCommandRouterRejectsBanWhenNotAuthorized(t *testing.T) {
 }
 
 func TestGroupCommandRouterExplainsNapCatBanRestrictionsOnError(t *testing.T) {
-	sender := &recordingModerator{banErr: errors.New("cannot ban admin")}
+	sender := &recordingModerator{
+		recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}},
+		banErr:          errors.New("cannot ban admin"),
+	}
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 	})
@@ -527,7 +705,7 @@ func TestGroupCommandRouterExplainsNapCatBanRestrictionsOnError(t *testing.T) {
 }
 
 func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	exportDir := t.TempDir()
 	store := &botGroupRequestStore{records: []grouprequest.Record{{
 		ID:         1,
@@ -576,7 +754,7 @@ func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
 }
 
 func TestGroupCommandRouterCreatesPersistentLocalGroupRequestExport(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	exportDir := t.TempDir()
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
@@ -616,7 +794,7 @@ func TestGroupCommandRouterCreatesPersistentLocalGroupRequestExport(t *testing.T
 }
 
 func TestGroupCommandRouterExportsLocallyWithoutUploader(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	exportDir := t.TempDir()
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
@@ -660,7 +838,7 @@ func TestGroupCommandRouterExportsLocallyWithoutUploader(t *testing.T) {
 }
 
 func TestGroupCommandRouterExportsEveryGroupIntoSeparateFiles(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{789: commands.GroupRoleOwner}}}
 	exportDir := t.TempDir()
 	store := &botGroupRequestStore{records: []grouprequest.Record{
 		{ID: 1, RequestKey: "current", GroupID: 123, StudentID: "10000001"},
@@ -731,7 +909,7 @@ func TestGroupCommandRouterRejectsGroupRequestExportWhenNotAuthorized(t *testing
 }
 
 func TestGroupCommandRouterSyncsGroupRequestsForOwner(t *testing.T) {
-	sender := &groupRequestSyncSender{requests: []grouprequest.Record{{
+	sender := &groupRequestSyncSender{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}, requests: []grouprequest.Record{{
 		RequestKey: "flag-1",
 		Flag:       "flag-1",
 		GroupID:    123,
@@ -771,7 +949,7 @@ func TestGroupCommandRouterSyncsGroupRequestsForOwner(t *testing.T) {
 }
 
 func TestGroupCommandRouterSyncsGroupRequestsWithDefaultCount(t *testing.T) {
-	sender := &groupRequestSyncSender{}
+	sender := &groupRequestSyncSender{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	router := NewGroupCommandRouter(Options{
 		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 		GroupRequests: grouprequest.NewService(&botGroupRequestStore{}, grouprequest.Options{}),
@@ -831,7 +1009,7 @@ func TestGroupCommandRouterRejectsGroupRequestSyncWhenNotAuthorized(t *testing.T
 }
 
 func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	exportDir := t.TempDir()
 	statsStore := &recordingTriggerStats{summaries: []triggerstats.Summary{{
 		SourceKey:     "menu",
@@ -879,7 +1057,7 @@ func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
 }
 
 func TestGroupCommandRouterReportsUnavailableTriggerStats(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	router := NewGroupCommandRouter(Options{
 		Admin:        commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 		TriggerStats: triggerstats.NewService(&recordingTriggerStats{err: errors.New("redis unavailable")}, triggerstats.Options{}),
@@ -933,19 +1111,19 @@ func TestGroupCommandRouterKeepsAIAnswerWhenStatsFails(t *testing.T) {
 
 type countingAdminStore struct {
 	*commands.MemoryAdminStore
-	isAdminCalls int
+	syncRoleCalls int
 }
 
-func (s *countingAdminStore) IsAdmin(ctx context.Context, userID int64) (bool, error) {
-	s.isAdminCalls++
-	return s.MemoryAdminStore.IsAdmin(ctx, userID)
+func (s *countingAdminStore) SyncAdminRole(ctx context.Context, groupID, userID int64, role string) (commands.AdminRecord, error) {
+	s.syncRoleCalls++
+	return s.MemoryAdminStore.SyncAdminRole(ctx, groupID, userID, role)
 }
 
 func TestGroupCommandRouterChecksPermissionOnceForRegularAdminCommand(t *testing.T) {
 	sender := &recordingModerator{}
 	store := &countingAdminStore{MemoryAdminStore: commands.NewMemoryAdminStore()}
-	if err := store.AddAdmin(context.Background(), 456); err != nil {
-		t.Fatalf("AddAdmin returned error: %v", err)
+	if err := store.SetManualAdmin(context.Background(), 123, 456, true, commands.GroupRoleMember); err != nil {
+		t.Fatalf("SetManualAdmin returned error: %v", err)
 	}
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(store),
@@ -965,10 +1143,10 @@ func TestGroupCommandRouterChecksPermissionOnceForRegularAdminCommand(t *testing
 	if !handled {
 		t.Fatal("Handle did not handle /admin 所有管理员")
 	}
-	if store.isAdminCalls != 1 {
-		t.Fatalf("IsAdmin calls = %d, want 1", store.isAdminCalls)
+	if store.syncRoleCalls != 1 {
+		t.Fatalf("SyncAdminRole calls = %d, want 1", store.syncRoleCalls)
 	}
-	if sender.text != "当前管理员：456" {
+	if sender.text != "当前群管理员：456（手动授权）" {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 }

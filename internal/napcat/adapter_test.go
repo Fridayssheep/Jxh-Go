@@ -10,12 +10,47 @@ import (
 	"testing"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
+	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
 	"github.com/zjutjh/napcat-sdk/event"
 	"github.com/zjutjh/napcat-sdk/message"
 )
+
+func TestSDKSenderGetsLiveGroupMemberRole(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/get_group_member_info" {
+			t.Fatalf("request path = %q", r.URL.Path)
+		}
+		var request struct {
+			GroupID string `json:"group_id"`
+			UserID  string `json:"user_id"`
+			NoCache bool   `json:"no_cache"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.GroupID != "1001" || request.UserID != "2002" || !request.NoCache {
+			t.Fatalf("request = %+v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","retcode":0,"data":{"group_id":1001,"user_id":2002,"role":"admin","nickname":"test"}}`))
+	}))
+	defer server.Close()
+
+	client, err := napcatsdk.NewHTTPClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewHTTPClient returned error: %v", err)
+	}
+	role, err := (SDKSender{client: client}).GetGroupMemberRole(context.Background(), 1001, 2002)
+	if err != nil {
+		t.Fatalf("GetGroupMemberRole returned error: %v", err)
+	}
+	if role != commands.GroupRoleAdmin {
+		t.Fatalf("role = %q, want %q", role, commands.GroupRoleAdmin)
+	}
+}
 
 type recordingHandler struct {
 	groupRequest grouprequest.Record

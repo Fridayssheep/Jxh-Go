@@ -35,8 +35,12 @@ type KnowledgeImportRun struct {
 }
 
 type Admin struct {
-	UserID    int64 `gorm:"primaryKey"`
-	CreatedAt time.Time
+	GroupID       int64 `gorm:"primaryKey"`
+	UserID        int64 `gorm:"primaryKey"`
+	ManualGranted bool
+	QQRole        string `gorm:"size:16;not null"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type Blacklist struct {

@@ -151,9 +151,10 @@ go run ./cmd/bot -config config.yaml
 
 | 命令 | 说明 |
 | --- | --- |
-| `@bot /admin 添加管理员 @用户` | 添加管理员 |
-| `@bot /admin 移除管理员 @用户` | 移除管理员 |
-| `@bot /admin 所有管理员` | 查看管理员 |
+| `@bot /admin 添加管理员 @用户` | 在当前群手动授权普通成员使用管理命令 |
+| `@bot /admin 移除管理员 @用户` | 移除当前群普通成员的手动授权；不能移除 QQ 群主或群管理员 |
+| `@bot /admin 移除所有管理员` | 清除当前群全部手动授权；不影响 QQ 群主或群管理员 |
+| `@bot /admin 所有管理员` | 查看当前群已记录的管理员及权限来源 |
 | `@bot /admin 添加黑名单 @用户` | 添加黑名单 |
 | `@bot /admin 移除黑名单 @用户` | 移除黑名单 |
 | `@bot /admin 所有黑名单` | 查看黑名单 |
@@ -164,9 +165,9 @@ go run ./cmd/bot -config config.yaml
 | `@bot /admin 群申请 导出 [全部|最近N]` | 将所有群申请按来源群分别导出到本地 `data/exports/group_requests/` |
 | `@bot /admin 词条统计 [7d|30d|全部]` | 将所有群的关键词回复和 `/ai` 检索统计导出到本地 Excel |
 
-群主天然拥有管理员权限；普通管理员信息保存在 MySQL。
+当前群的 QQ 群主和群管理员天然拥有 bot 管理权限。bot 会在每次执行管理命令时通过 NapCat 查询执行者的实时群角色并更新 MySQL；普通成员可以由当前群有权限的用户手动授权，手动授权不会跨群生效。
 
-执行管理员操作需要群主或已授权管理员权限。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
+QQ群主和群管理员的权限由 QQ 群角色提供，不能通过 bot 移除；`移除所有管理员` 也只清除当前群的手动授权。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
 
 群申请和词条统计面向后台维护人员，导出文件只保存在 bot 本地，不上传到 QQ 群文件。群申请一次查询所有群的数据，并在单次批次目录中按来源群号生成独立 Excel；词条统计跨群汇总为一个 Excel。系统消息中尚未处理的申请状态为 `pending`，已处理但无法判断批准或拒绝的状态为 `observed`。
 
@@ -222,7 +223,7 @@ quote:
 项目采用 schema-first，运行时不使用 `AutoMigrate`。表结构以 `deploy/mysql/init/001_schema.sql` 为准。
 
 MySQL 首次初始化时会自动执行该 SQL。若 `./data/mysql` 目录里已经有旧数据，初始化 SQL 不会重复执行。
-新增群申请登记表后，已有数据库需要手动执行 `deploy/mysql/init/001_schema.sql` 中对应的 `CREATE TABLE IF NOT EXISTS` 语句，或重建空库。词条统计存储在 Redis，不需要 MySQL 表。
+开发阶段的新版 `admins` 表改为 `(group_id, user_id)` 联合主键，不兼容旧的全局管理员表。已有开发数据库需要删除旧 `admins` 表后重新执行 `deploy/mysql/init/001_schema.sql`，或直接重建空库。新增群申请登记表后，已有数据库也需要执行同一 schema 中对应的建表语句。词条统计存储在 Redis，不需要 MySQL 表。
 
 需要重建空库时：
 

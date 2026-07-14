@@ -10,22 +10,36 @@ import (
 )
 
 type AdminInput struct {
-	ActorID int64
-	Text    string
-	AtUsers []int64
-	IsOwner bool
+	GroupID    int64
+	ActorID    int64
+	ActorRole  string
+	TargetRole string
+	Text       string
+	AtUsers    []int64
+}
+
+const (
+	GroupRoleOwner  = "owner"
+	GroupRoleAdmin  = "admin"
+	GroupRoleMember = "member"
+)
+
+type AdminRecord struct {
+	GroupID       int64
+	UserID        int64
+	ManualGranted bool
+	QQRole        string
 }
 
 type AdminStore interface {
-	AddAdmin(ctx context.Context, userID int64) error
-	RemoveAdmin(ctx context.Context, userID int64) error
-	ClearAdmins(ctx context.Context) error
-	ListAdmins(ctx context.Context) ([]int64, error)
+	SyncAdminRole(ctx context.Context, groupID, userID int64, role string) (AdminRecord, error)
+	SetManualAdmin(ctx context.Context, groupID, userID int64, granted bool, role string) error
+	ClearManualAdmins(ctx context.Context, groupID int64) error
+	ListAdmins(ctx context.Context, groupID int64) ([]AdminRecord, error)
 	AddBlacklist(ctx context.Context, userID int64) error
 	RemoveBlacklist(ctx context.Context, userID int64) error
 	ClearBlacklist(ctx context.Context) error
 	ListBlacklist(ctx context.Context) ([]int64, error)
-	IsAdmin(ctx context.Context, userID int64) (bool, error)
 }
 
 type SchedulerStore interface {
@@ -62,14 +76,15 @@ func (h *AdminHandler) PermissionMessage(ctx context.Context, input AdminInput) 
 	if h.store == nil {
 		return "管理员存储未初始化", nil
 	}
-	if input.IsOwner {
-		return "", nil
+	role, ok := NormalizeGroupRole(input.ActorRole)
+	if !ok || input.GroupID <= 0 || input.ActorID <= 0 {
+		return "暂时无法确认群身份，请稍后重试", nil
 	}
-	ok, err := h.store.IsAdmin(ctx, input.ActorID)
+	record, err := h.store.SyncAdminRole(ctx, input.GroupID, input.ActorID, role)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
+	if !IsNativeGroupAdmin(role) && !record.ManualGranted {
 		return "~你好像没有权限执行该项操作耶~", nil
 	}
 	return "", nil
@@ -91,21 +106,41 @@ func (h *AdminHandler) ExecuteAuthorized(ctx context.Context, input AdminInput) 
 		if !ok {
 			return "请 @ 要添加的管理员", nil
 		}
-		return "已添加管理员", h.store.AddAdmin(ctx, userID)
+		role, ok := NormalizeGroupRole(input.TargetRole)
+		if !ok {
+			return "暂时无法确认该成员身份，请稍后重试", nil
+		}
+		if IsNativeGroupAdmin(role) {
+			if _, err := h.store.SyncAdminRole(ctx, input.GroupID, userID, role); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("该用户是%s，已经拥有当前群的 bot 操作权限", groupRoleLabel(role)), nil
+		}
+		return "已添加当前群手动授权管理员", h.store.SetManualAdmin(ctx, input.GroupID, userID, true, role)
 	case text == "移除管理员":
 		userID, ok := firstAt(input.AtUsers)
 		if !ok {
 			return "请 @ 要移除的管理员", nil
 		}
-		return "已移除管理员", h.store.RemoveAdmin(ctx, userID)
+		role, ok := NormalizeGroupRole(input.TargetRole)
+		if !ok {
+			return "暂时无法确认该成员身份，请稍后重试", nil
+		}
+		if IsNativeGroupAdmin(role) {
+			if _, err := h.store.SyncAdminRole(ctx, input.GroupID, userID, role); err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("该用户是%s，权限由 QQ 群角色提供，无法移除", groupRoleLabel(role)), nil
+		}
+		return "已移除当前群手动授权管理员", h.store.SetManualAdmin(ctx, input.GroupID, userID, false, role)
 	case text == "移除所有管理员":
-		return "已移除所有管理员", h.store.ClearAdmins(ctx)
+		return "已移除当前群所有手动授权管理员", h.store.ClearManualAdmins(ctx, input.GroupID)
 	case text == "所有管理员":
-		users, err := h.store.ListAdmins(ctx)
+		users, err := h.store.ListAdmins(ctx, input.GroupID)
 		if err != nil {
 			return "", err
 		}
-		return "当前管理员：" + joinIDs(users), nil
+		return formatAdminRecords(users), nil
 	case text == "添加黑名单":
 		userID, ok := firstAt(input.AtUsers)
 		if !ok {
@@ -195,48 +230,133 @@ func joinIDs(users []int64) string {
 	return strings.Join(parts, "、")
 }
 
+func NormalizeGroupRole(role string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case GroupRoleOwner:
+		return GroupRoleOwner, true
+	case GroupRoleAdmin:
+		return GroupRoleAdmin, true
+	case GroupRoleMember:
+		return GroupRoleMember, true
+	default:
+		return "", false
+	}
+}
+
+func IsNativeGroupAdmin(role string) bool {
+	return role == GroupRoleOwner || role == GroupRoleAdmin
+}
+
+func groupRoleLabel(role string) string {
+	if role == GroupRoleOwner {
+		return "QQ群主"
+	}
+	return "QQ群管理员"
+}
+
+func formatAdminRecords(records []AdminRecord) string {
+	if len(records) == 0 {
+		return "当前群管理员：无"
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].UserID < records[j].UserID })
+	parts := make([]string, 0, len(records))
+	for _, record := range records {
+		var sources []string
+		if IsNativeGroupAdmin(record.QQRole) {
+			sources = append(sources, groupRoleLabel(record.QQRole))
+		}
+		if record.ManualGranted {
+			sources = append(sources, "手动授权")
+		}
+		if len(sources) > 0 {
+			parts = append(parts, fmt.Sprintf("%d（%s）", record.UserID, strings.Join(sources, "、")))
+		}
+	}
+	if len(parts) == 0 {
+		return "当前群管理员：无"
+	}
+	return "当前群管理员：" + strings.Join(parts, "\n")
+}
+
 type MemoryAdminStore struct {
 	mu        sync.Mutex
-	admins    map[int64]struct{}
+	admins    map[adminKey]AdminRecord
 	blacklist map[int64]struct{}
 }
 
+type adminKey struct {
+	groupID int64
+	userID  int64
+}
+
 func NewMemoryAdminStore() *MemoryAdminStore {
-	return &MemoryAdminStore{admins: map[int64]struct{}{}, blacklist: map[int64]struct{}{}}
+	return &MemoryAdminStore{admins: map[adminKey]AdminRecord{}, blacklist: map[int64]struct{}{}}
 }
 
-func (s *MemoryAdminStore) AddAdmin(ctx context.Context, userID int64) error {
+func (s *MemoryAdminStore) SyncAdminRole(ctx context.Context, groupID, userID int64, role string) (AdminRecord, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.admins[userID] = struct{}{}
-	return nil
-}
-
-func (s *MemoryAdminStore) RemoveAdmin(ctx context.Context, userID int64) error {
-	_ = ctx
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.admins, userID)
-	return nil
-}
-
-func (s *MemoryAdminStore) ClearAdmins(ctx context.Context) error {
-	_ = ctx
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.admins = map[int64]struct{}{}
-	return nil
-}
-
-func (s *MemoryAdminStore) ListAdmins(ctx context.Context) ([]int64, error) {
-	_ = ctx
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]int64, 0, len(s.admins))
-	for user := range s.admins {
-		out = append(out, user)
+	key := adminKey{groupID: groupID, userID: userID}
+	record := s.admins[key]
+	record.GroupID = groupID
+	record.UserID = userID
+	record.QQRole = role
+	if role == GroupRoleMember && !record.ManualGranted {
+		delete(s.admins, key)
+		return record, nil
 	}
+	s.admins[key] = record
+	return record, nil
+}
+
+func (s *MemoryAdminStore) SetManualAdmin(ctx context.Context, groupID, userID int64, granted bool, role string) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := adminKey{groupID: groupID, userID: userID}
+	record := s.admins[key]
+	record.GroupID = groupID
+	record.UserID = userID
+	record.ManualGranted = granted
+	record.QQRole = role
+	if role == GroupRoleMember && !granted {
+		delete(s.admins, key)
+		return nil
+	}
+	s.admins[key] = record
+	return nil
+}
+
+func (s *MemoryAdminStore) ClearManualAdmins(ctx context.Context, groupID int64) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, record := range s.admins {
+		if key.groupID != groupID {
+			continue
+		}
+		record.ManualGranted = false
+		if !IsNativeGroupAdmin(record.QQRole) {
+			delete(s.admins, key)
+			continue
+		}
+		s.admins[key] = record
+	}
+	return nil
+}
+
+func (s *MemoryAdminStore) ListAdmins(ctx context.Context, groupID int64) ([]AdminRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]AdminRecord, 0, len(s.admins))
+	for key, record := range s.admins {
+		if key.groupID == groupID && (record.ManualGranted || IsNativeGroupAdmin(record.QQRole)) {
+			out = append(out, record)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserID < out[j].UserID })
 	return out, nil
 }
 
@@ -273,14 +393,6 @@ func (s *MemoryAdminStore) ListBlacklist(ctx context.Context) ([]int64, error) {
 		out = append(out, user)
 	}
 	return out, nil
-}
-
-func (s *MemoryAdminStore) IsAdmin(ctx context.Context, userID int64) (bool, error) {
-	_ = ctx
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.admins[userID]
-	return ok, nil
 }
 
 func (s *MemoryAdminStore) ListScheduledJobs(ctx context.Context) ([]ScheduledJobView, error) {

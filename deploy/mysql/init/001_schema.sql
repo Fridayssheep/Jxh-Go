@@ -42,9 +42,14 @@ CREATE TABLE IF NOT EXISTS `knowledge_import_runs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `admins` (
+  `group_id` bigint NOT NULL COMMENT 'QQ 群 ID',
   `user_id` bigint NOT NULL COMMENT 'QQ 用户 ID',
+  `manual_granted` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否由当前群手动授权',
+  `qq_role` varchar(16) NOT NULL DEFAULT 'member' COMMENT '最近同步的 QQ 群角色',
   `created_at` datetime(3) DEFAULT NULL,
-  PRIMARY KEY (`user_id`)
+  `updated_at` datetime(3) DEFAULT NULL,
+  PRIMARY KEY (`group_id`, `user_id`),
+  KEY `idx_admins_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `blacklists` (

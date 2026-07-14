@@ -27,8 +27,12 @@ func newAdmin(db *gorm.DB, opts ...gen.DOOption) admin {
 
 	tableName := _admin.adminDo.TableName()
 	_admin.ALL = field.NewAsterisk(tableName)
+	_admin.GroupID = field.NewInt64(tableName, "group_id")
 	_admin.UserID = field.NewInt64(tableName, "user_id")
+	_admin.ManualGranted = field.NewBool(tableName, "manual_granted")
+	_admin.QQRole = field.NewString(tableName, "qq_role")
 	_admin.CreatedAt = field.NewTime(tableName, "created_at")
+	_admin.UpdatedAt = field.NewTime(tableName, "updated_at")
 
 	_admin.fillFieldMap()
 
@@ -38,9 +42,13 @@ func newAdmin(db *gorm.DB, opts ...gen.DOOption) admin {
 type admin struct {
 	adminDo adminDo
 
-	ALL       field.Asterisk
-	UserID    field.Int64 // QQ ç”¨æˆ· ID
-	CreatedAt field.Time
+	ALL           field.Asterisk
+	GroupID       field.Int64
+	UserID        field.Int64
+	ManualGranted field.Bool
+	QQRole        field.String
+	CreatedAt     field.Time
+	UpdatedAt     field.Time
 
 	fieldMap map[string]field.Expr
 }
@@ -57,8 +65,12 @@ func (a admin) As(alias string) *admin {
 
 func (a *admin) updateTableName(table string) *admin {
 	a.ALL = field.NewAsterisk(table)
+	a.GroupID = field.NewInt64(table, "group_id")
 	a.UserID = field.NewInt64(table, "user_id")
+	a.ManualGranted = field.NewBool(table, "manual_granted")
+	a.QQRole = field.NewString(table, "qq_role")
 	a.CreatedAt = field.NewTime(table, "created_at")
+	a.UpdatedAt = field.NewTime(table, "updated_at")
 
 	a.fillFieldMap()
 
@@ -83,9 +95,13 @@ func (a *admin) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (a *admin) fillFieldMap() {
-	a.fieldMap = make(map[string]field.Expr, 2)
+	a.fieldMap = make(map[string]field.Expr, 6)
+	a.fieldMap["group_id"] = a.GroupID
 	a.fieldMap["user_id"] = a.UserID
+	a.fieldMap["manual_granted"] = a.ManualGranted
+	a.fieldMap["qq_role"] = a.QQRole
 	a.fieldMap["created_at"] = a.CreatedAt
+	a.fieldMap["updated_at"] = a.UpdatedAt
 }
 
 func (a admin) clone(db *gorm.DB) admin {

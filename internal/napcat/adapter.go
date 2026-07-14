@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
+	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
@@ -266,6 +267,22 @@ func (s SDKSender) UploadGroupFile(ctx context.Context, groupID int64, path, nam
 		UploadFile: true,
 	})
 	return err
+}
+
+func (s SDKSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
+	resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
+		GroupID: strconv.FormatInt(groupID, 10),
+		UserID:  strconv.FormatInt(userID, 10),
+		NoCache: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	role, ok := commands.NormalizeGroupRole(resp.Role)
+	if !ok {
+		return "", fmt.Errorf("get_group_member_info returned invalid role %q", resp.Role)
+	}
+	return role, nil
 }
 
 func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {

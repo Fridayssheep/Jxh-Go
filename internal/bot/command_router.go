@@ -33,10 +33,10 @@ const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
 /q [数量] - 回复一条消息后生成最多 10 条消息的引用图（表情包生成器ww）
 /admin - 查看管理员命令和权限说明`
 
-const adminHelpText = `管理员命令（仅群主或允许的管理员可使用）：
+const adminHelpText = `管理员命令（当前群群主、群管理员或手动授权用户可使用）：
 /admin ban <时长> @用户 - 禁言不听话的小朋友
 /admin restart - 重启 NapCat 框架
-/admin 添加管理员 @用户 / 移除管理员 @用户 / 所有管理员
+/admin 添加管理员 @用户 / 移除管理员 @用户 / 移除所有管理员 / 所有管理员
 /admin 添加黑名单 @用户 / 移除黑名单 @用户 / 所有黑名单
 /admin 定时任务 查看
 /admin 定时任务 添加 <每天|单次> <HH:MM> <群号> <消息>
@@ -44,7 +44,8 @@ const adminHelpText = `管理员命令（仅群主或允许的管理员可使用
 /admin 群申请 同步 [数量]
 /admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
 /admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
-提示：精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
+提示：手动管理员权限仅在当前群有效，QQ群主和群管理员的权限无法移除。
+精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
 
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	return &GroupCommandRouter{
@@ -59,6 +60,10 @@ func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 
 type GroupRequestFetcher interface {
 	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
+}
+
+type GroupMemberRoleResolver interface {
+	GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error)
 }
 
 func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
@@ -208,17 +213,47 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 	if r.admin == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
 	}
+	roleResolver, ok := sender.(GroupMemberRoleResolver)
+	if !ok {
+		log.Printf("admin role lookup unavailable: sender %T does not implement GroupMemberRoleResolver", sender)
+		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	actorRole, err := roleResolver.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
+	if err != nil {
+		log.Printf("query admin actor role failed: group=%d user=%d: %v", msg.GroupID, msg.UserID, err)
+		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	actorRole, ok = commands.NormalizeGroupRole(actorRole)
+	if !ok {
+		log.Printf("query admin actor role returned invalid role: group=%d user=%d role=%q", msg.GroupID, msg.UserID, actorRole)
+		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
 	adminInput := commands.AdminInput{
-		ActorID: msg.UserID,
-		Text:    adminText,
-		AtUsers: targetAtUsers(msg),
-		IsOwner: msg.IsOwner,
+		GroupID:   msg.GroupID,
+		ActorID:   msg.UserID,
+		ActorRole: actorRole,
+		Text:      adminText,
+		AtUsers:   targetAtUsers(msg),
 	}
 	if resp, err := r.admin.PermissionMessage(ctx, adminInput); resp != "" || err != nil {
 		if err != nil {
 			return err
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, resp)
+	}
+	if (adminText == "添加管理员" || adminText == "移除管理员") && len(adminInput.AtUsers) > 0 {
+		targetID := adminInput.AtUsers[0]
+		targetRole, err := roleResolver.GetGroupMemberRole(ctx, msg.GroupID, targetID)
+		if err != nil {
+			log.Printf("query admin target role failed: group=%d user=%d: %v", msg.GroupID, targetID, err)
+			return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认该成员身份，请稍后重试")
+		}
+		targetRole, ok = commands.NormalizeGroupRole(targetRole)
+		if !ok {
+			log.Printf("query admin target role returned invalid role: group=%d user=%d role=%q", msg.GroupID, targetID, targetRole)
+			return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认该成员身份，请稍后重试")
+		}
+		adminInput.TargetRole = targetRole
 	}
 	if strings.HasPrefix(adminText, "群申请 ") {
 		return r.handleGroupRequestAdmin(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "群申请 ")))

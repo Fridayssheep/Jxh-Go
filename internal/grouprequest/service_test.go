@@ -2,8 +2,10 @@ package grouprequest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,14 +30,9 @@ func (s *memoryGroupRequestStore) UpsertGroupJoinRequest(ctx context.Context, re
 	return nil
 }
 
-func (s *memoryGroupRequestStore) ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]Record, error) {
+func (s *memoryGroupRequestStore) ListGroupJoinRequests(ctx context.Context, limit int) ([]Record, error) {
 	_ = ctx
-	var records []Record
-	for _, record := range s.records {
-		if record.GroupID == groupID {
-			records = append(records, record)
-		}
-	}
+	records := append([]Record(nil), s.records...)
 	if limit > 0 && len(records) > limit {
 		records = records[:limit]
 	}
@@ -172,7 +169,7 @@ func TestServiceExportsRequestsToXLSX(t *testing.T) {
 		Now:       func() time.Time { return now },
 	})
 
-	result, err := service.Export(context.Background(), 12345, 0)
+	result, err := service.Export(context.Background(), 0)
 
 	if err != nil {
 		t.Fatalf("Export returned error: %v", err)
@@ -180,13 +177,16 @@ func TestServiceExportsRequestsToXLSX(t *testing.T) {
 	if result.Count != 1 {
 		t.Fatalf("exported count = %d, want 1", result.Count)
 	}
-	if _, err := os.Stat(result.Path); err != nil {
+	if len(result.Files) != 1 || result.Files[0].GroupID != 12345 {
+		t.Fatalf("exported files = %+v", result.Files)
+	}
+	if _, err := os.Stat(result.Files[0].Path); err != nil {
 		t.Fatalf("export file does not exist: %v", err)
 	}
-	if filepath.Dir(result.Path) != dir {
-		t.Fatalf("export dir = %q, want %q", filepath.Dir(result.Path), dir)
+	if filepath.Dir(result.Dir) != dir {
+		t.Fatalf("export parent dir = %q, want %q", filepath.Dir(result.Dir), dir)
 	}
-	f, err := excelize.OpenFile(result.Path)
+	f, err := excelize.OpenFile(result.Files[0].Path)
 	if err != nil {
 		t.Fatalf("open exported xlsx: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestServiceExportsRequestsToXLSX(t *testing.T) {
 	}
 }
 
-func TestServiceExportsOnlyRequestedGroup(t *testing.T) {
+func TestServiceExportsAllGroupsIntoSeparateFiles(t *testing.T) {
 	dir := t.TempDir()
 	store := &memoryGroupRequestStore{records: []Record{
 		{ID: 1, RequestKey: "group-1", GroupID: 1001, StudentID: "10000001"},
@@ -222,25 +222,48 @@ func TestServiceExportsOnlyRequestedGroup(t *testing.T) {
 	}}
 	service := NewService(store, Options{ExportDir: dir})
 
-	result, err := service.Export(context.Background(), 1001, 0)
+	result, err := service.Export(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Export returned error: %v", err)
 	}
-	if result.Count != 1 {
-		t.Fatalf("exported count = %d, want 1", result.Count)
+	if result.Count != 2 || len(result.Files) != 2 {
+		t.Fatalf("export result = %+v, want two records in two files", result)
 	}
-	f, err := excelize.OpenFile(result.Path)
+	for i, groupID := range []int64{1001, 2002} {
+		file := result.Files[i]
+		if file.GroupID != groupID || filepath.Base(file.Path) != fmt.Sprintf("group_%d.xlsx", groupID) {
+			t.Fatalf("export file = %+v, want group %d", file, groupID)
+		}
+		f, err := excelize.OpenFile(file.Path)
+		if err != nil {
+			t.Fatalf("open export: %v", err)
+		}
+		exportedGroupID, _ := f.GetCellValue("群申请", "B2")
+		otherGroupID, _ := f.GetCellValue("群申请", "B3")
+		_ = f.Close()
+		if exportedGroupID != strconv.FormatInt(groupID, 10) || otherGroupID != "" {
+			t.Fatalf("group %d file contains rows %q/%q", groupID, exportedGroupID, otherGroupID)
+		}
+	}
+}
+
+func TestServiceAppliesRecentLimitBeforeSplittingGroups(t *testing.T) {
+	service := NewService(&memoryGroupRequestStore{records: []Record{
+		{ID: 3, GroupID: 3003},
+		{ID: 2, GroupID: 2002},
+		{ID: 1, GroupID: 1001},
+	}}, Options{ExportDir: t.TempDir()})
+
+	result, err := service.Export(context.Background(), 2)
+
 	if err != nil {
-		t.Fatalf("open export: %v", err)
+		t.Fatalf("Export returned error: %v", err)
 	}
-	defer f.Close()
-	studentID, _ := f.GetCellValue("群申请", "D2")
-	if studentID != "10000001" {
-		t.Fatalf("D2 = %q, want current group student", studentID)
+	if result.Count != 2 || len(result.Files) != 2 {
+		t.Fatalf("export result = %+v, want two globally recent records", result)
 	}
-	other, _ := f.GetCellValue("群申请", "D3")
-	if other != "" {
-		t.Fatalf("D3 = %q, leaked another group", other)
+	if result.Files[0].GroupID != 2002 || result.Files[1].GroupID != 3003 {
+		t.Fatalf("exported groups = %+v, want 2002 and 3003", result.Files)
 	}
 }
 
@@ -258,7 +281,7 @@ func TestServiceConcurrentExportsUseUniquePaths(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, err := service.Export(context.Background(), 12345, 0)
+			result, err := service.Export(context.Background(), 0)
 			results <- result
 			errs <- err
 		}()
@@ -273,7 +296,7 @@ func TestServiceConcurrentExportsUseUniquePaths(t *testing.T) {
 	}
 	var paths []string
 	for result := range results {
-		paths = append(paths, result.Path)
+		paths = append(paths, result.Dir)
 	}
 	if len(paths) != 2 || paths[0] == paths[1] {
 		t.Fatalf("export paths = %v, want two unique paths", paths)

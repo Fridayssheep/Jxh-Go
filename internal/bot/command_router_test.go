@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xuri/excelize/v2"
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
@@ -77,14 +76,9 @@ func (s *botGroupRequestStore) UpsertGroupJoinRequest(ctx context.Context, recor
 	return nil
 }
 
-func (s *botGroupRequestStore) ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]grouprequest.Record, error) {
+func (s *botGroupRequestStore) ListGroupJoinRequests(ctx context.Context, limit int) ([]grouprequest.Record, error) {
 	_ = ctx
-	var records []grouprequest.Record
-	for _, record := range s.records {
-		if record.GroupID == groupID {
-			records = append(records, record)
-		}
-	}
+	records := append([]grouprequest.Record(nil), s.records...)
 	if limit > 0 && len(records) > limit {
 		records = records[:limit]
 	}
@@ -95,22 +89,6 @@ type groupRequestSyncSender struct {
 	recordingSender
 	count    int
 	requests []grouprequest.Record
-}
-
-type groupRequestExportSender struct {
-	recordingModerator
-	uploadGroupID int64
-	uploadPath    string
-	uploadName    string
-	uploadErr     error
-}
-
-func (s *groupRequestExportSender) UploadGroupFile(ctx context.Context, groupID int64, path, name string) error {
-	_ = ctx
-	s.uploadGroupID = groupID
-	s.uploadPath = path
-	s.uploadName = name
-	return s.uploadErr
 }
 
 func (s *groupRequestSyncSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
@@ -243,7 +221,7 @@ func TestPipelineShowsHelpWhenOnlyMentioningBot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleGroupMessage returned error: %v", err)
 	}
-	for _, want := range []string{"/test", "/reload", "/ai <问题>", "/q", "/admin", "普通关键词和别名"} {
+	for _, want := range []string{"/test", "/reload", "/ai <问题>", "/q", "/admin"} {
 		if !strings.Contains(sender.text, want) {
 			t.Fatalf("bot help %q does not contain %q", sender.text, want)
 		}
@@ -411,7 +389,7 @@ func TestGroupCommandRouterShowsAdminHelpWithoutPermission(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle bare /admin")
 	}
-	for _, want := range []string{"需要群主或已授权管理员", "/admin ban", "/admin 群申请", "/admin 词条统计", "不能禁言群主、群管理员或机器人自己"} {
+	for _, want := range []string{"群主", "管理员", "/admin ban", "/admin 群申请", "/admin 词条统计", "不能禁言群主、群管理员或机器人自己"} {
 		if !strings.Contains(sender.text, want) {
 			t.Fatalf("admin help %q does not contain %q", sender.text, want)
 		}
@@ -549,7 +527,8 @@ func TestGroupCommandRouterExplainsNapCatBanRestrictionsOnError(t *testing.T) {
 }
 
 func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
-	sender := &groupRequestExportSender{}
+	sender := &recordingModerator{}
+	exportDir := t.TempDir()
 	store := &botGroupRequestStore{records: []grouprequest.Record{{
 		ID:         1,
 		RequestKey: "flag-1",
@@ -563,7 +542,7 @@ func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 		GroupRequests: grouprequest.NewService(store, grouprequest.Options{
-			ExportDir: t.TempDir(),
+			ExportDir: exportDir,
 			Now:       func() time.Time { return time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local) },
 		}),
 	})
@@ -583,25 +562,21 @@ func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle group request export")
 	}
-	if sender.uploadGroupID != 123 {
-		t.Fatalf("upload group id = %d, want 123", sender.uploadGroupID)
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("export entries = %v, err %v", entries, err)
 	}
-	if !strings.HasPrefix(sender.uploadName, "group_requests_20260710_203000_") || !strings.HasSuffix(sender.uploadName, ".xlsx") {
-		t.Fatalf("upload name = %q", sender.uploadName)
+	runDir := filepath.Join(exportDir, entries[0].Name())
+	if _, err := os.Stat(filepath.Join(runDir, "group_123.xlsx")); err != nil {
+		t.Fatalf("local group export does not exist: %v", err)
 	}
-	if filepath.Base(sender.uploadPath) != sender.uploadName {
-		t.Fatalf("upload path/name = %q/%q", sender.uploadPath, sender.uploadName)
-	}
-	if _, err := os.Stat(sender.uploadPath); !os.IsNotExist(err) {
-		t.Fatalf("uploaded file was not removed: %v", err)
-	}
-	if sender.text != "已导出群申请 1 条，Excel 已发送到群文件" {
+	if !strings.Contains(sender.text, "已在本地导出全部群申请 1 条") || !strings.Contains(sender.text, runDir) {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 }
 
-func TestGroupCommandRouterExportFailsUploadKeepsLocalFile(t *testing.T) {
-	sender := &groupRequestExportSender{uploadErr: errors.New("upload unavailable")}
+func TestGroupCommandRouterCreatesPersistentLocalGroupRequestExport(t *testing.T) {
+	sender := &recordingModerator{}
 	exportDir := t.TempDir()
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
@@ -631,15 +606,16 @@ func TestGroupCommandRouterExportFailsUploadKeepsLocalFile(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle group request export")
 	}
-	if _, err := os.Stat(sender.uploadPath); err != nil {
-		t.Fatalf("exported file does not exist after upload failure: %v", err)
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("export entries = %v, err %v", entries, err)
 	}
-	if !strings.Contains(sender.text, "但上传群文件失败：upload unavailable") || !strings.Contains(sender.text, sender.uploadPath) {
+	if !strings.Contains(sender.text, "已在本地导出全部群申请") || strings.Contains(sender.text, "上传") {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 }
 
-func TestGroupCommandRouterExportUnavailableKeepsLocalFile(t *testing.T) {
+func TestGroupCommandRouterExportsLocallyWithoutUploader(t *testing.T) {
 	sender := &recordingModerator{}
 	exportDir := t.TempDir()
 	router := NewGroupCommandRouter(Options{
@@ -674,24 +650,25 @@ func TestGroupCommandRouterExportUnavailableKeepsLocalFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read export dir: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("export dir contains %d files, want 1", len(entries))
+	if len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("export dir contains %v, want one run directory", entries)
 	}
 	exportPath := filepath.Join(exportDir, entries[0].Name())
-	if !strings.Contains(sender.text, "群文件上传接口未初始化") || !strings.Contains(sender.text, exportPath) {
+	if !strings.Contains(sender.text, "已在本地导出全部群申请") || !strings.Contains(sender.text, exportPath) {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 }
 
-func TestGroupCommandRouterExportDoesNotLeakOtherGroups(t *testing.T) {
-	sender := &groupRequestExportSender{uploadErr: errors.New("keep export for inspection")}
+func TestGroupCommandRouterExportsEveryGroupIntoSeparateFiles(t *testing.T) {
+	sender := &recordingModerator{}
+	exportDir := t.TempDir()
 	store := &botGroupRequestStore{records: []grouprequest.Record{
 		{ID: 1, RequestKey: "current", GroupID: 123, StudentID: "10000001"},
 		{ID: 2, RequestKey: "other", GroupID: 456, StudentID: "20000002"},
 	}}
 	router := NewGroupCommandRouter(Options{
 		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
-		GroupRequests: grouprequest.NewService(store, grouprequest.Options{ExportDir: t.TempDir()}),
+		GroupRequests: grouprequest.NewService(store, grouprequest.Options{ExportDir: exportDir}),
 	})
 
 	_, err := router.Handle(context.Background(), GroupMessage{
@@ -701,23 +678,23 @@ func TestGroupCommandRouterExportDoesNotLeakOtherGroups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle returned error: %v", err)
 	}
-	f, err := excelize.OpenFile(sender.uploadPath)
-	if err != nil {
-		t.Fatalf("open export: %v", err)
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("export entries = %v, err %v", entries, err)
 	}
-	defer f.Close()
-	studentID, _ := f.GetCellValue("群申请", "D2")
-	if studentID != "10000001" {
-		t.Fatalf("D2 = %q, want current group student", studentID)
+	runDir := filepath.Join(exportDir, entries[0].Name())
+	for _, groupID := range []string{"123", "456"} {
+		if _, err := os.Stat(filepath.Join(runDir, "group_"+groupID+".xlsx")); err != nil {
+			t.Fatalf("group %s export missing: %v", groupID, err)
+		}
 	}
-	other, _ := f.GetCellValue("群申请", "D3")
-	if other != "" {
-		t.Fatalf("D3 = %q, leaked another group", other)
+	if !strings.Contains(sender.text, "全部群申请 2 条") || !strings.Contains(sender.text, "按 2 个群") {
+		t.Fatalf("sent text = %q", sender.text)
 	}
 }
 
 func TestGroupCommandRouterRejectsGroupRequestExportWhenNotAuthorized(t *testing.T) {
-	sender := &groupRequestExportSender{}
+	sender := &recordingModerator{}
 	exportDir := t.TempDir()
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
@@ -740,9 +717,6 @@ func TestGroupCommandRouterRejectsGroupRequestExportWhenNotAuthorized(t *testing
 	}
 	if !handled {
 		t.Fatal("Handle did not handle unauthorized group request export")
-	}
-	if sender.uploadGroupID != 0 || sender.uploadPath != "" {
-		t.Fatalf("upload was requested: group=%d path=%q", sender.uploadGroupID, sender.uploadPath)
 	}
 	entries, err := os.ReadDir(exportDir)
 	if err != nil {
@@ -858,6 +832,7 @@ func TestGroupCommandRouterRejectsGroupRequestSyncWhenNotAuthorized(t *testing.T
 
 func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
 	sender := &recordingModerator{}
+	exportDir := t.TempDir()
 	statsStore := &recordingTriggerStats{summaries: []triggerstats.Summary{{
 		SourceKey:     "menu",
 		Keyword:       "菜单",
@@ -868,7 +843,7 @@ func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
 	now := time.Date(2026, 7, 10, 20, 30, 0, 0, time.FixedZone("CST", 8*60*60))
 	router := NewGroupCommandRouter(Options{
 		Admin:        commands.NewAdminHandler(commands.NewMemoryAdminStore()),
-		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{Now: func() time.Time { return now }}),
+		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{Now: func() time.Time { return now }, ExportDir: exportDir}),
 	})
 
 	handled, err := router.Handle(context.Background(), GroupMessage{
@@ -886,12 +861,20 @@ func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle trigger stats")
 	}
-	if !strings.Contains(sender.text, "菜单") || !strings.Contains(sender.text, "3 次") {
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 || entries[0].IsDir() {
+		t.Fatalf("stats export entries = %v, err %v", entries, err)
+	}
+	exportPath := filepath.Join(exportDir, entries[0].Name())
+	if !strings.Contains(sender.text, "已在本地导出全部群的词条统计 1 项") || !strings.Contains(sender.text, exportPath) {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 	wantSince := time.Date(2026, 7, 4, 0, 0, 0, 0, now.Location())
 	if statsStore.since == nil || !statsStore.since.Equal(wantSince) {
 		t.Fatalf("stats since = %v, want %v", statsStore.since, wantSince)
+	}
+	if statsStore.limit != 0 {
+		t.Fatalf("stats limit = %d, want all summaries", statsStore.limit)
 	}
 }
 

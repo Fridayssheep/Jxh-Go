@@ -93,6 +93,7 @@ func TestToGroupMessageMarksOwnerAndExtractsMentions(t *testing.T) {
 		Message: message.ChainOf(
 			message.At(9999),
 			message.Text("/test"),
+			message.Segment{Type: "json", Data: map[string]any{"data": `{"jumpUrl":"https://www.bilibili.com/video/BV1test/?vd_source=track"}`}},
 		),
 	}
 	ev.Base.EventSelfID = 9999
@@ -110,6 +111,13 @@ func TestToGroupMessageMarksOwnerAndExtractsMentions(t *testing.T) {
 	}
 	if msg.Text != "/test" {
 		t.Fatalf("Text = %q, want /test", msg.Text)
+	}
+	if len(msg.Segments) != 3 || msg.Segments[2].Type != "json" {
+		t.Fatalf("Segments = %+v, want preserved json segment", msg.Segments)
+	}
+	data, ok := msg.Segments[2].Data.(map[string]any)
+	if !ok || data["data"] == "" {
+		t.Fatalf("json segment data = %#v", msg.Segments[2].Data)
 	}
 }
 
@@ -155,7 +163,6 @@ func TestProcessEventRetriesAfterHandlerFailureThenDeduplicatesSuccess(t *testin
 		t.Fatalf("handler calls = %d, want 2", handler.requestCalls)
 	}
 }
-
 func TestSDKSenderUploadsGroupFile(t *testing.T) {
 	var request api.UploadGroupFileRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

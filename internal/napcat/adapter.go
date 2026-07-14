@@ -185,7 +185,16 @@ func toGroupMessage(e *event.GroupMessage) bot.GroupMessage {
 		IsSelf:         e.UserID == e.SelfID(),
 		IsOwner:        e.Sender.Role == "owner",
 		AtUsers:        extractAtUsers(e.Message),
+		Segments:       toMessageSegments(e.Message),
 	}
+}
+
+func toMessageSegments(chain message.Chain) []bot.MessageSegment {
+	segments := make([]bot.MessageSegment, 0, len(chain))
+	for _, segment := range chain {
+		segments = append(segments, bot.MessageSegment{Type: segment.Type, Data: segment.Data})
+	}
+	return segments
 }
 
 func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *event.GroupMessage) error {

@@ -28,6 +28,12 @@ type Blacklist interface {
 	IsBlacklisted(ctx context.Context, userID int64) (bool, error)
 }
 
+type LinkCleaner interface {
+	CleanMessage(ctx context.Context, text string, segments []MessageSegment) ([]string, error)
+}
+
+const trackedLinkReplyPrefix = "精小弘觉得这个链接十分甚至九分不对劲，帮你移除了里面的TrackID："
+
 type QuoteGenerator interface {
 	Generate(ctx context.Context, payload quote.Payload) (string, error)
 }
@@ -59,6 +65,7 @@ type Options struct {
 	Quote         QuoteGenerator
 	GroupRequests *grouprequest.Service
 	TriggerStats  *triggerstats.Service
+	LinkCleaner   LinkCleaner
 }
 
 type Pipeline struct {
@@ -68,6 +75,7 @@ type Pipeline struct {
 	blacklist     Blacklist
 	groupRequests *grouprequest.Service
 	stats         *triggerstats.Service
+	linkCleaner   LinkCleaner
 	commandRouter *GroupCommandRouter
 }
 
@@ -88,6 +96,12 @@ type GroupMessage struct {
 	IsSelf         bool
 	IsOwner        bool
 	AtUsers        []int64
+	Segments       []MessageSegment
+}
+
+type MessageSegment struct {
+	Type string
+	Data any
 }
 
 func NewPipeline(opts Options) *Pipeline {
@@ -97,6 +111,7 @@ func NewPipeline(opts Options) *Pipeline {
 		blacklist:     opts.Blacklist,
 		groupRequests: opts.GroupRequests,
 		stats:         opts.TriggerStats,
+		linkCleaner:   opts.LinkCleaner,
 		commandRouter: NewGroupCommandRouter(opts),
 	}
 }
@@ -113,6 +128,15 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 		if blocked {
 			return nil
+		}
+	}
+	if p.linkCleaner != nil {
+		cleaned, err := p.linkCleaner.CleanMessage(ctx, msg.Text, msg.Segments)
+		if err != nil {
+			log.Printf("clean tracked links failed: %v", err)
+		}
+		if len(cleaned) > 0 {
+			return sender.SendGroupText(ctx, msg.GroupID, trackedLinkReplyPrefix+"\n"+strings.Join(cleaned, "\n"))
 		}
 	}
 	text := strings.TrimSpace(msg.Text)

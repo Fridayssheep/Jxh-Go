@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -45,12 +46,14 @@ type Store interface {
 }
 
 type Options struct {
-	Now func() time.Time
+	Now       func() time.Time
+	ExportDir string
 }
 
 type Service struct {
-	store Store
-	now   func() time.Time
+	store     Store
+	now       func() time.Time
+	exportDir string
 }
 
 type KeywordReplyInput struct {
@@ -77,7 +80,11 @@ func NewService(store Store, opts Options) *Service {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{store: store, now: now}
+	exportDir := strings.TrimSpace(opts.ExportDir)
+	if exportDir == "" {
+		exportDir = filepath.Join("data", "exports", "trigger_stats")
+	}
+	return &Service{store: store, now: now, exportDir: exportDir}
 }
 
 // RecordKeywordReply stores one exact keyword or alias hit.

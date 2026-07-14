@@ -18,6 +18,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/config"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
+	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/napcat"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
@@ -98,6 +99,7 @@ func main() {
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
+		LinkCleaner:   linkcleaner.NewService(linkcleaner.Options{}),
 	})
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,

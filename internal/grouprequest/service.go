@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +47,7 @@ type Record struct {
 
 type Store interface {
 	UpsertGroupJoinRequest(ctx context.Context, record Record) error
-	ListGroupJoinRequests(ctx context.Context, groupID int64, limit int) ([]Record, error)
+	ListGroupJoinRequests(ctx context.Context, limit int) ([]Record, error)
 }
 
 type Options struct {
@@ -61,8 +62,15 @@ type Service struct {
 }
 
 type ExportResult struct {
-	Path  string
+	Dir   string
 	Count int
+	Files []ExportFile
+}
+
+type ExportFile struct {
+	GroupID int64
+	Path    string
+	Count   int
 }
 
 func NewService(store Store, opts Options) *Service {
@@ -85,34 +93,43 @@ func (s *Service) Record(ctx context.Context, record Record) error {
 	return s.store.UpsertGroupJoinRequest(ctx, record)
 }
 
-func (s *Service) Export(ctx context.Context, groupID int64, limit int) (ExportResult, error) {
+func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 	if s == nil || s.store == nil {
 		return ExportResult{}, fmt.Errorf("群申请存储未初始化")
 	}
-	if groupID <= 0 {
-		return ExportResult{}, fmt.Errorf("群号无效")
-	}
-	records, err := s.store.ListGroupJoinRequests(ctx, groupID, limit)
+	records, err := s.store.ListGroupJoinRequests(ctx, limit)
 	if err != nil {
 		return ExportResult{}, err
+	}
+	if len(records) == 0 {
+		return ExportResult{}, nil
 	}
 	if err := os.MkdirAll(s.exportDir, 0o755); err != nil {
 		return ExportResult{}, err
 	}
-	temp, err := os.CreateTemp(s.exportDir, "group_requests_"+s.now().Format("20060102_150405")+"_*.xlsx")
+	runDir, err := os.MkdirTemp(s.exportDir, "group_requests_"+s.now().Format("20060102_150405")+"_")
 	if err != nil {
 		return ExportResult{}, err
 	}
-	path := temp.Name()
-	if err := temp.Close(); err != nil {
-		_ = os.Remove(path)
-		return ExportResult{}, err
+	groups := make(map[int64][]Record)
+	for _, record := range records {
+		groups[record.GroupID] = append(groups[record.GroupID], record)
 	}
-	if err := writeXLSX(path, records); err != nil {
-		_ = os.Remove(path)
-		return ExportResult{}, err
+	groupIDs := make([]int64, 0, len(groups))
+	for groupID := range groups {
+		groupIDs = append(groupIDs, groupID)
 	}
-	return ExportResult{Path: path, Count: len(records)}, nil
+	sort.Slice(groupIDs, func(i, j int) bool { return groupIDs[i] < groupIDs[j] })
+	result := ExportResult{Dir: runDir, Count: len(records), Files: make([]ExportFile, 0, len(groupIDs))}
+	for _, groupID := range groupIDs {
+		path := filepath.Join(runDir, fmt.Sprintf("group_%d.xlsx", groupID))
+		if err := writeXLSX(path, groups[groupID]); err != nil {
+			_ = os.RemoveAll(runDir)
+			return ExportResult{}, err
+		}
+		result.Files = append(result.Files, ExportFile{GroupID: groupID, Path: path, Count: len(groups[groupID])})
+	}
+	return result, nil
 }
 
 // RecordFromEvent parses OneBot group request events that NapCat SDK exposes as UnknownEvent.
@@ -330,7 +347,10 @@ func writeXLSX(path string, records []Record) error {
 			}
 		}
 	}
-	return f.SaveAs(path)
+	if err := f.SaveAs(path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func formatTime(t time.Time) string {

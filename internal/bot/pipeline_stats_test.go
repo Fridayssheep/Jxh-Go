@@ -16,6 +16,7 @@ type recordingTriggerStats struct {
 	summaries []triggerstats.Summary
 	err       error
 	since     *time.Time
+	limit     int
 }
 
 func (r *recordingTriggerStats) RecordKnowledgeTrigger(ctx context.Context, event triggerstats.Event) error {
@@ -30,7 +31,7 @@ func (r *recordingTriggerStats) RecordKnowledgeTrigger(ctx context.Context, even
 func (r *recordingTriggerStats) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]triggerstats.Summary, error) {
 	_ = ctx
 	r.since = since
-	_ = limit
+	r.limit = limit
 	if r.err != nil {
 		return nil, r.err
 	}

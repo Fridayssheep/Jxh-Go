@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -44,8 +42,8 @@ const adminHelpText = `管理员命令（仅群主或允许的管理员可使用
 /admin 定时任务 添加 <每天|单次> <HH:MM> <群号> <消息>
 /admin 定时任务 移除 <任务ID>
 /admin 群申请 同步 [数量]
-/admin 群申请 导出 [全部|最近N]
-/admin 词条统计 [7d|30d|全部]
+/admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
+/admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
 提示：精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
 
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
@@ -61,10 +59,6 @@ func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 
 type GroupRequestFetcher interface {
 	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
-}
-
-type GroupFileUploader interface {
-	UploadGroupFile(ctx context.Context, groupID int64, path, name string) error
 }
 
 func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
@@ -278,21 +272,14 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [全部|最近N]")
 		}
-		result, err := r.groupRequests.Export(ctx, msg.GroupID, limit)
+		result, err := r.groupRequests.Export(ctx, limit)
 		if err != nil {
 			return err
 		}
-		uploader, ok := sender.(GroupFileUploader)
-		if !ok {
-			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但群文件上传接口未初始化。文件保存在：%s联系管理员来解决这个问题！", result.Count, result.Path))
+		if result.Count == 0 {
+			return sender.SendGroupText(ctx, msg.GroupID, "暂无群申请记录可导出")
 		}
-		if err := uploader.UploadGroupFile(ctx, msg.GroupID, result.Path, filepath.Base(result.Path)); err != nil {
-			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，但上传群文件失败：%v。文件保存在：%s。联系管理员来解决这个问题！", result.Count, err, result.Path))
-		}
-		if err := os.Remove(result.Path); err != nil && !os.IsNotExist(err) {
-			log.Printf("remove uploaded group request export %q failed: %v", result.Path, err)
-		}
-		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已导出群申请 %d 条，Excel 已发送到群文件", result.Count))
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群申请 %d 条，按 %d 个群分别保存到：%s", result.Count, len(result.Files), result.Dir))
 	case strings.HasPrefix(text, "同步"):
 		fetcher, ok := sender.(GroupRequestFetcher)
 		if !ok {
@@ -328,12 +315,12 @@ func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMe
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 词条统计 [7d|30d|全部]")
 	}
-	summaries, err := r.triggerStats.SummariesForDays(ctx, days, 10)
+	result, err := r.triggerStats.ExportForDays(ctx, days)
 	if err != nil {
-		log.Printf("query trigger stats failed: %v", err)
+		log.Printf("export trigger stats failed: %v", err)
 		return sender.SendGroupText(ctx, msg.GroupID, "词条统计服务暂不可用")
 	}
-	return sender.SendGroupText(ctx, msg.GroupID, triggerstats.FormatSummaries(summaries))
+	return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群的词条统计 %d 项，文件保存在：%s", result.Count, result.Path))
 }
 
 func targetAtUsers(msg GroupMessage) []int64 {

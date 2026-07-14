@@ -11,6 +11,7 @@ type memoryTriggerStore struct {
 	events    []Event
 	summaries []Summary
 	since     *time.Time
+	limit     int
 }
 
 func (s *memoryTriggerStore) RecordKnowledgeTrigger(ctx context.Context, event Event) error {
@@ -22,6 +23,7 @@ func (s *memoryTriggerStore) RecordKnowledgeTrigger(ctx context.Context, event E
 func (s *memoryTriggerStore) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]Summary, error) {
 	_ = ctx
 	s.since = since
+	s.limit = limit
 	if limit > 0 && len(s.summaries) > limit {
 		return append([]Summary(nil), s.summaries[:limit]...), nil
 	}

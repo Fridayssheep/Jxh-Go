@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 )
 
-const EmptyKnowledgeAnswer = "知识库里没有找到相关内容"
-const DisabledAnswer = "AI 问答未启用"
+const EmptyKnowledgeAnswer = "小弘没有在大脑里找到相关内容呢~"
+const DisabledAnswer = "管理员没有启动AI问答呢"
 
 type Document struct {
 	ID       string

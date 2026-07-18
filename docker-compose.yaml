@@ -37,15 +37,10 @@ services:
 
   quote:
     build:
-      context: ./deploy/quote
-      dockerfile: Dockerfile
-      args:
-        QQ_QUOTE_REF: ${QQ_QUOTE_REF:-main}
+      context: "https://github.com/SugarMGP/qq-quote-generator.git#${QQ_QUOTE_REF:-main}"
     image: jxh-quote:local
     container_name: jxh-quote
     restart: unless-stopped
-    environment:
-      TZ: ${QUOTE_TZ:-Asia/Shanghai}
     ports:
       - "5000:5000"
 

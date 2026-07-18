@@ -19,6 +19,8 @@ type GroupCommandRouter struct {
 	quote    QuoteGenerator
 }
 
+const maxQuoteMessages = 10
+
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	return &GroupCommandRouter{
 		ai:       opts.AI,
@@ -41,8 +43,8 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		return true, sender.SendGroupText(ctx, msg.GroupID, "精小弘正常")
 	case text == "/reload":
 		return true, r.handleReload(ctx, msg, sender)
-	case text == "/q":
-		return true, r.handleQuote(ctx, msg, sender)
+	case text == "/q" || strings.HasPrefix(text, "/q "):
+		return true, r.handleQuote(ctx, msg, sender, text)
 	case strings.HasPrefix(text, "/ai"):
 		return true, r.handleAI(ctx, msg, sender, text)
 	case strings.HasPrefix(text, "/admin"):
@@ -77,9 +79,13 @@ func (r *GroupCommandRouter) handleReload(ctx context.Context, msg GroupMessage,
 	return sender.SendGroupText(ctx, msg.GroupID, "重载成功")
 }
 
-func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, sender Sender) error {
+func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
 	if r.quote == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "引用图服务未初始化")
+	}
+	count, err := parseQuoteCount(text)
+	if err != nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "用法：回复一条消息后发送 /q [1-10]")
 	}
 	if msg.ReplyMessageID == 0 {
 		return sender.SendGroupText(ctx, msg.GroupID, "请回复一条消息后使用 /q")
@@ -88,28 +94,45 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	if !ok {
 		return sender.SendGroupText(ctx, msg.GroupID, "NapCat 消息接口未初始化")
 	}
-	quoted, err := getter.GetQuoteMessage(ctx, msg.ReplyMessageID)
+	quoted, err := getter.GetQuoteMessages(ctx, msg.GroupID, msg.ReplyMessageID, count)
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败："+err.Error())
 	}
 	resolver, _ := sender.(quote.ImageResolver)
-	payload, err := quote.BuildPayload(ctx, quote.MessageInput{
-		UserID:     quoted.UserID,
-		Nickname:   quoted.Nickname,
-		RawMessage: quoted.RawMessage,
-		Message:    quoted.Message,
-	}, resolver)
-	if err != nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "引用图消息解析失败："+err.Error())
+	inputs := make([]quote.MessageInput, 0, len(quoted))
+	for _, message := range quoted {
+		if message.MessageID == msg.MessageID {
+			continue
+		}
+		inputs = append(inputs, quote.MessageInput{
+			UserID: message.UserID, Nickname: message.Nickname,
+			RawMessage: message.RawMessage, Message: message.Message,
+		})
 	}
-	if len(payload) == 0 || quote.IsEmptyContent(payload[0].Message) {
+	payload := quote.BuildPayload(ctx, inputs, resolver)
+	if len(payload) == 0 {
 		return sender.SendGroupText(ctx, msg.GroupID, "被引用消息内容为空")
 	}
 	image, err := r.quote.Generate(ctx, payload)
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败："+err.Error())
 	}
-	return sender.SendGroupMessage(ctx, msg.GroupID, map[string]any{"type": "image", "data": map[string]any{"file": quote.ImageFile(image)}})
+	return sender.SendGroupMessage(ctx, msg.GroupID, map[string]any{"type": "image", "data": map[string]any{"file": "base64://" + image}})
+}
+
+func parseQuoteCount(text string) (int, error) {
+	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(text, "/q")))
+	if len(args) == 0 {
+		return 1, nil
+	}
+	if len(args) != 1 {
+		return 0, fmt.Errorf("invalid quote arguments")
+	}
+	count, err := strconv.Atoi(args[0])
+	if err != nil || count < 1 || count > maxQuoteMessages {
+		return 0, fmt.Errorf("quote count must be between 1 and %d", maxQuoteMessages)
+	}
+	return count, nil
 }
 
 func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {

@@ -187,10 +187,6 @@ type SDKSender struct {
 	client *napcatsdk.Client
 }
 
-func NewSDKSender(client *napcatsdk.Client) SDKSender {
-	return SDKSender{client: client}
-}
-
 func (s SDKSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
 	return s.SendGroupMessage(ctx, groupID, message.Text(text))
 }
@@ -203,22 +199,83 @@ func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg any)
 	return err
 }
 
-func (s SDKSender) GetQuoteMessage(ctx context.Context, messageID int64) (bot.QuotedMessage, error) {
-	var msg struct {
-		UserID     any            `json:"user_id"`
-		RawMessage string         `json:"raw_message"`
-		Sender     map[string]any `json:"sender"`
-		Message    any            `json:"message"`
+type quoteMessage struct {
+	MessageID  any            `json:"message_id"`
+	MessageSeq any            `json:"message_seq"`
+	UserID     any            `json:"user_id"`
+	RawMessage string         `json:"raw_message"`
+	Sender     map[string]any `json:"sender"`
+	Message    any            `json:"message"`
+}
+
+func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {
+	target, err := s.getQuoteMessage(ctx, messageID)
+	if err != nil {
+		return nil, err
 	}
-	if err := s.client.API().Call(ctx, string(api.ActionGetMsg), api.GetMsgRequest{MessageID: messageID}, &msg); err != nil {
-		return bot.QuotedMessage{}, err
+	if count <= 1 {
+		return []bot.QuotedMessage{target.quoted()}, nil
+	}
+	messageSeq := anyString(target.MessageSeq)
+	if messageSeq == "" {
+		return nil, fmt.Errorf("被引用消息缺少 message_seq")
+	}
+	history, err := s.client.API().GetGroupMsgHistory(ctx, api.GetGroupMsgHistoryRequest{
+		GroupID: strconv.FormatInt(groupID, 10), MessageSeq: messageSeq, Count: int64(count),
+	})
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]bot.QuotedMessage, 0, count)
+	targetFound := false
+	for _, item := range history.Messages {
+		message, err := decodeQuoteMessage(item)
+		if err != nil {
+			return nil, err
+		}
+		quoted := message.quoted()
+		targetFound = targetFound || quoted.MessageID == messageID
+		messages = append(messages, quoted)
+		if len(messages) == count {
+			break
+		}
+	}
+	if !targetFound {
+		messages = append([]bot.QuotedMessage{target.quoted()}, messages...)
+		if len(messages) > count {
+			messages = messages[:count]
+		}
+	}
+	return messages, nil
+}
+
+func (s SDKSender) getQuoteMessage(ctx context.Context, messageID int64) (quoteMessage, error) {
+	var message quoteMessage
+	err := s.client.API().Call(ctx, string(api.ActionGetMsg), api.GetMsgRequest{MessageID: messageID}, &message)
+	return message, err
+}
+
+func decodeQuoteMessage(raw any) (quoteMessage, error) {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return quoteMessage{}, fmt.Errorf("encode quote history message: %w", err)
+	}
+	var message quoteMessage
+	if err := json.Unmarshal(data, &message); err != nil {
+		return quoteMessage{}, fmt.Errorf("decode quote history message: %w", err)
+	}
+	return message, nil
+}
+
+func (m quoteMessage) quoted() bot.QuotedMessage {
+	userID := anyInt64(m.UserID)
+	if userID == 0 {
+		userID = anyInt64(m.Sender["user_id"])
 	}
 	return bot.QuotedMessage{
-		UserID:     anyInt64(msg.UserID),
-		Nickname:   senderNickname(msg.Sender),
-		RawMessage: msg.RawMessage,
-		Message:    msg.Message,
-	}, nil
+		MessageID: anyInt64(m.MessageID), UserID: userID,
+		Nickname: senderNickname(m.Sender), RawMessage: m.RawMessage, Message: m.Message,
+	}
 }
 
 func (s SDKSender) ResolveImage(ctx context.Context, file string) (string, error) {

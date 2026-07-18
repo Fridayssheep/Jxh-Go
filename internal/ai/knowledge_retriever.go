@@ -2,7 +2,6 @@ package ai
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/knowledge"
@@ -50,7 +49,7 @@ func (r KnowledgeRetriever) Retrieve(ctx context.Context, query string, topK int
 			metadata["path"] = doc.Entry.Path
 		}
 		out = append(out, Document{
-			ID:       fmt.Sprintf("%s", doc.Entry.SourceKey),
+			ID:       doc.Entry.SourceKey,
 			Content:  doc.Entry.Content,
 			Metadata: metadata,
 			Score:    doc.Score,

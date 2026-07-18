@@ -9,6 +9,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
+	"github.com/zjutjh/jxh-go/internal/quote"
 )
 
 type recordingSender struct {
@@ -36,6 +37,26 @@ type recordingModerator struct {
 	bannedGroup  int64
 	banDuration  int64
 	restarted    bool
+}
+
+type quoteCommandSender struct {
+	recordingSender
+	messages []QuotedMessage
+	count    int
+}
+
+func (s *quoteCommandSender) GetQuoteMessages(_ context.Context, _, _ int64, count int) ([]QuotedMessage, error) {
+	s.count = count
+	return s.messages, nil
+}
+
+type recordingQuoteGenerator struct {
+	payload quote.Payload
+}
+
+func (q *recordingQuoteGenerator) Generate(_ context.Context, payload quote.Payload) (string, error) {
+	q.payload = payload
+	return "R0lGODlh", nil
 }
 
 func (s *recordingModerator) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
@@ -192,6 +213,42 @@ func TestGroupCommandRouterHandlesAICommandWhenMentioningSelf(t *testing.T) {
 	}
 	if sender.text != ai.DisabledAnswer {
 		t.Fatalf("sent text = %q, want %q", sender.text, ai.DisabledAnswer)
+	}
+}
+
+func TestGroupCommandRouterQuotesMultipleMessages(t *testing.T) {
+	sender := &quoteCommandSender{messages: []QuotedMessage{
+		{MessageID: 10, UserID: 1, Nickname: "one", RawMessage: "first"},
+		{MessageID: 11, UserID: 2, Nickname: "two", RawMessage: "second"},
+		{MessageID: 99, UserID: 3, Nickname: "bot caller", RawMessage: "/q 3"},
+	}}
+	generator := &recordingQuoteGenerator{}
+	router := NewGroupCommandRouter(Options{Quote: generator})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, SelfID: 999, MessageID: 99, ReplyMessageID: 10,
+		Text: "/q 3", AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil || !handled {
+		t.Fatalf("Handle = (%v, %v), want handled without error", handled, err)
+	}
+	if sender.count != 3 || len(generator.payload) != 2 {
+		t.Fatalf("count = %d, payload = %#v", sender.count, generator.payload)
+	}
+}
+
+func TestParseQuoteCount(t *testing.T) {
+	for input, want := range map[string]int{"/q": 1, "/q 3": 3, "/q 10": 10} {
+		got, err := parseQuoteCount(input)
+		if err != nil || got != want {
+			t.Fatalf("parseQuoteCount(%q) = (%d, %v), want %d", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"/q 0", "/q 11", "/q x", "/q 2 extra"} {
+		if _, err := parseQuoteCount(input); err == nil {
+			t.Fatalf("parseQuoteCount(%q) succeeded", input)
+		}
 	}
 }
 

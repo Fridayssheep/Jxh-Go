@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -31,10 +30,11 @@ type QuoteGenerator interface {
 }
 
 type QuoteMessageGetter interface {
-	GetQuoteMessage(ctx context.Context, messageID int64) (QuotedMessage, error)
+	GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]QuotedMessage, error)
 }
 
 type QuotedMessage struct {
+	MessageID  int64
 	UserID     int64
 	Nickname   string
 	RawMessage string
@@ -148,21 +148,4 @@ func (p *Pipeline) currentSender() Sender {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.sender
-}
-
-type StaticQuote struct {
-	Result string
-	Err    error
-}
-
-func (q StaticQuote) Generate(ctx context.Context, payload quote.Payload) (string, error) {
-	_ = ctx
-	_ = payload
-	if q.Err != nil {
-		return "", q.Err
-	}
-	if q.Result == "" {
-		return "", fmt.Errorf("empty quote result")
-	}
-	return q.Result, nil
 }

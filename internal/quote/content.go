@@ -1,30 +1,21 @@
 package quote
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"html"
-	"mime"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 )
-
-const qqFaceDirEnv = "JXH_QQ_FACE_DIR"
 
 type onebotSegment struct {
 	Type string         `json:"type"`
 	Data map[string]any `json:"data"`
 }
 
-func ContentFromMessage(raw string, structured ...any) any {
-	if len(structured) > 0 {
-		if content, ok := structuredMessageContent(structured[0]); ok {
-			return content
-		}
+func contentFromMessage(raw string, structured any) any {
+	if content, ok := structuredMessageContent(structured); ok {
+		return content
 	}
 	segments := parseCQMessage(raw)
 	if len(segments) == 0 {
@@ -36,7 +27,7 @@ func ContentFromMessage(raw string, structured ...any) any {
 	return segments
 }
 
-func IsEmptyContent(content any) bool {
+func isEmptyContent(content any) bool {
 	switch v := content.(type) {
 	case string:
 		return strings.TrimSpace(v) == ""
@@ -45,22 +36,6 @@ func IsEmptyContent(content any) bool {
 	default:
 		return v == nil
 	}
-}
-
-func Nickname(nickname string) string {
-	nickname = strings.TrimSpace(nickname)
-	if nickname == "" {
-		return "匿名"
-	}
-	return nickname
-}
-
-func ImageFile(image string) string {
-	image = strings.TrimSpace(image)
-	if strings.HasPrefix(image, "base64://") || strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://") || strings.HasPrefix(image, "file://") {
-		return image
-	}
-	return "base64://" + image
 }
 
 func structuredMessageContent(raw any) (any, bool) {
@@ -207,39 +182,18 @@ func normalizeImageSource(source string) string {
 	if strings.HasPrefix(source, "base64://") {
 		return "data:image/png;base64," + strings.TrimPrefix(source, "base64://")
 	}
-	if strings.HasPrefix(source, "file://") {
-		if dataURI, ok := imageFileDataURI(strings.TrimPrefix(source, "file://")); ok {
-			return dataURI
-		}
-		return source
-	}
-	if strings.HasPrefix(source, "/") {
-		if dataURI, ok := imageFileDataURI(source); ok {
-			return dataURI
-		}
-	}
 	return source
 }
 
-func imageFileDataURI(path string) (string, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	contentType := mime.TypeByExtension(filepath.Ext(path))
-	if contentType == "" {
-		contentType = "image/png"
-	}
-	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data), true
-}
-
 func appendQQFaceSegment(segments *[]MessageSegment, params map[string]string) {
-	if url := strings.TrimSpace(params["url"]); url != "" {
-		appendImageSegment(segments, url, "emoji")
-		return
-	}
 	id := firstNonEmpty(params["id"], params["face_id"], params["emoji_id"])
-	if url, ok := qqFaceDataURI(id); ok {
+	if len(id) <= 10 {
+		if _, err := strconv.ParseUint(id, 10, 64); err == nil {
+			*segments = append(*segments, MessageSegment{Type: "face", ID: id})
+			return
+		}
+	}
+	if url := strings.TrimSpace(params["url"]); url != "" {
 		appendImageSegment(segments, url, "emoji")
 		return
 	}
@@ -254,10 +208,6 @@ func appendCQEmojiSegment(segments *[]MessageSegment, params map[string]string) 
 	id := firstNonEmpty(params["id"], params["emoji_id"])
 	if text, ok := unicodeEmoji(id); ok {
 		appendTextSegment(segments, text)
-		return
-	}
-	if url, ok := qqFaceDataURI(id); ok {
-		appendImageSegment(segments, url, "emoji")
 		return
 	}
 	appendTextSegment(segments, "[表情]")
@@ -306,9 +256,7 @@ func isUsableImageSource(value string) bool {
 	return strings.HasPrefix(lower, "http://") ||
 		strings.HasPrefix(lower, "https://") ||
 		strings.HasPrefix(lower, "data:image/") ||
-		strings.HasPrefix(lower, "base64://") ||
-		strings.HasPrefix(lower, "file://") ||
-		strings.HasPrefix(lower, "/")
+		strings.HasPrefix(lower, "base64://")
 }
 
 func segmentDataString(data map[string]any, key string) string {
@@ -347,72 +295,6 @@ func unicodeEmoji(id string) (string, bool) {
 		return "", false
 	}
 	return string(r), true
-}
-
-func qqFaceDataURI(id string) (string, bool) {
-	id, ok := qqFaceAssetID(id)
-	if !ok {
-		return "", false
-	}
-	for _, dir := range qqFaceAssetDirs() {
-		data, err := os.ReadFile(filepath.Join(dir, id+".png"))
-		if err != nil {
-			continue
-		}
-		return "data:image/png;base64," + base64.StdEncoding.EncodeToString(data), true
-	}
-	return "", false
-}
-
-func qqFaceAssetID(id string) (string, bool) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return "", false
-	}
-	for _, r := range id {
-		if r < '0' || r > '9' {
-			return "", false
-		}
-	}
-	return id, true
-}
-
-func qqFaceAssetDirs() []string {
-	dirs := splitQQFaceDirEnv()
-	dirs = append(dirs, defaultQQFaceAssetDirs()...)
-	return dirs
-}
-
-func splitQQFaceDirEnv() []string {
-	env := os.Getenv(qqFaceDirEnv)
-	if env == "" {
-		return nil
-	}
-	parts := filepath.SplitList(env)
-	dirs := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if dir := strings.TrimSpace(part); dir != "" {
-			dirs = append(dirs, dir)
-		}
-	}
-	return dirs
-}
-
-func defaultQQFaceAssetDirs() []string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil
-	}
-	pattern := filepath.Join(
-		home,
-		"Library/Containers/com.tencent.qq/Data/Library/Application Support/QQ/versions/*/QQUpdate.app/Contents/Resources/app/resource/default-emojis",
-	)
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
-	return matches
 }
 
 func mergeAdjacentTextSegments(segments []MessageSegment) []MessageSegment {

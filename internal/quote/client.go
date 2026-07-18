@@ -3,14 +3,12 @@ package quote
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -19,6 +17,7 @@ type MessageSegment struct {
 	Kind string `json:"kind,omitempty"`
 	Text string `json:"text,omitempty"`
 	URL  string `json:"url,omitempty"`
+	ID   any    `json:"id,omitempty"`
 }
 
 type Message struct {
@@ -31,15 +30,8 @@ type Message struct {
 type Payload []Message
 
 type Client struct {
-	baseURL     string
-	client      *http.Client
-	avatarCache sync.Map
-}
-
-const maxAvatarBytes = 1 << 20
-
-var qqAvatarURL = func(userID int64) string {
-	return "https://q1.qlogo.cn/g?b=qq&nk=" + strconv.FormatInt(userID, 10) + "&s=100"
+	baseURL string
+	client  *http.Client
 }
 
 func NewClient(baseURL string, client *http.Client) *Client {
@@ -50,83 +42,38 @@ func NewClient(baseURL string, client *http.Client) *Client {
 }
 
 func (c *Client) Generate(ctx context.Context, payload Payload) (string, error) {
-	payload = c.withDefaultAvatars(ctx, payload)
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("marshal quote payload: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/base64/", bytes.NewReader(data))
+	image, gifErr := c.generate(ctx, data, "/gif/base64/")
+	if gifErr == nil {
+		return image, nil
+	}
+	image, pngErr := c.generate(ctx, data, "/png/base64/")
+	if pngErr != nil {
+		return "", errors.Join(fmt.Errorf("generate GIF quote: %w", gifErr), fmt.Errorf("generate PNG fallback: %w", pngErr))
+	}
+	return image, nil
+}
+
+func (c *Client) generate(ctx context.Context, payload []byte, path string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("create quote request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("request quote image: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read quote response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("quote server returned %s: %s", resp.Status, string(body))
 	}
 	return string(body), nil
-}
-
-func (c *Client) withDefaultAvatars(ctx context.Context, payload Payload) Payload {
-	out := make(Payload, len(payload))
-	copy(out, payload)
-	for i, message := range out {
-		if strings.TrimSpace(message.Avatar) != "" || message.UserID <= 0 {
-			continue
-		}
-		if avatar := c.avatarDataURI(ctx, message.UserID); avatar != "" {
-			out[i].Avatar = avatar
-			continue
-		}
-		out[i].Avatar = qqAvatarURL(message.UserID)
-	}
-	return out
-}
-
-func (c *Client) avatarDataURI(ctx context.Context, userID int64) string {
-	if cached, ok := c.avatarCache.Load(userID); ok {
-		return cached.(string)
-	}
-	avatarCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	dataURI := c.fetchAvatarDataURI(avatarCtx, qqAvatarURL(userID))
-	if dataURI != "" {
-		c.avatarCache.Store(userID, dataURI)
-	}
-	return dataURI
-}
-
-func (c *Client) fetchAvatarDataURI(ctx context.Context, url string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return ""
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ""
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAvatarBytes+1))
-	if err != nil || len(data) == 0 || len(data) > maxAvatarBytes {
-		return ""
-	}
-	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
-	if contentType == "" {
-		contentType = http.DetectContentType(data)
-	}
-	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-		return ""
-	}
-	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }

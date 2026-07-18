@@ -82,7 +82,7 @@ func (h *AdminHandler) Handle(ctx context.Context, input AdminInput) (string, er
 	return h.ExecuteAuthorized(ctx, input)
 }
 
-// 在admin执行命令鉴权
+// ExecuteAuthorized 执行已通过鉴权的管理员命令。
 func (h *AdminHandler) ExecuteAuthorized(ctx context.Context, input AdminInput) (string, error) {
 	text := strings.TrimSpace(input.Text)
 	switch {

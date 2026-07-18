@@ -13,32 +13,23 @@ type onebotSegment struct {
 	Data map[string]any `json:"data"`
 }
 
-func contentFromMessage(raw string, structured any) any {
+func contentFromMessage(raw string, structured any) []MessageSegment {
 	if content, ok := structuredMessageContent(structured); ok {
 		return content
 	}
-	segments := parseCQMessage(raw)
-	if len(segments) == 0 {
-		return ""
-	}
-	if len(segments) == 1 && segments[0].Type == "text" {
-		return segments[0].Text
-	}
-	return segments
+	return parseCQMessage(raw)
 }
 
-func isEmptyContent(content any) bool {
-	switch v := content.(type) {
-	case string:
-		return strings.TrimSpace(v) == ""
-	case []MessageSegment:
-		return len(v) == 0
-	default:
-		return v == nil
+func isEmptyContent(content []MessageSegment) bool {
+	for _, segment := range content {
+		if segment.Type != "text" || strings.TrimSpace(segment.Text) != "" {
+			return false
+		}
 	}
+	return true
 }
 
-func structuredMessageContent(raw any) (any, bool) {
+func structuredMessageContent(raw any) ([]MessageSegment, bool) {
 	onebotSegments, ok := decodeOneBotSegments(raw)
 	if !ok {
 		return nil, false
@@ -68,10 +59,7 @@ func structuredMessageContent(raw any) (any, bool) {
 	}
 	segments = mergeAdjacentTextSegments(segments)
 	if len(segments) == 0 {
-		return "", true
-	}
-	if len(segments) == 1 && segments[0].Type == "text" {
-		return segments[0].Text, true
+		return nil, true
 	}
 	return segments, true
 }

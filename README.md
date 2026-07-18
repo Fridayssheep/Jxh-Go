@@ -176,7 +176,7 @@ go run ./cmd/bot -config config.yaml
 | `JXH_AI_BASE_URL` | ChatModel base URL |
 | `JXH_AI_API_KEY` | ChatModel API Key |
 | `JXH_AI_MODEL` | ChatModel 模型名；openai 填模型名，ark 填方舟推理接入点 ID |
-| `QQ_QUOTE_REF` | 构建引用图服务使用的 `SugarMGP/qq-quote-generator` 分支或 tag，默认 `main` |
+| `QQ_QUOTE_REF` | 构建引用图服务使用的 `zjutjh/qq-quote-generator` 分支或 tag，默认 `main` |
 
 AI 行为：
 
@@ -186,7 +186,7 @@ AI 行为：
 
 ## 引用图服务
 
-引用图由 `SugarMGP/qq-quote-generator` 提供。Compose 直接使用该仓库的 Dockerfile 构建，支持多消息、图文混排、QQ 表情和 GIF/APNG 动画；默认生成 GIF，失败时回退 PNG，无法渲染的空消息会自动忽略。该实现使用 SVG 和 resvg 渲染，运行时不依赖 Chromium。
+引用图由 `zjutjh/qq-quote-generator` 提供。Compose 直接使用该仓库的 Dockerfile 构建，客户端按当前接口将消息统一转换为片段数组，并将 QQ 表情 ID 编码为十进制字符串。服务支持多消息、图文混排、QQ 表情和 GIF/APNG 动画；默认生成 GIF，失败时回退 PNG，无法渲染的空消息会自动忽略。该实现使用 SVG 和 resvg 渲染，运行时不依赖 Chromium。
 
 配置引用图服务:
 

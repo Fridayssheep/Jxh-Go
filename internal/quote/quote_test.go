@@ -36,8 +36,8 @@ func TestLatestQuoteContract(t *testing.T) {
 	if len(payload) != 2 {
 		t.Fatalf("payload length = %d, want 2 non-empty messages", len(payload))
 	}
-	segments, ok := payload[0].Message.([]MessageSegment)
-	if !ok || len(segments) != 3 {
+	segments := payload[0].Message
+	if len(segments) != 3 {
 		t.Fatalf("message = %#v, want three segments", payload[0].Message)
 	}
 	if segments[0].Type != "face" || segments[0].ID != "178" {
@@ -51,6 +51,25 @@ func TestLatestQuoteContract(t *testing.T) {
 	}
 	if len(resolver.sources) != 1 || resolver.sources[0] != "napcat-image-token" {
 		t.Fatalf("resolved sources = %v, want only NapCat token", resolver.sources)
+	}
+	if len(payload[1].Message) != 1 || payload[1].Message[0] != (MessageSegment{Type: "text", Text: "second message"}) {
+		t.Fatalf("plain text message = %#v, want one text segment", payload[1].Message)
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var wire []struct {
+		Message []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatalf("payload does not match latest quote contract: %v\npayload: %s", err, data)
+	}
+	if wire[0].Message[0].ID != "178" || wire[1].Message[0].Type != "text" {
+		t.Fatalf("wire payload = %s", data)
 	}
 
 	type request struct {

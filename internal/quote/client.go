@@ -17,14 +17,14 @@ type MessageSegment struct {
 	Kind string `json:"kind,omitempty"`
 	Text string `json:"text,omitempty"`
 	URL  string `json:"url,omitempty"`
-	ID   any    `json:"id,omitempty"`
+	ID   string `json:"id,omitempty"`
 }
 
 type Message struct {
-	UserID       int64  `json:"user_id"`
-	UserNickname string `json:"user_nickname"`
-	Avatar       string `json:"avatar,omitempty"`
-	Message      any    `json:"message"`
+	UserID       int64            `json:"user_id"`
+	UserNickname string           `json:"user_nickname"`
+	Avatar       string           `json:"avatar,omitempty"`
+	Message      []MessageSegment `json:"message"`
 }
 
 type Payload []Message

@@ -3,10 +3,8 @@ package napcat
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
@@ -78,44 +76,6 @@ func (h *recordingHandler) HandleGroupJoinRequest(ctx context.Context, record gr
 	return h.requestErr
 }
 
-type lifecycleDedupe struct {
-	mu        sync.Mutex
-	inFlight  map[string]bool
-	completed map[string]bool
-}
-
-func (d *lifecycleDedupe) Begin(ctx context.Context, key string) (bool, error) {
-	_ = ctx
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.completed[key] || d.inFlight[key] {
-		return true, nil
-	}
-	if d.inFlight == nil {
-		d.inFlight = make(map[string]bool)
-	}
-	d.inFlight[key] = true
-	return false, nil
-}
-
-func (d *lifecycleDedupe) Complete(ctx context.Context, key string) error {
-	_ = ctx
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.completed == nil {
-		d.completed = make(map[string]bool)
-	}
-	d.completed[key] = true
-	delete(d.inFlight, key)
-	return nil
-}
-
-func (d *lifecycleDedupe) Abort(key string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	delete(d.inFlight, key)
-}
-
 func TestToGroupMessageMarksOwnerAndExtractsMentions(t *testing.T) {
 	ev := &event.GroupMessage{
 		GroupID:    1001,
@@ -176,28 +136,6 @@ func TestHandleEventRecordsGroupJoinRequest(t *testing.T) {
 	}
 }
 
-func TestProcessEventRetriesAfterHandlerFailureThenDeduplicatesSuccess(t *testing.T) {
-	raw := []byte(`{"time":1780000000,"post_type":"request","request_type":"group","group_id":1001,"user_id":2002,"flag":"flag-1"}`)
-	ev := &event.UnknownEvent{Base: event.Base{
-		EventTime: 1780000000, EventPostType: "request", EventSelfID: 999, RawData: raw,
-	}}
-	handler := &recordingHandler{requestErr: errors.New("database unavailable")}
-	server := Server{Handler: handler, Dedupe: &lifecycleDedupe{}}
-
-	if err := server.processEvent(context.Background(), nil, ev); err == nil {
-		t.Fatal("first processEvent returned nil error")
-	}
-	handler.requestErr = nil
-	if err := server.processEvent(context.Background(), nil, ev); err != nil {
-		t.Fatalf("retry processEvent returned error: %v", err)
-	}
-	if err := server.processEvent(context.Background(), nil, ev); err != nil {
-		t.Fatalf("duplicate processEvent returned error: %v", err)
-	}
-	if handler.requestCalls != 2 {
-		t.Fatalf("handler calls = %d, want 2", handler.requestCalls)
-	}
-}
 func TestSDKSenderUploadsGroupFile(t *testing.T) {
 	var request api.UploadGroupFileRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

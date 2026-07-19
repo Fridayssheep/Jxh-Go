@@ -2,7 +2,6 @@ package napcat
 
 import (
 	"context"
-	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -27,12 +26,6 @@ type groupJoinRequestHandler interface {
 	HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error
 }
 
-type Dedupe interface {
-	Begin(ctx context.Context, key string) (duplicate bool, err error)
-	Complete(ctx context.Context, key string) error
-	Abort(key string)
-}
-
 type Server struct {
 	Addr           string
 	WSURL          string
@@ -40,7 +33,6 @@ type Server struct {
 	RequestTimeout time.Duration
 	ReconnectDelay time.Duration
 	Handler        Handler
-	Dedupe         Dedupe
 }
 
 func (s Server) Serve(ctx context.Context) error {
@@ -96,36 +88,11 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			if !ok {
 				return
 			}
-			if err := s.processEvent(ctx, client, ev); err != nil {
+			if err := s.handleEvent(ctx, client, ev); err != nil {
 				log.Printf("handle napcat event failed: %v", err)
 			}
 		}
 	}
-}
-
-func (s Server) processEvent(ctx context.Context, client *napcatsdk.Client, ev event.Event) error {
-	key := eventKey(ev)
-	if s.Dedupe != nil {
-		duplicate, err := s.Dedupe.Begin(ctx, key)
-		if err != nil {
-			log.Printf("begin napcat event dedupe failed: %v", err)
-		}
-		if duplicate {
-			return nil
-		}
-	}
-	if err := s.handleEvent(ctx, client, ev); err != nil {
-		if s.Dedupe != nil {
-			s.Dedupe.Abort(key)
-		}
-		return err
-	}
-	if s.Dedupe != nil {
-		if err := s.Dedupe.Complete(ctx, key); err != nil {
-			log.Printf("complete napcat event dedupe failed: %v", err)
-		}
-	}
-	return nil
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) bool {
@@ -207,20 +174,6 @@ func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *even
 		MessageID: strconv.FormatInt(e.MessageID, 10),
 	})
 	return err
-}
-
-func eventKey(ev event.Event) string {
-	switch e := ev.(type) {
-	case *event.GroupMessage:
-		return fmt.Sprintf("group-message:%d:%d:%d", e.GroupID, e.MessageID, e.Time())
-	case *event.PrivateMessage:
-		return fmt.Sprintf("private-message:%d:%d:%d", e.UserID, e.MessageID, e.Time())
-	case *event.UnknownEvent:
-		sum := sha1.Sum(e.Raw())
-		return fmt.Sprintf("unknown:%s:%d:%d:%x", e.PostType(), e.SelfID(), e.Time(), sum[:8])
-	default:
-		return fmt.Sprintf("%s:%d:%d", ev.PostType(), ev.SelfID(), ev.Time())
-	}
 }
 
 func extractReplyID(chain message.Chain) int64 {

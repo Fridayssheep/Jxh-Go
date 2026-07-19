@@ -9,18 +9,16 @@ import (
 )
 
 type Config struct {
-	App         AppConfig         `yaml:"app"`
-	Server      ServerConfig      `yaml:"server"`
-	OneBot      OneBotConfig      `yaml:"onebot"`
-	WPS         WPSConfig         `yaml:"wps"`
-	Database    DatabaseConfig    `yaml:"database"`
-	Redis       RedisConfig       `yaml:"redis"`
-	AI          AIConfig          `yaml:"ai"`
-	EventDedupe EventDedupeConfig `yaml:"event_dedupe"`
-	Cache       CacheConfig       `yaml:"cache"`
-	Quote       QuoteConfig       `yaml:"quote"`
-	Scheduler   SchedulerConfig   `yaml:"scheduler"`
-	Debug       DebugConfig       `yaml:"debug"`
+	App       AppConfig       `yaml:"app"`
+	Server    ServerConfig    `yaml:"server"`
+	OneBot    OneBotConfig    `yaml:"onebot"`
+	WPS       WPSConfig       `yaml:"wps"`
+	Database  DatabaseConfig  `yaml:"database"`
+	AI        AIConfig        `yaml:"ai"`
+	Cache     CacheConfig     `yaml:"cache"`
+	Quote     QuoteConfig     `yaml:"quote"`
+	Scheduler SchedulerConfig `yaml:"scheduler"`
+	Debug     DebugConfig     `yaml:"debug"`
 }
 
 type AppConfig struct {
@@ -62,13 +60,6 @@ type DatabaseConfig struct {
 	DSN       string `yaml:"dsn"`
 }
 
-type RedisConfig struct {
-	Addr               string `yaml:"addr"`
-	Password           string `yaml:"password"`
-	DB                 int    `yaml:"db"`
-	DailyRetentionDays int    `yaml:"daily_retention_days"`
-}
-
 type AIConfig struct {
 	Enabled          bool    `yaml:"enabled"`
 	Provider         string  `yaml:"provider"`
@@ -79,11 +70,6 @@ type AIConfig struct {
 	MaxQuestionChars int     `yaml:"max_question_chars"`
 	TopK             int     `yaml:"top_k"`
 	ScoreThreshold   float64 `yaml:"score_threshold"`
-}
-
-type EventDedupeConfig struct {
-	RetentionHours       int `yaml:"retention_hours"`
-	CleanupIntervalHours int `yaml:"cleanup_interval_hours"`
 }
 
 type CacheConfig struct {
@@ -144,9 +130,6 @@ func Default() Config {
 			ParseTime: true,
 			Loc:       "Local",
 		},
-		Redis: RedisConfig{
-			DailyRetentionDays: 180,
-		},
 		AI: AIConfig{
 			Enabled:          true,
 			Provider:         "openai",
@@ -155,11 +138,10 @@ func Default() Config {
 			TopK:             5,
 			ScoreThreshold:   0.1,
 		},
-		EventDedupe: EventDedupeConfig{RetentionHours: 72, CleanupIntervalHours: 6},
-		Cache:       CacheConfig{AIRetrievalTTLSec: 300},
-		Quote:       QuoteConfig{BaseURL: "http://quote:5000", TimeoutSec: 10},
-		Scheduler:   SchedulerConfig{Timezone: "Asia/Shanghai"},
-		Debug:       DebugConfig{EnableTestCommand: true},
+		Cache:     CacheConfig{AIRetrievalTTLSec: 300},
+		Quote:     QuoteConfig{BaseURL: "http://quote:5000", TimeoutSec: 10},
+		Scheduler: SchedulerConfig{Timezone: "Asia/Shanghai"},
+		Debug:     DebugConfig{EnableTestCommand: true},
 	}
 }
 
@@ -196,18 +178,6 @@ func applyEnv(cfg *Config) {
 	})
 	override("JXH_MYSQL_PASSWORD", func(v string) { cfg.Database.Password = v })
 	override("JXH_MYSQL_DSN", func(v string) { cfg.Database.DSN = v })
-	override("JXH_REDIS_ADDR", func(v string) { cfg.Redis.Addr = v })
-	override("JXH_REDIS_PASSWORD", func(v string) { cfg.Redis.Password = v })
-	override("JXH_REDIS_DB", func(v string) {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			cfg.Redis.DB = parsed
-		}
-	})
-	override("JXH_REDIS_DAILY_RETENTION_DAYS", func(v string) {
-		if parsed, err := strconv.Atoi(v); err == nil {
-			cfg.Redis.DailyRetentionDays = parsed
-		}
-	})
 	override("JXH_QUOTE_BASE_URL", func(v string) { cfg.Quote.BaseURL = v })
 	override("JXH_AI_PROVIDER", func(v string) { cfg.AI.Provider = v })
 	override("JXH_AI_BASE_URL", func(v string) { cfg.AI.BaseURL = v })
@@ -241,15 +211,6 @@ func normalize(cfg *Config) {
 	}
 	if cfg.AI.Provider == "" {
 		cfg.AI.Provider = "openai"
-	}
-	if cfg.EventDedupe.RetentionHours <= 0 {
-		cfg.EventDedupe.RetentionHours = 72
-	}
-	if cfg.EventDedupe.CleanupIntervalHours <= 0 {
-		cfg.EventDedupe.CleanupIntervalHours = 6
-	}
-	if cfg.Redis.DailyRetentionDays <= 0 {
-		cfg.Redis.DailyRetentionDays = 180
 	}
 	if cfg.Quote.TimeoutSec <= 0 {
 		cfg.Quote.TimeoutSec = 10

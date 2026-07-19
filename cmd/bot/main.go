@@ -7,13 +7,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/bot"
-	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/config"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
@@ -47,11 +44,6 @@ func main() {
 	store := storage.NewStore(db)
 
 	knowledgeIndex := knowledge.NewIndexRef(nil)
-	eventDedupe := &persistentDedupe{
-		memory: cache.NewEventDedupe(time.Duration(cfg.EventDedupe.RetentionHours) * time.Hour),
-		store:  store,
-	}
-	go cleanupProcessedEvents(ctx, store, cfg)
 	knowledgeRetrieverOptions := ai.KnowledgeRetrieverOptions{
 		ScoreThreshold: cfg.AI.ScoreThreshold,
 		CacheTTL:       time.Duration(cfg.Cache.AIRetrievalTTLSec) * time.Second,
@@ -82,13 +74,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("create ai service: %v", err)
 	}
-	triggerStats, closeTriggerStats := initTriggerStatsService(ctx, cfg)
-	defer closeTriggerStats()
+	location := applicationLocation(cfg)
+	triggerStats := triggerstats.NewService(store, triggerstats.Options{
+		Now:            func() time.Time { return time.Now().In(location) },
+		ResolveKeyword: knowledgeIndex.Keyword,
+	})
 	groupRequests := grouprequest.NewService(store, grouprequest.Options{ExportDir: "./data/exports/group_requests"})
 	pipeline := bot.NewPipeline(bot.Options{
 		Knowledge:     knowledgeIndex,
 		AI:            aiSvc,
-		Blacklist:     store,
 		Reloader:      knowledgeSync,
 		Admin:         commands.NewAdminHandler(store),
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
@@ -110,7 +104,6 @@ func main() {
 		RequestTimeout: cfg.OneBot.APITimeout,
 		ReconnectDelay: cfg.OneBot.ReconnectInterval,
 		Handler:        pipeline,
-		Dedupe:         eventDedupe,
 	}
 	if cfg.OneBot.WSURL != "" {
 		log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
@@ -157,39 +150,6 @@ func newAIService(ctx context.Context, cfg config.Config, retriever ai.Retriever
 	}), nil
 }
 
-func newTriggerStatsService(ctx context.Context, cfg config.Config) (*triggerstats.Service, func(), error) {
-	if cfg.Redis.Addr == "" {
-		return nil, func() {}, nil
-	}
-	client := redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr,
-		Password: cfg.Redis.Password,
-		DB:       cfg.Redis.DB,
-	})
-	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	if err := client.Ping(pingCtx).Err(); err != nil {
-		_ = client.Close()
-		return nil, func() {}, err
-	}
-	location := applicationLocation(cfg)
-	now := func() time.Time { return time.Now().In(location) }
-	store := triggerstats.NewRedisStore(client, triggerstats.RedisStoreOptions{
-		DailyRetention: time.Duration(cfg.Redis.DailyRetentionDays) * 24 * time.Hour,
-		Now:            now,
-	})
-	return triggerstats.NewService(store, triggerstats.Options{Now: now}), func() { _ = client.Close() }, nil
-}
-
-func initTriggerStatsService(ctx context.Context, cfg config.Config) (*triggerstats.Service, func()) {
-	service, closeFn, err := newTriggerStatsService(ctx, cfg)
-	if err != nil {
-		log.Printf("trigger stats disabled: connect redis: %v", err)
-		return nil, func() {}
-	}
-	return service, closeFn
-}
-
 func applicationLocation(cfg config.Config) *time.Location {
 	if cfg.App.Timezone != "" {
 		if location, err := time.LoadLocation(cfg.App.Timezone); err == nil {
@@ -199,108 +159,6 @@ func applicationLocation(cfg config.Config) *time.Location {
 		}
 	}
 	return time.Local
-}
-
-type persistentDedupe struct {
-	mu       sync.Mutex
-	inFlight map[string]struct{}
-	memory   *cache.EventDedupe
-	store    processedEventStore
-}
-
-type processedEventStore interface {
-	HasProcessedEvent(ctx context.Context, key string) (bool, error)
-	MarkProcessedEvent(ctx context.Context, key string, at time.Time) error
-}
-
-func (d *persistentDedupe) Begin(ctx context.Context, key string) (bool, error) {
-	if d == nil {
-		return false, nil
-	}
-	d.mu.Lock()
-	if d.inFlight == nil {
-		d.inFlight = make(map[string]struct{})
-	}
-	if _, ok := d.inFlight[key]; ok {
-		d.mu.Unlock()
-		return true, nil
-	}
-	if d.memory != nil && d.memory.Seen(key) {
-		d.mu.Unlock()
-		return true, nil
-	}
-	d.inFlight[key] = struct{}{}
-	d.mu.Unlock()
-
-	if d.store == nil {
-		return false, nil
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	seen, err := d.store.HasProcessedEvent(queryCtx, key)
-	if err != nil {
-		return false, err
-	}
-	if !seen {
-		return false, nil
-	}
-	if d.memory != nil {
-		d.memory.Mark(key)
-	}
-	d.mu.Lock()
-	delete(d.inFlight, key)
-	d.mu.Unlock()
-	return true, nil
-}
-
-func (d *persistentDedupe) Complete(ctx context.Context, key string) error {
-	if d == nil {
-		return nil
-	}
-	var err error
-	if d.store != nil {
-		markCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err = d.store.MarkProcessedEvent(markCtx, key, time.Now())
-		cancel()
-	}
-	if d.memory != nil {
-		d.memory.Mark(key)
-	}
-	d.mu.Lock()
-	delete(d.inFlight, key)
-	d.mu.Unlock()
-	return err
-}
-
-func (d *persistentDedupe) Abort(key string) {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	delete(d.inFlight, key)
-	d.mu.Unlock()
-}
-
-func cleanupProcessedEvents(ctx context.Context, store *storage.Store, cfg config.Config) {
-	retention := time.Duration(cfg.EventDedupe.RetentionHours) * time.Hour
-	interval := time.Duration(cfg.EventDedupe.CleanupIntervalHours) * time.Hour
-	if interval <= 0 {
-		interval = 6 * time.Hour
-	}
-	cleanup := func() {
-		_, _ = store.CleanupProcessedEvents(ctx, time.Now().Add(-retention))
-	}
-	cleanup()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			cleanup()
-		}
-	}
 }
 
 func schedulerLocation(cfg config.Config) *time.Location {

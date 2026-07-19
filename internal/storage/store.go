@@ -2,15 +2,14 @@ package storage
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
-	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
 	storagemodel "github.com/zjutjh/jxh-go/internal/storage/model"
 	"github.com/zjutjh/jxh-go/internal/storage/query"
+	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -28,235 +27,34 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func (s *Store) UpsertKnowledgeEntries(ctx context.Context, entries []KnowledgeEntry, runID uint64) error {
-	return s.q.Transaction(func(tx *query.Query) error {
-		now := time.Now()
-		ke := tx.KnowledgeEntry
-		for _, entry := range entries {
-			entry.LastImportRunID = runID
-			existingModel, err := ke.WithContext(ctx).Where(ke.SourceKey.Eq(entry.SourceKey)).Take()
-			if err == nil {
-				existing := knowledgeEntryFromModel(existingModel)
-				entry.ID = existing.ID
-				entry.CreatedAt = existing.CreatedAt
-				if err := ke.WithContext(ctx).Save(knowledgeEntryToModel(entry)); err != nil {
-					return err
-				}
-				continue
-			}
-			if err != gorm.ErrRecordNotFound {
-				return err
-			}
-			entry.CreatedAt = now
-			entry.UpdatedAt = now
-			if err := ke.WithContext(ctx).Create(knowledgeEntryToModel(entry)); err != nil {
-				return err
-			}
-		}
-		if runID != 0 {
-			_, err := ke.WithContext(ctx).
-				Where(ke.LastImportRunID.Neq(runID)).
-				Or(ke.LastImportRunID.IsNull()).
-				Update(ke.Enabled, false)
-			return err
-		}
+func (s *Store) RecordKnowledgeTriggers(ctx context.Context, events []triggerstats.Event) error {
+	if len(events) == 0 {
 		return nil
-	})
-}
-
-func (s *Store) UpsertKnowledge(ctx context.Context, entries []knowledge.Entry, runID uint64) error {
-	return s.UpsertKnowledgeEntries(ctx, FromKnowledgeEntries(entries), runID)
-}
-
-func (s *Store) ListEnabledKnowledge(ctx context.Context) ([]KnowledgeEntry, error) {
-	ke := s.q.KnowledgeEntry
-	entries, err := ke.WithContext(ctx).Where(ke.Enabled.Is(true)).Order(ke.ID).Find()
-	if err != nil {
-		return nil, err
 	}
-	return knowledgeEntriesFromModels(entries), nil
-}
-
-func (s *Store) SyncAdminRole(ctx context.Context, groupID, userID int64, role string) (commands.AdminRecord, error) {
-	role, err := validatedAdminIdentity(groupID, userID, role)
-	if err != nil {
-		return commands.AdminRecord{}, err
+	models := make([]*storagemodel.KnowledgeTriggerLog, 0, len(events))
+	for _, event := range events {
+		models = append(models, &storagemodel.KnowledgeTriggerLog{
+			SourceKey: event.SourceKey, TriggerType: event.TriggerType,
+			GroupID: event.GroupID, TriggeredAt: event.TriggeredAt,
+		})
 	}
-	var result commands.AdminRecord
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now()
-		model := &storagemodel.Admin{
-			GroupID: groupID, UserID: userID, QQRole: role,
-			CreatedAt: &now, UpdatedAt: &now,
-		}
-		if err := tx.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "group_id"}, {Name: "user_id"}},
-			DoUpdates: clause.Assignments(map[string]any{
-				"qq_role": role, "updated_at": now,
-			}),
-		}).Create(model).Error; err != nil {
-			return err
-		}
-		var current storagemodel.Admin
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("group_id = ? AND user_id = ?", groupID, userID).
-			Take(&current).Error; err != nil {
-			return err
-		}
-		result = adminRecordFromModel(&current)
-		if role == commands.GroupRoleMember && !current.ManualGranted {
-			return tx.Delete(&current).Error
-		}
-		return nil
-	})
-	return result, err
+	return s.db.WithContext(ctx).CreateInBatches(models, len(models)).Error
 }
 
-func (s *Store) SetManualAdmin(ctx context.Context, groupID, userID int64, granted bool, role string) error {
-	role, err := validatedAdminIdentity(groupID, userID, role)
-	if err != nil {
-		return err
+func (s *Store) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]triggerstats.Summary, error) {
+	query := s.db.WithContext(ctx).
+		Table(storagemodel.TableNameKnowledgeTriggerLog).
+		Select("source_key, trigger_type, COUNT(*) AS count, MAX(triggered_at) AS last_triggered")
+	if since != nil {
+		query = query.Where("triggered_at >= ?", *since)
 	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now()
-		model := &storagemodel.Admin{
-			GroupID: groupID, UserID: userID, ManualGranted: granted, QQRole: role,
-			CreatedAt: &now, UpdatedAt: &now,
-		}
-		if err := tx.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "group_id"}, {Name: "user_id"}},
-			DoUpdates: clause.Assignments(map[string]any{
-				"manual_granted": granted, "qq_role": role, "updated_at": now,
-			}),
-		}).Create(model).Error; err != nil {
-			return err
-		}
-		if role == commands.GroupRoleMember && !granted {
-			return tx.Where("group_id = ? AND user_id = ?", groupID, userID).
-				Delete(&storagemodel.Admin{}).Error
-		}
-		return nil
-	})
-}
-
-func (s *Store) ClearManualAdmins(ctx context.Context, groupID int64) error {
-	if groupID <= 0 {
-		return fmt.Errorf("group ID must be positive")
+	query = query.Group("source_key, trigger_type").
+		Order("count DESC").Order("source_key").Order("trigger_type")
+	if limit > 0 {
+		query = query.Limit(limit)
 	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&storagemodel.Admin{}).
-			Where("group_id = ?", groupID).
-			Updates(map[string]any{"manual_granted": false, "updated_at": time.Now()}).Error; err != nil {
-			return err
-		}
-		return tx.Where("group_id = ? AND qq_role = ?", groupID, commands.GroupRoleMember).
-			Delete(&storagemodel.Admin{}).Error
-	})
-}
-
-func (s *Store) ListAdmins(ctx context.Context, groupID int64) ([]commands.AdminRecord, error) {
-	if groupID <= 0 {
-		return nil, fmt.Errorf("group ID must be positive")
-	}
-	var models []storagemodel.Admin
-	if err := s.db.WithContext(ctx).
-		Where("group_id = ? AND (manual_granted = ? OR qq_role IN ?)", groupID, true, []string{commands.GroupRoleOwner, commands.GroupRoleAdmin}).
-		Order("user_id").
-		Find(&models).Error; err != nil {
-		return nil, err
-	}
-	records := make([]commands.AdminRecord, 0, len(models))
-	for i := range models {
-		records = append(records, adminRecordFromModel(&models[i]))
-	}
-	return records, nil
-}
-
-func validatedAdminIdentity(groupID, userID int64, role string) (string, error) {
-	if groupID <= 0 || userID <= 0 {
-		return "", fmt.Errorf("group ID and user ID must be positive")
-	}
-	normalized, ok := commands.NormalizeGroupRole(role)
-	if !ok {
-		return "", fmt.Errorf("invalid QQ group role %q", role)
-	}
-	return normalized, nil
-}
-
-func adminRecordFromModel(model *storagemodel.Admin) commands.AdminRecord {
-	return commands.AdminRecord{
-		GroupID:       model.GroupID,
-		UserID:        model.UserID,
-		ManualGranted: model.ManualGranted,
-		QQRole:        model.QQRole,
-	}
-}
-
-func (s *Store) AddBlacklist(ctx context.Context, userID int64) error {
-	return s.q.Blacklist.WithContext(ctx).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&storagemodel.Blacklist{UserID: userID})
-}
-
-func (s *Store) RemoveBlacklist(ctx context.Context, userID int64) error {
-	blacklist := s.q.Blacklist
-	_, err := blacklist.WithContext(ctx).Where(blacklist.UserID.Eq(userID)).Delete()
-	return err
-}
-
-func (s *Store) ClearBlacklist(ctx context.Context) error {
-	_, err := s.q.Blacklist.WithContext(ctx).Session(&gorm.Session{AllowGlobalUpdate: true}).Delete()
-	return err
-}
-
-func (s *Store) ListBlacklist(ctx context.Context) ([]int64, error) {
-	blacklist := s.q.Blacklist
-	blacklists, err := blacklist.WithContext(ctx).Order(blacklist.UserID).Find()
-	if err != nil {
-		return nil, err
-	}
-	users := make([]int64, 0, len(blacklists))
-	for _, blacklist := range blacklists {
-		users = append(users, blacklist.UserID)
-	}
-	return users, nil
-}
-
-func (s *Store) IsBlacklisted(ctx context.Context, userID int64) (bool, error) {
-	blacklist := s.q.Blacklist
-	count, err := blacklist.WithContext(ctx).Where(blacklist.UserID.Eq(userID)).Count()
-	return count > 0, err
-}
-
-func (s *Store) MarkProcessedEvent(ctx context.Context, key string, at time.Time) error {
-	return s.q.ProcessedEvent.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "event_key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"processed_at"}),
-	}).Create(&storagemodel.ProcessedEvent{EventKey: key, ProcessedAt: &at})
-}
-
-func (s *Store) HasProcessedEvent(ctx context.Context, key string) (bool, error) {
-	event := s.q.ProcessedEvent
-	count, err := event.WithContext(ctx).Where(event.EventKey.Eq(key)).Count()
-	return count > 0, err
-}
-
-func (s *Store) CleanupProcessedEvents(ctx context.Context, before time.Time) (int64, error) {
-	event := s.q.ProcessedEvent
-	result, err := event.WithContext(ctx).Where(event.ProcessedAt.Lt(before)).Delete()
-	return result.RowsAffected, err
-}
-
-func (s *Store) SeenOrMarkProcessedEvent(ctx context.Context, key string, at time.Time) (bool, error) {
-	event := s.q.ProcessedEvent
-	_, err := event.WithContext(ctx).Where(event.EventKey.Eq(key)).Take()
-	if err == nil {
-		return true, nil
-	}
-	if err != gorm.ErrRecordNotFound {
-		return false, err
-	}
-	return false, s.MarkProcessedEvent(ctx, key, at)
+	var summaries []triggerstats.Summary
+	return summaries, query.Scan(&summaries).Error
 }
 
 func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobView, error) {
@@ -350,139 +148,6 @@ func (s *Store) ListGroupJoinRequests(ctx context.Context, limit int) ([]groupre
 		records = append(records, groupJoinRequestFromModel(model))
 	}
 	return records, nil
-}
-
-func knowledgeEntriesFromModels(entries []*storagemodel.KnowledgeEntry) []KnowledgeEntry {
-	out := make([]KnowledgeEntry, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, knowledgeEntryFromModel(entry))
-	}
-	return out
-}
-
-func knowledgeEntryToModel(entry KnowledgeEntry) *storagemodel.KnowledgeEntry {
-	return &storagemodel.KnowledgeEntry{
-		ID:              entry.ID,
-		SourceKey:       entry.SourceKey,
-		Keyword:         entry.Keyword,
-		EntryType:       entry.EntryType,
-		Path:            stringPtr(entry.Path),
-		AliasesJSON:     stringPtr(entry.AliasesJSON),
-		Category:        stringPtr(entry.Category),
-		TagsJSON:        stringPtr(entry.TagsJSON),
-		Answer:          entry.Answer,
-		Content:         entry.Content,
-		Enabled:         entry.Enabled,
-		ExactReply:      entry.ExactReply,
-		AiEnabled:       entry.AIEnabled,
-		LastImportRunID: uint64Ptr(entry.LastImportRunID),
-		SourceUpdatedAt: entry.SourceUpdatedAt,
-		CreatedAt:       timePtr(entry.CreatedAt),
-		UpdatedAt:       timePtr(entry.UpdatedAt),
-	}
-}
-
-func knowledgeEntryFromModel(entry *storagemodel.KnowledgeEntry) KnowledgeEntry {
-	if entry == nil {
-		return KnowledgeEntry{}
-	}
-	return KnowledgeEntry{
-		ID:              entry.ID,
-		SourceKey:       entry.SourceKey,
-		Keyword:         entry.Keyword,
-		EntryType:       entry.EntryType,
-		Path:            stringFromPtr(entry.Path),
-		AliasesJSON:     stringFromPtr(entry.AliasesJSON),
-		Category:        stringFromPtr(entry.Category),
-		TagsJSON:        stringFromPtr(entry.TagsJSON),
-		Answer:          entry.Answer,
-		Content:         entry.Content,
-		Enabled:         entry.Enabled,
-		ExactReply:      entry.ExactReply,
-		AIEnabled:       entry.AiEnabled,
-		LastImportRunID: uint64FromPtr(entry.LastImportRunID),
-		SourceUpdatedAt: entry.SourceUpdatedAt,
-		CreatedAt:       timeFromPtr(entry.CreatedAt),
-		UpdatedAt:       timeFromPtr(entry.UpdatedAt),
-	}
-}
-
-func stringFromPtr(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
-func stringPtr(value string) *string {
-	return &value
-}
-
-func uint64FromPtr(value *uint64) uint64 {
-	if value == nil {
-		return 0
-	}
-	return *value
-}
-
-func uint64Ptr(value uint64) *uint64 {
-	return &value
-}
-
-func timeFromPtr(value *time.Time) time.Time {
-	if value == nil {
-		return time.Time{}
-	}
-	return *value
-}
-
-func timePtr(value time.Time) *time.Time {
-	if value.IsZero() {
-		return nil
-	}
-	return &value
-}
-
-func FromKnowledgeEntries(entries []knowledge.Entry) []KnowledgeEntry {
-	out := make([]KnowledgeEntry, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, KnowledgeEntry{
-			SourceKey:   entry.SourceKey,
-			Keyword:     entry.Keyword,
-			EntryType:   entry.EntryType,
-			Path:        entry.Path,
-			AliasesJSON: jsonList(entry.Aliases),
-			Category:    entry.Category,
-			TagsJSON:    jsonList(entry.Tags),
-			Answer:      entry.Answer,
-			Content:     entry.Content,
-			Enabled:     entry.Enabled,
-			ExactReply:  entry.ExactReply,
-			AIEnabled:   entry.AIEnabled,
-		})
-	}
-	return out
-}
-
-func ToKnowledgeEntries(entries []KnowledgeEntry) []knowledge.Entry {
-	out := make([]knowledge.Entry, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, knowledge.Entry{
-			SourceKey:  entry.SourceKey,
-			Keyword:    entry.Keyword,
-			EntryType:  entry.EntryType,
-			Path:       entry.Path,
-			Aliases:    parseJSONList(entry.AliasesJSON),
-			Category:   entry.Category,
-			Tags:       parseJSONList(entry.TagsJSON),
-			Answer:     entry.Answer,
-			Content:    entry.Content,
-			Enabled:    entry.Enabled,
-			ExactReply: entry.ExactReply,
-			AIEnabled:  entry.AIEnabled,
-		})
-	}
-	return out
 }
 
 func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {

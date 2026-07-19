@@ -45,6 +45,18 @@ func (i *Index) Entries() []Entry {
 	return cloneEntries(i.entries)
 }
 
+func (i *Index) Keyword(sourceKey string) string {
+	if i == nil {
+		return ""
+	}
+	for _, entry := range i.entries {
+		if entry.SourceKey == sourceKey {
+			return entry.Keyword
+		}
+	}
+	return ""
+}
+
 type IndexRef struct {
 	value atomic.Pointer[Index]
 }
@@ -66,14 +78,33 @@ func (r *IndexRef) Lookup(message string) (Entry, bool) {
 	if r == nil {
 		return Entry{}, false
 	}
-	return r.value.Load().Lookup(message)
+	index := r.value.Load()
+	if index == nil {
+		return Entry{}, false
+	}
+	return index.Lookup(message)
 }
 
 func (r *IndexRef) Entries() []Entry {
 	if r == nil {
 		return nil
 	}
-	return r.value.Load().Entries()
+	index := r.value.Load()
+	if index == nil {
+		return nil
+	}
+	return index.Entries()
+}
+
+func (r *IndexRef) Keyword(sourceKey string) string {
+	if r == nil {
+		return ""
+	}
+	index := r.value.Load()
+	if index == nil {
+		return ""
+	}
+	return index.Keyword(sourceKey)
 }
 
 func cloneEntries(entries []Entry) []Entry {

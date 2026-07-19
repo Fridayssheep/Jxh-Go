@@ -18,12 +18,12 @@ type recordingTriggerStats struct {
 	limit     int
 }
 
-func (r *recordingTriggerStats) RecordKnowledgeTrigger(ctx context.Context, event triggerstats.Event) error {
+func (r *recordingTriggerStats) RecordKnowledgeTriggers(ctx context.Context, events []triggerstats.Event) error {
 	_ = ctx
 	if r.err != nil {
 		return r.err
 	}
-	r.events = append(r.events, event)
+	r.events = append(r.events, events...)
 	return nil
 }
 

@@ -2,33 +2,21 @@ package triggerstats
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
 	TriggerTypeKeywordReply = "keyword_reply"
 	TriggerTypeAIRetrieval  = "ai_retrieval"
-
-	maxTriggerTextRunes = 500
-	maxEventKeyRunes    = 191
 )
 
 type Event struct {
-	EventKey    string
 	SourceKey   string
-	Keyword     string
 	TriggerType string
 	GroupID     int64
-	UserID      int64
-	MessageID   int64
-	TriggerText string
-	Score       float64
 	TriggeredAt time.Time
 }
 
@@ -41,38 +29,21 @@ type Summary struct {
 }
 
 type Store interface {
-	RecordKnowledgeTrigger(ctx context.Context, event Event) error
+	RecordKnowledgeTriggers(ctx context.Context, events []Event) error
 	ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]Summary, error)
 }
 
 type Options struct {
-	Now       func() time.Time
-	ExportDir string
+	Now            func() time.Time
+	ExportDir      string
+	ResolveKeyword func(sourceKey string) string
 }
 
 type Service struct {
-	store     Store
-	now       func() time.Time
-	exportDir string
-}
-
-type KeywordReplyInput struct {
-	SourceKey string
-	Keyword   string
-	GroupID   int64
-	UserID    int64
-	MessageID int64
-	Text      string
-}
-
-type AIRetrievalInput struct {
-	SourceKey string
-	Keyword   string
-	GroupID   int64
-	UserID    int64
-	MessageID int64
-	Question  string
-	Score     float64
+	store          Store
+	now            func() time.Time
+	exportDir      string
+	resolveKeyword func(string) string
 }
 
 func NewService(store Store, opts Options) *Service {
@@ -84,55 +55,50 @@ func NewService(store Store, opts Options) *Service {
 	if exportDir == "" {
 		exportDir = filepath.Join("data", "exports", "trigger_stats")
 	}
-	return &Service{store: store, now: now, exportDir: exportDir}
+	return &Service{store: store, now: now, exportDir: exportDir, resolveKeyword: opts.ResolveKeyword}
 }
 
-// RecordKeywordReply stores one exact keyword or alias hit.
-func (s *Service) RecordKeywordReply(ctx context.Context, input KeywordReplyInput) error {
-	if s == nil || s.store == nil {
-		return nil
-	}
-	return s.store.RecordKnowledgeTrigger(ctx, Event{
-		EventKey:    eventKey(TriggerTypeKeywordReply, input.GroupID, input.MessageID, input.SourceKey, input.Text),
-		SourceKey:   input.SourceKey,
-		Keyword:     input.Keyword,
-		TriggerType: TriggerTypeKeywordReply,
-		GroupID:     input.GroupID,
-		UserID:      input.UserID,
-		MessageID:   input.MessageID,
-		TriggerText: trimRunes(input.Text, maxTriggerTextRunes),
-		TriggeredAt: s.now(),
-	})
+func (s *Service) RecordKeywordReply(ctx context.Context, sourceKey string, groupID int64) error {
+	return s.record(ctx, []string{sourceKey}, TriggerTypeKeywordReply, groupID)
 }
 
-// RecordAIRetrieval stores one knowledge document returned by /ai retrieval.
-func (s *Service) RecordAIRetrieval(ctx context.Context, input AIRetrievalInput) error {
-	if s == nil || s.store == nil {
+func (s *Service) RecordAIRetrievals(ctx context.Context, sourceKeys []string, groupID int64) error {
+	return s.record(ctx, uniqueSourceKeys(sourceKeys), TriggerTypeAIRetrieval, groupID)
+}
+
+func (s *Service) record(ctx context.Context, sourceKeys []string, triggerType string, groupID int64) error {
+	if s == nil || s.store == nil || len(sourceKeys) == 0 {
 		return nil
 	}
-	return s.store.RecordKnowledgeTrigger(ctx, Event{
-		EventKey:    eventKey(TriggerTypeAIRetrieval, input.GroupID, input.MessageID, input.SourceKey, input.Question),
-		SourceKey:   input.SourceKey,
-		Keyword:     input.Keyword,
-		TriggerType: TriggerTypeAIRetrieval,
-		GroupID:     input.GroupID,
-		UserID:      input.UserID,
-		MessageID:   input.MessageID,
-		TriggerText: trimRunes(input.Question, maxTriggerTextRunes),
-		Score:       input.Score,
-		TriggeredAt: s.now(),
-	})
+	now := s.now()
+	events := make([]Event, 0, len(sourceKeys))
+	for _, sourceKey := range sourceKeys {
+		if sourceKey = strings.TrimSpace(sourceKey); sourceKey != "" {
+			events = append(events, Event{SourceKey: sourceKey, TriggerType: triggerType, GroupID: groupID, TriggeredAt: now})
+		}
+	}
+	if len(events) == 0 {
+		return nil
+	}
+	return s.store.RecordKnowledgeTriggers(ctx, events)
 }
 
 func (s *Service) Summaries(ctx context.Context, since *time.Time, limit int) ([]Summary, error) {
 	if s == nil || s.store == nil {
 		return nil, nil
 	}
-	return s.store.ListKnowledgeTriggerSummaries(ctx, since, limit)
+	summaries, err := s.store.ListKnowledgeTriggerSummaries(ctx, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	if s.resolveKeyword != nil {
+		for i := range summaries {
+			summaries[i].Keyword = s.resolveKeyword(summaries[i].SourceKey)
+		}
+	}
+	return summaries, nil
 }
 
-// SummariesForDays returns all-time summaries when days is zero. Positive
-// values include today and the preceding days using the service clock's zone.
 func (s *Service) SummariesForDays(ctx context.Context, days, limit int) ([]Summary, error) {
 	if days < 0 {
 		return nil, fmt.Errorf("days must not be negative")
@@ -161,19 +127,21 @@ func FormatSummaries(summaries []Summary) string {
 	return strings.Join(lines, "\n")
 }
 
-func eventKey(triggerType string, groupID, messageID int64, sourceKey, text string) string {
-	var key string
-	if messageID != 0 {
-		key = fmt.Sprintf("%s:%d:%d:%s", triggerType, groupID, messageID, sourceKey)
-	} else {
-		sum := sha256.Sum256([]byte(text))
-		key = fmt.Sprintf("%s:%d:%s:%x", triggerType, groupID, sourceKey, sum[:8])
+func uniqueSourceKeys(sourceKeys []string) []string {
+	seen := make(map[string]struct{}, len(sourceKeys))
+	out := make([]string, 0, len(sourceKeys))
+	for _, sourceKey := range sourceKeys {
+		sourceKey = strings.TrimSpace(sourceKey)
+		if sourceKey == "" {
+			continue
+		}
+		if _, ok := seen[sourceKey]; ok {
+			continue
+		}
+		seen[sourceKey] = struct{}{}
+		out = append(out, sourceKey)
 	}
-	if utf8.RuneCountInString(key) <= maxEventKeyRunes {
-		return key
-	}
-	sum := sha256.Sum256([]byte(key))
-	return triggerType + ":" + hex.EncodeToString(sum[:])
+	return out
 }
 
 func triggerTypeLabel(triggerType string) string {
@@ -185,15 +153,6 @@ func triggerTypeLabel(triggerType string) string {
 	default:
 		return triggerType
 	}
-}
-
-func trimRunes(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if limit <= 0 || utf8.RuneCountInString(value) <= limit {
-		return value
-	}
-	runes := []rune(value)
-	return string(runes[:limit])
 }
 
 func formatTime(t time.Time) string {

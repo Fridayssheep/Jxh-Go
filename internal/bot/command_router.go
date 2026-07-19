@@ -33,18 +33,15 @@ const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
 /q [数量] - 回复一条消息后生成最多 10 条消息的引用图（表情包生成器ww）
 /admin - 查看管理员命令和权限说明`
 
-const adminHelpText = `管理员命令（当前群群主、群管理员或手动授权用户可使用）：
+const adminHelpText = `管理员命令（当前群群主或群管理员可使用）：
 /admin ban <时长> @用户 - 禁言不听话的小朋友
 /admin restart - 重启 NapCat 框架
-/admin 添加管理员 @用户 / 移除管理员 @用户 / 移除所有管理员 / 所有管理员
-/admin 添加黑名单 @用户 / 移除黑名单 @用户 / 所有黑名单
 /admin 定时任务 查看
 /admin 定时任务 添加 <每天|单次> <HH:MM> <群号> <消息>
 /admin 定时任务 移除 <任务ID>
 /admin 群申请 同步 [数量]
 /admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
 /admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
-提示：手动管理员权限仅在当前群有效，QQ群主和群管理员的权限无法移除。
 精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
 
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
@@ -113,6 +110,10 @@ func mentionsSelf(msg GroupMessage) bool {
 }
 
 func (r *GroupCommandRouter) handleReload(ctx context.Context, msg GroupMessage, sender Sender) error {
+	authorized, err := authorizeNativeAdmin(ctx, msg, sender)
+	if err != nil || !authorized {
+		return err
+	}
 	if r.reloader != nil {
 		if err := r.reloader.Reload(ctx); err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "重载失败："+err.Error())
@@ -187,19 +188,13 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 		return err
 	}
 	if r.triggerStats != nil {
+		sourceKeys := make([]string, 0, len(docs))
 		for _, doc := range docs {
-			if err := r.triggerStats.RecordAIRetrieval(ctx, triggerstats.AIRetrievalInput{
-				SourceKey: doc.ID,
-				Keyword:   doc.Metadata["keyword"],
-				GroupID:   msg.GroupID,
-				UserID:    msg.UserID,
-				MessageID: msg.MessageID,
-				Question:  question,
-				Score:     doc.Score,
-			}); err != nil {
-				// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
-				log.Printf("record ai retrieval trigger failed: %v", err)
-			}
+			sourceKeys = append(sourceKeys, doc.ID)
+		}
+		if err := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); err != nil {
+			// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
+			log.Printf("record ai retrieval trigger failed: %v", err)
 		}
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, answer)
@@ -207,53 +202,15 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 
 func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
 	adminText := strings.TrimSpace(strings.TrimPrefix(text, "/admin"))
+	authorized, err := authorizeNativeAdmin(ctx, msg, sender)
+	if err != nil || !authorized {
+		return err
+	}
 	if adminText == "" {
 		return sender.SendGroupText(ctx, msg.GroupID, adminHelpText)
 	}
 	if r.admin == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
-	}
-	roleResolver, ok := sender.(GroupMemberRoleResolver)
-	if !ok {
-		log.Printf("admin role lookup unavailable: sender %T does not implement GroupMemberRoleResolver", sender)
-		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
-	}
-	actorRole, err := roleResolver.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
-	if err != nil {
-		log.Printf("query admin actor role failed: group=%d user=%d: %v", msg.GroupID, msg.UserID, err)
-		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
-	}
-	actorRole, ok = commands.NormalizeGroupRole(actorRole)
-	if !ok {
-		log.Printf("query admin actor role returned invalid role: group=%d user=%d role=%q", msg.GroupID, msg.UserID, actorRole)
-		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
-	}
-	adminInput := commands.AdminInput{
-		GroupID:   msg.GroupID,
-		ActorID:   msg.UserID,
-		ActorRole: actorRole,
-		Text:      adminText,
-		AtUsers:   targetAtUsers(msg),
-	}
-	if resp, err := r.admin.PermissionMessage(ctx, adminInput); resp != "" || err != nil {
-		if err != nil {
-			return err
-		}
-		return sender.SendGroupText(ctx, msg.GroupID, resp)
-	}
-	if (adminText == "添加管理员" || adminText == "移除管理员") && len(adminInput.AtUsers) > 0 {
-		targetID := adminInput.AtUsers[0]
-		targetRole, err := roleResolver.GetGroupMemberRole(ctx, msg.GroupID, targetID)
-		if err != nil {
-			log.Printf("query admin target role failed: group=%d user=%d: %v", msg.GroupID, targetID, err)
-			return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认该成员身份，请稍后重试")
-		}
-		targetRole, ok = commands.NormalizeGroupRole(targetRole)
-		if !ok {
-			log.Printf("query admin target role returned invalid role: group=%d user=%d role=%q", msg.GroupID, targetID, targetRole)
-			return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认该成员身份，请稍后重试")
-		}
-		adminInput.TargetRole = targetRole
 	}
 	if strings.HasPrefix(adminText, "群申请 ") {
 		return r.handleGroupRequestAdmin(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "群申请 ")))
@@ -290,11 +247,33 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
 	}
-	resp, err := r.admin.ExecuteAuthorized(ctx, adminInput)
+	resp, err := r.admin.Execute(ctx, commands.AdminInput{Text: adminText})
 	if err != nil {
 		return err
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, resp)
+}
+
+func authorizeNativeAdmin(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
+	resolver, ok := sender.(GroupMemberRoleResolver)
+	if !ok {
+		log.Printf("admin role lookup unavailable: sender %T does not implement GroupMemberRoleResolver", sender)
+		return false, sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	role, err := resolver.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
+	if err != nil {
+		log.Printf("query admin actor role failed: group=%d user=%d: %v", msg.GroupID, msg.UserID, err)
+		return false, sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	role, ok = commands.NormalizeGroupRole(role)
+	if !ok {
+		log.Printf("query admin actor role returned invalid role: group=%d user=%d role=%q", msg.GroupID, msg.UserID, role)
+		return false, sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	if !commands.IsNativeGroupAdmin(role) {
+		return false, sender.SendGroupText(ctx, msg.GroupID, "~你好像没有权限执行该项操作耶~")
+	}
+	return true, nil
 }
 
 func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {

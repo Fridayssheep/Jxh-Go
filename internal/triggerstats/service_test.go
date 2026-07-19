@@ -14,9 +14,9 @@ type memoryTriggerStore struct {
 	limit     int
 }
 
-func (s *memoryTriggerStore) RecordKnowledgeTrigger(ctx context.Context, event Event) error {
+func (s *memoryTriggerStore) RecordKnowledgeTriggers(ctx context.Context, events []Event) error {
 	_ = ctx
-	s.events = append(s.events, event)
+	s.events = append(s.events, events...)
 	return nil
 }
 
@@ -35,14 +35,7 @@ func TestServiceRecordsKeywordTrigger(t *testing.T) {
 	store := &memoryTriggerStore{}
 	service := NewService(store, Options{Now: func() time.Time { return now }})
 
-	err := service.RecordKeywordReply(context.Background(), KeywordReplyInput{
-		SourceKey: "menu",
-		Keyword:   "菜单",
-		GroupID:   1001,
-		UserID:    2002,
-		MessageID: 3003,
-		Text:      "菜单",
-	})
+	err := service.RecordKeywordReply(context.Background(), "menu", 1001)
 
 	if err != nil {
 		t.Fatalf("RecordKeywordReply returned error: %v", err)
@@ -51,44 +44,24 @@ func TestServiceRecordsKeywordTrigger(t *testing.T) {
 		t.Fatalf("events length = %d, want 1", len(store.events))
 	}
 	event := store.events[0]
-	if event.EventKey != "keyword_reply:1001:3003:menu" {
-		t.Fatalf("event key = %q", event.EventKey)
-	}
-	if event.TriggerType != TriggerTypeKeywordReply || event.TriggeredAt != now {
+	if event.SourceKey != "menu" || event.GroupID != 1001 || event.TriggerType != TriggerTypeKeywordReply || event.TriggeredAt != now {
 		t.Fatalf("type/time = %q/%s", event.TriggerType, event.TriggeredAt)
 	}
 }
 
-func TestServiceBoundsLongEventKey(t *testing.T) {
+func TestServiceDeduplicatesAIRetrievals(t *testing.T) {
 	store := &memoryTriggerStore{}
 	service := NewService(store, Options{})
-	sourceKey := strings.Repeat("source", 50)
-
-	err := service.RecordAIRetrieval(context.Background(), AIRetrievalInput{
-		SourceKey: sourceKey,
-		Keyword:   "长词条",
-		GroupID:   1001,
-		UserID:    2002,
-		MessageID: 3003,
-		Question:  "问题",
-		Score:     0.8,
-	})
+	err := service.RecordAIRetrievals(context.Background(), []string{"menu", "menu", "traffic"}, 1001)
 
 	if err != nil {
 		t.Fatalf("RecordAIRetrieval returned error: %v", err)
 	}
-	if len(store.events) != 1 {
-		t.Fatalf("events length = %d, want 1", len(store.events))
+	if len(store.events) != 2 {
+		t.Fatalf("events length = %d, want 2", len(store.events))
 	}
-	event := store.events[0]
-	if event.SourceKey != sourceKey {
-		t.Fatal("SourceKey was not preserved")
-	}
-	if len(event.EventKey) > 191 {
-		t.Fatalf("EventKey length = %d, want <= 191", len(event.EventKey))
-	}
-	if !strings.HasPrefix(event.EventKey, TriggerTypeAIRetrieval+":") {
-		t.Fatalf("EventKey = %q, want trigger type prefix", event.EventKey)
+	if store.events[0].SourceKey != "menu" || store.events[1].SourceKey != "traffic" {
+		t.Fatalf("events = %+v", store.events)
 	}
 }
 
@@ -125,6 +98,16 @@ func TestServiceSummariesForDaysZeroUsesAllTime(t *testing.T) {
 	}
 	if store.since != nil {
 		t.Fatalf("since = %v, want nil", store.since)
+	}
+}
+
+func TestServiceResolvesCurrentKeyword(t *testing.T) {
+	store := &memoryTriggerStore{summaries: []Summary{{SourceKey: "menu"}}}
+	service := NewService(store, Options{ResolveKeyword: func(sourceKey string) string { return "菜单" }})
+
+	summaries, err := service.Summaries(context.Background(), nil, 10)
+	if err != nil || len(summaries) != 1 || summaries[0].Keyword != "菜单" {
+		t.Fatalf("summaries = %+v, err %v", summaries, err)
 	}
 }
 

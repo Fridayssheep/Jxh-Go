@@ -60,17 +60,6 @@ database:
   # 可选完整 DSN。非空时优先使用该字段，忽略上面的 host/port/user/password/name 等拆分字段。
   dsn: ""
 
-redis:
-  # 词条触发统计使用 Redis。compose 内由 JXH_REDIS_ADDR 覆盖为 redis:6379。
-  # 留空可关闭词条统计记录与查询。
-  addr: "127.0.0.1:6379"
-  # Redis 密码；本地 compose 默认无密码。
-  password: ""
-  # Redis DB 编号。
-  db: 0
-  # 每日统计 key 保留天数；全量统计不设置 TTL。
-  daily_retention_days: 180
-
 ai:
   # 是否启用 /ai 入口。关闭后 /ai 会直接返回未启用；启用但模型未配置时使用抽取式 fallback。
   enabled: true
@@ -93,12 +82,6 @@ ai:
   top_k: 5
   # 检索分数阈值。当前文本检索会使用该值过滤低相关知识。
   score_threshold: 0.1
-
-event_dedupe:
-  # processed_events 保留时间，单位小时。用于避免 NapCat 重连边界重复处理事件。
-  retention_hours: 72
-  # processed_events 清理任务间隔，单位小时。
-  cleanup_interval_hours: 6
 
 cache:
   # /ai 检索结果缓存 TTL，单位秒。设置为 0 可关闭缓存。

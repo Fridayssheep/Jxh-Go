@@ -13,7 +13,7 @@ fi
 gentool \
   -db mysql \
   -dsn "${JXH_GORMGEN_DSN}" \
-  -tables "knowledge_entries,knowledge_import_runs,admins,blacklists,scheduled_jobs,processed_events,group_join_requests" \
+  -tables "knowledge_trigger_logs,scheduled_jobs,group_join_requests" \
   -outPath "internal/storage/query" \
   -fieldNullable \
   -fieldWithIndexTag \

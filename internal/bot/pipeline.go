@@ -24,10 +24,6 @@ type Reloader interface {
 	Reload(ctx context.Context) error
 }
 
-type Blacklist interface {
-	IsBlacklisted(ctx context.Context, userID int64) (bool, error)
-}
-
 type LinkCleaner interface {
 	CleanMessage(ctx context.Context, text string, segments []MessageSegment) ([]string, error)
 }
@@ -60,7 +56,6 @@ type Options struct {
 	Sender        Sender
 	AI            *ai.Service
 	Reloader      Reloader
-	Blacklist     Blacklist
 	Admin         *commands.AdminHandler
 	Quote         QuoteGenerator
 	GroupRequests *grouprequest.Service
@@ -72,7 +67,6 @@ type Pipeline struct {
 	mu            sync.RWMutex
 	knowledge     *knowledge.IndexRef
 	sender        Sender
-	blacklist     Blacklist
 	groupRequests *grouprequest.Service
 	stats         *triggerstats.Service
 	linkCleaner   LinkCleaner
@@ -108,7 +102,6 @@ func NewPipeline(opts Options) *Pipeline {
 	return &Pipeline{
 		knowledge:     opts.Knowledge,
 		sender:        opts.Sender,
-		blacklist:     opts.Blacklist,
 		groupRequests: opts.GroupRequests,
 		stats:         opts.TriggerStats,
 		linkCleaner:   opts.LinkCleaner,
@@ -120,15 +113,6 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	sender := p.currentSender()
 	if sender == nil || msg.IsSelf {
 		return nil
-	}
-	if p.blacklist != nil {
-		blocked, err := p.blacklist.IsBlacklisted(ctx, msg.UserID)
-		if err != nil {
-			return err
-		}
-		if blocked {
-			return nil
-		}
 	}
 	if p.linkCleaner != nil {
 		cleaned, err := p.linkCleaner.CleanMessage(ctx, msg.Text, msg.Segments)
@@ -152,14 +136,7 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	if p.knowledge != nil {
 		if entry, ok := p.knowledge.Lookup(text); ok {
 			if p.stats != nil {
-				if err := p.stats.RecordKeywordReply(ctx, triggerstats.KeywordReplyInput{
-					SourceKey: entry.SourceKey,
-					Keyword:   entry.Keyword,
-					GroupID:   msg.GroupID,
-					UserID:    msg.UserID,
-					MessageID: msg.MessageID,
-					Text:      text,
-				}); err != nil {
+				if err := p.stats.RecordKeywordReply(ctx, entry.SourceKey, msg.GroupID); err != nil {
 					// 统计是附加能力，失败时不能阻断原本的关键词回复。
 					log.Printf("record keyword reply trigger failed: %v", err)
 				}

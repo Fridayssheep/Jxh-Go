@@ -17,41 +17,26 @@ import (
 
 func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
-		db:                 db,
-		Admin:              newAdmin(db, opts...),
-		Blacklist:          newBlacklist(db, opts...),
-		GroupJoinRequest:   newGroupJoinRequest(db, opts...),
-		KnowledgeEntry:     newKnowledgeEntry(db, opts...),
-		KnowledgeImportRun: newKnowledgeImportRun(db, opts...),
-		ProcessedEvent:     newProcessedEvent(db, opts...),
-		ScheduledJob:       newScheduledJob(db, opts...),
+		db:               db,
+		GroupJoinRequest: newGroupJoinRequest(db, opts...),
+		ScheduledJob:     newScheduledJob(db, opts...),
 	}
 }
 
 type Query struct {
 	db *gorm.DB
 
-	Admin              admin
-	Blacklist          blacklist
-	GroupJoinRequest   groupJoinRequest
-	KnowledgeEntry     knowledgeEntry
-	KnowledgeImportRun knowledgeImportRun
-	ProcessedEvent     processedEvent
-	ScheduledJob       scheduledJob
+	GroupJoinRequest groupJoinRequest
+	ScheduledJob     scheduledJob
 }
 
 func (q *Query) Available() bool { return q.db != nil }
 
 func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
-		db:                 db,
-		Admin:              q.Admin.clone(db),
-		Blacklist:          q.Blacklist.clone(db),
-		GroupJoinRequest:   q.GroupJoinRequest.clone(db),
-		KnowledgeEntry:     q.KnowledgeEntry.clone(db),
-		KnowledgeImportRun: q.KnowledgeImportRun.clone(db),
-		ProcessedEvent:     q.ProcessedEvent.clone(db),
-		ScheduledJob:       q.ScheduledJob.clone(db),
+		db:               db,
+		GroupJoinRequest: q.GroupJoinRequest.clone(db),
+		ScheduledJob:     q.ScheduledJob.clone(db),
 	}
 }
 
@@ -65,36 +50,21 @@ func (q *Query) WriteDB() *Query {
 
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
-		db:                 db,
-		Admin:              q.Admin.replaceDB(db),
-		Blacklist:          q.Blacklist.replaceDB(db),
-		GroupJoinRequest:   q.GroupJoinRequest.replaceDB(db),
-		KnowledgeEntry:     q.KnowledgeEntry.replaceDB(db),
-		KnowledgeImportRun: q.KnowledgeImportRun.replaceDB(db),
-		ProcessedEvent:     q.ProcessedEvent.replaceDB(db),
-		ScheduledJob:       q.ScheduledJob.replaceDB(db),
+		db:               db,
+		GroupJoinRequest: q.GroupJoinRequest.replaceDB(db),
+		ScheduledJob:     q.ScheduledJob.replaceDB(db),
 	}
 }
 
 type queryCtx struct {
-	Admin              *adminDo
-	Blacklist          *blacklistDo
-	GroupJoinRequest   *groupJoinRequestDo
-	KnowledgeEntry     *knowledgeEntryDo
-	KnowledgeImportRun *knowledgeImportRunDo
-	ProcessedEvent     *processedEventDo
-	ScheduledJob       *scheduledJobDo
+	GroupJoinRequest *groupJoinRequestDo
+	ScheduledJob     *scheduledJobDo
 }
 
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
-		Admin:              q.Admin.WithContext(ctx),
-		Blacklist:          q.Blacklist.WithContext(ctx),
-		GroupJoinRequest:   q.GroupJoinRequest.WithContext(ctx),
-		KnowledgeEntry:     q.KnowledgeEntry.WithContext(ctx),
-		KnowledgeImportRun: q.KnowledgeImportRun.WithContext(ctx),
-		ProcessedEvent:     q.ProcessedEvent.WithContext(ctx),
-		ScheduledJob:       q.ScheduledJob.WithContext(ctx),
+		GroupJoinRequest: q.GroupJoinRequest.WithContext(ctx),
+		ScheduledJob:     q.ScheduledJob.WithContext(ctx),
 	}
 }
 

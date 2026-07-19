@@ -174,9 +174,9 @@ func (s *RedisStore) allCounts(ctx context.Context, limit int) (map[string]float
 
 func (s *RedisStore) windowCounts(ctx context.Context, since time.Time) (map[string]float64, error) {
 	counts := map[string]float64{}
-	for day := dayStart(since); !day.After(dayStart(s.now())); day = day.AddDate(0, 0, 1) {
+	end := dayStart(s.now())
+	for day := dayStart(since); !day.After(end); day = day.AddDate(0, 0, 1) {
 		items, err := s.client.ZRangeWithScores(ctx, s.dayKey(day), 0, -1).Result()
-		if err != nil {
 			return nil, err
 		}
 		for _, item := range items {

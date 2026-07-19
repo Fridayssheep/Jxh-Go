@@ -48,6 +48,7 @@ services:
       - ./data/napcat/qq:/app/.config/QQ
       - ./data/napcat/config:/app/napcat/config
       - ./data/napcat/plugins:/app/napcat/plugins
+      - ./data/media:/app/jxh-media:ro
 
   quote:
     build:

@@ -164,7 +164,7 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 					log.Printf("record keyword reply trigger failed: %v", err)
 				}
 			}
-			return sender.SendGroupText(ctx, msg.GroupID, entry.Answer)
+			return sendKeywordReply(ctx, sender, msg.GroupID, entry.SourceKey, entry.Answer)
 		}
 	}
 	return nil

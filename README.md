@@ -128,6 +128,17 @@ go run ./cmd/bot -config config.yaml
 | G | `status` | 启用状态 |
 | H | `source_id` | 稳定 ID，修改 keyword 时用于保留同一条记录 |
 
+`answer` 可以包含图片 CQ 标签，Bot 会在关键词精确回复时把它转换成文字和图片消息。本地图片使用固定的相对路径格式：
+
+```text
+校区地图：
+[CQ:image,file=maps/campus.png]
+```
+
+对应文件放在宿主机的 `data/media/maps/campus.png`。Compose 会把 `data/media/` 只读挂载到 NapCat 的 `/app/jxh-media/`，Bot 发送时会把相对路径转换为该目录下的 `file://` URI。WPS 中只允许使用 `/` 分隔的相对路径；绝对路径、反斜杠、`.`、`..`、查询参数以及直接填写的 `file://`、`base64://` 都会被拒绝。
+
+远程图片同时支持 `http://` 和 `https://`，可以写在 `url` 或 `file` 中；有效的 `url` 优先于 `file`。图片链接无效、本地文件不存在或 NapCat 无法读取时会保留周围文字；如果词条只有图片，Bot 会提示管理员检查图片链接。`/ai` 检索只使用去掉图片标签后的文字，不会向模型发送图片或图片 URL。
+
 导入器会解析 `%编号` 菜单树，并生成 `path` 和 AI 检索用的 `content`。
 
 ## 常用命令

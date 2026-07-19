@@ -2,9 +2,11 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
 	storagemodel "github.com/zjutjh/jxh-go/internal/storage/model"
@@ -75,40 +77,119 @@ func (s *Store) ListEnabledKnowledge(ctx context.Context) ([]KnowledgeEntry, err
 	return knowledgeEntriesFromModels(entries), nil
 }
 
-func (s *Store) AddAdmin(ctx context.Context, userID int64) error {
-	return s.q.Admin.WithContext(ctx).
-		Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&storagemodel.Admin{UserID: userID})
-}
-
-func (s *Store) RemoveAdmin(ctx context.Context, userID int64) error {
-	admin := s.q.Admin
-	_, err := admin.WithContext(ctx).Where(admin.UserID.Eq(userID)).Delete()
-	return err
-}
-
-func (s *Store) ClearAdmins(ctx context.Context) error {
-	_, err := s.q.Admin.WithContext(ctx).Session(&gorm.Session{AllowGlobalUpdate: true}).Delete()
-	return err
-}
-
-func (s *Store) ListAdmins(ctx context.Context) ([]int64, error) {
-	admin := s.q.Admin
-	admins, err := admin.WithContext(ctx).Order(admin.UserID).Find()
+func (s *Store) SyncAdminRole(ctx context.Context, groupID, userID int64, role string) (commands.AdminRecord, error) {
+	role, err := validatedAdminIdentity(groupID, userID, role)
 	if err != nil {
+		return commands.AdminRecord{}, err
+	}
+	var result commands.AdminRecord
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		model := &storagemodel.Admin{
+			GroupID: groupID, UserID: userID, QQRole: role,
+			CreatedAt: &now, UpdatedAt: &now,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "group_id"}, {Name: "user_id"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"qq_role": role, "updated_at": now,
+			}),
+		}).Create(model).Error; err != nil {
+			return err
+		}
+		var current storagemodel.Admin
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("group_id = ? AND user_id = ?", groupID, userID).
+			Take(&current).Error; err != nil {
+			return err
+		}
+		result = adminRecordFromModel(&current)
+		if role == commands.GroupRoleMember && !current.ManualGranted {
+			return tx.Delete(&current).Error
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (s *Store) SetManualAdmin(ctx context.Context, groupID, userID int64, granted bool, role string) error {
+	role, err := validatedAdminIdentity(groupID, userID, role)
+	if err != nil {
+		return err
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		model := &storagemodel.Admin{
+			GroupID: groupID, UserID: userID, ManualGranted: granted, QQRole: role,
+			CreatedAt: &now, UpdatedAt: &now,
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "group_id"}, {Name: "user_id"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"manual_granted": granted, "qq_role": role, "updated_at": now,
+			}),
+		}).Create(model).Error; err != nil {
+			return err
+		}
+		if role == commands.GroupRoleMember && !granted {
+			return tx.Where("group_id = ? AND user_id = ?", groupID, userID).
+				Delete(&storagemodel.Admin{}).Error
+		}
+		return nil
+	})
+}
+
+func (s *Store) ClearManualAdmins(ctx context.Context, groupID int64) error {
+	if groupID <= 0 {
+		return fmt.Errorf("group ID must be positive")
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&storagemodel.Admin{}).
+			Where("group_id = ?", groupID).
+			Updates(map[string]any{"manual_granted": false, "updated_at": time.Now()}).Error; err != nil {
+			return err
+		}
+		return tx.Where("group_id = ? AND qq_role = ?", groupID, commands.GroupRoleMember).
+			Delete(&storagemodel.Admin{}).Error
+	})
+}
+
+func (s *Store) ListAdmins(ctx context.Context, groupID int64) ([]commands.AdminRecord, error) {
+	if groupID <= 0 {
+		return nil, fmt.Errorf("group ID must be positive")
+	}
+	var models []storagemodel.Admin
+	if err := s.db.WithContext(ctx).
+		Where("group_id = ? AND (manual_granted = ? OR qq_role IN ?)", groupID, true, []string{commands.GroupRoleOwner, commands.GroupRoleAdmin}).
+		Order("user_id").
+		Find(&models).Error; err != nil {
 		return nil, err
 	}
-	users := make([]int64, 0, len(admins))
-	for _, admin := range admins {
-		users = append(users, admin.UserID)
+	records := make([]commands.AdminRecord, 0, len(models))
+	for i := range models {
+		records = append(records, adminRecordFromModel(&models[i]))
 	}
-	return users, nil
+	return records, nil
 }
 
-func (s *Store) IsAdmin(ctx context.Context, userID int64) (bool, error) {
-	admin := s.q.Admin
-	count, err := admin.WithContext(ctx).Where(admin.UserID.Eq(userID)).Count()
-	return count > 0, err
+func validatedAdminIdentity(groupID, userID int64, role string) (string, error) {
+	if groupID <= 0 || userID <= 0 {
+		return "", fmt.Errorf("group ID and user ID must be positive")
+	}
+	normalized, ok := commands.NormalizeGroupRole(role)
+	if !ok {
+		return "", fmt.Errorf("invalid QQ group role %q", role)
+	}
+	return normalized, nil
+}
+
+func adminRecordFromModel(model *storagemodel.Admin) commands.AdminRecord {
+	return commands.AdminRecord{
+		GroupID:       model.GroupID,
+		UserID:        model.UserID,
+		ManualGranted: model.ManualGranted,
+		QQRole:        model.QQRole,
+	}
 }
 
 func (s *Store) AddBlacklist(ctx context.Context, userID int64) error {
@@ -232,6 +313,43 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 	job := s.q.ScheduledJob
 	_, err := job.WithContext(ctx).Where(job.ID.Eq(id)).Updates(updates)
 	return err
+}
+
+func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
+	model := groupJoinRequestToModel(record)
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "request_key"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"flag":         model.Flag,
+			"group_id":     model.GroupID,
+			"user_id":      model.UserID,
+			"student_id":   model.StudentID,
+			"student_name": model.StudentName,
+			"sub_type":     model.SubType,
+			"comment":      model.Comment,
+			"status":       model.Status,
+			"source":       model.Source,
+			"raw_json":     model.RawJSON,
+			"requested_at": model.RequestedAt,
+			"last_seen_at": model.LastSeenAt,
+		}),
+	}).Create(&model).Error
+}
+
+func (s *Store) ListGroupJoinRequests(ctx context.Context, limit int) ([]grouprequest.Record, error) {
+	var models []GroupJoinRequest
+	query := s.db.WithContext(ctx).Order("last_seen_at DESC").Order("id DESC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&models).Error; err != nil {
+		return nil, err
+	}
+	records := make([]grouprequest.Record, 0, len(models))
+	for _, model := range models {
+		records = append(records, groupJoinRequestFromModel(model))
+	}
+	return records, nil
 }
 
 func knowledgeEntriesFromModels(entries []*storagemodel.KnowledgeEntry) []KnowledgeEntry {
@@ -365,4 +483,44 @@ func ToKnowledgeEntries(entries []KnowledgeEntry) []knowledge.Entry {
 		})
 	}
 	return out
+}
+
+func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
+	return GroupJoinRequest{
+		ID:          record.ID,
+		RequestKey:  record.RequestKey,
+		Flag:        record.Flag,
+		GroupID:     record.GroupID,
+		UserID:      record.UserID,
+		StudentID:   record.StudentID,
+		StudentName: record.StudentName,
+		SubType:     record.SubType,
+		Comment:     record.Comment,
+		Status:      record.Status,
+		Source:      record.Source,
+		RawJSON:     record.RawJSON,
+		RequestedAt: record.RequestedAt,
+		FirstSeenAt: record.FirstSeenAt,
+		LastSeenAt:  record.LastSeenAt,
+	}
+}
+
+func groupJoinRequestFromModel(model GroupJoinRequest) grouprequest.Record {
+	return grouprequest.Record{
+		ID:          model.ID,
+		RequestKey:  model.RequestKey,
+		Flag:        model.Flag,
+		GroupID:     model.GroupID,
+		UserID:      model.UserID,
+		StudentID:   model.StudentID,
+		StudentName: model.StudentName,
+		SubType:     model.SubType,
+		Comment:     model.Comment,
+		Status:      model.Status,
+		Source:      model.Source,
+		RawJSON:     model.RawJSON,
+		RequestedAt: model.RequestedAt,
+		FirstSeenAt: model.FirstSeenAt,
+		LastSeenAt:  model.LastSeenAt,
+	}
 }

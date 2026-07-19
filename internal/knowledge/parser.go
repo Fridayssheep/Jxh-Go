@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/zjutjh/jxh-go/internal/cqreply"
 )
 
 var (
@@ -96,13 +98,14 @@ func collectCodeTitles(raws []rawRow) map[string]string {
 		if !codePattern.MatchString(raw.keyword) {
 			continue
 		}
-		trimmed := strings.TrimSpace(strings.Split(raw.answer, "\n")[0])
+		plainAnswer := cqreply.Parse(raw.answer).PlainText
+		trimmed := strings.TrimSpace(strings.Split(plainAnswer, "\n")[0])
 		if trimmed != "" && !strings.Contains(trimmed, "%") {
 			titles[raw.keyword] = compactTitle(trimmed)
 		}
 	}
 	for _, raw := range raws {
-		for _, match := range childPattern.FindAllStringSubmatch(raw.answer, -1) {
+		for _, match := range childPattern.FindAllStringSubmatch(cqreply.Parse(raw.answer).PlainText, -1) {
 			titles[match[1]] = compactTitle(match[2])
 		}
 	}
@@ -236,7 +239,7 @@ func buildContent(path, keyword string, aliases []string, answer string) string 
 		b.WriteString(strings.Join(aliases, "，"))
 	}
 	b.WriteString("\n知识正文：\n")
-	b.WriteString(answer)
+	b.WriteString(cqreply.Parse(answer).PlainText)
 	return b.String()
 }
 

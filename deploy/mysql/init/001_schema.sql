@@ -42,9 +42,14 @@ CREATE TABLE IF NOT EXISTS `knowledge_import_runs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `admins` (
+  `group_id` bigint NOT NULL COMMENT 'QQ 群 ID',
   `user_id` bigint NOT NULL COMMENT 'QQ 用户 ID',
+  `manual_granted` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否由当前群手动授权',
+  `qq_role` varchar(16) NOT NULL DEFAULT 'member' COMMENT '最近同步的 QQ 群角色',
   `created_at` datetime(3) DEFAULT NULL,
-  PRIMARY KEY (`user_id`)
+  `updated_at` datetime(3) DEFAULT NULL,
+  PRIMARY KEY (`group_id`, `user_id`),
+  KEY `idx_admins_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `blacklists` (
@@ -71,4 +76,28 @@ CREATE TABLE IF NOT EXISTS `processed_events` (
   `processed_at` datetime(3) DEFAULT NULL COMMENT '处理时间；清理任务按该字段删除过期记录',
   PRIMARY KEY (`event_key`),
   KEY `idx_processed_events_processed_at` (`processed_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `group_join_requests` (
+  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `request_key` varchar(191) NOT NULL COMMENT '群申请去重键；短 flag 原样保存，过长时使用 hash',
+  `flag` varchar(512) DEFAULT NULL COMMENT '处理群申请时需要的 flag',
+  `group_id` bigint DEFAULT NULL COMMENT 'QQ群号',
+  `user_id` bigint DEFAULT NULL COMMENT '申请人 QQ',
+  `student_id` varchar(64) DEFAULT NULL COMMENT '申请信息中显式填写的学号',
+  `student_name` varchar(64) DEFAULT NULL COMMENT '申请信息中显式填写的姓名',
+  `sub_type` varchar(32) DEFAULT NULL COMMENT '申请类型：add/invite 等',
+  `comment` text DEFAULT NULL COMMENT '申请验证信息',
+  `status` varchar(32) NOT NULL COMMENT '登记状态：pending/observed 等',
+  `source` varchar(32) NOT NULL COMMENT '来源：event/system',
+  `raw_json` mediumtext DEFAULT NULL COMMENT 'NapCat 原始事件或系统消息 JSON',
+  `requested_at` datetime(3) DEFAULT NULL COMMENT '申请时间',
+  `first_seen_at` datetime(3) DEFAULT NULL COMMENT '首次登记时间',
+  `last_seen_at` datetime(3) DEFAULT NULL COMMENT '最近出现时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_group_join_requests_request_key` (`request_key`),
+  KEY `idx_group_join_requests_group_id` (`group_id`),
+  KEY `idx_group_join_requests_user_id` (`user_id`),
+  KEY `idx_group_join_requests_status` (`status`),
+  KEY `idx_group_join_requests_last_seen_at` (`last_seen_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

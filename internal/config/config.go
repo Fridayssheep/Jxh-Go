@@ -14,6 +14,7 @@ type Config struct {
 	OneBot      OneBotConfig      `yaml:"onebot"`
 	WPS         WPSConfig         `yaml:"wps"`
 	Database    DatabaseConfig    `yaml:"database"`
+	Redis       RedisConfig       `yaml:"redis"`
 	AI          AIConfig          `yaml:"ai"`
 	EventDedupe EventDedupeConfig `yaml:"event_dedupe"`
 	Cache       CacheConfig       `yaml:"cache"`
@@ -60,6 +61,13 @@ type DatabaseConfig struct {
 	ParseTime bool   `yaml:"parse_time"`
 	Loc       string `yaml:"loc"`
 	DSN       string `yaml:"dsn"`
+}
+
+type RedisConfig struct {
+	Addr               string `yaml:"addr"`
+	Password           string `yaml:"password"`
+	DB                 int    `yaml:"db"`
+	DailyRetentionDays int    `yaml:"daily_retention_days"`
 }
 
 type AIConfig struct {
@@ -138,6 +146,9 @@ func Default() Config {
 			ParseTime: true,
 			Loc:       "Local",
 		},
+		Redis: RedisConfig{
+			DailyRetentionDays: 180,
+		},
 		AI: AIConfig{
 			Enabled:          true,
 			Provider:         "openai",
@@ -187,6 +198,18 @@ func applyEnv(cfg *Config) {
 	})
 	override("JXH_MYSQL_PASSWORD", func(v string) { cfg.Database.Password = v })
 	override("JXH_MYSQL_DSN", func(v string) { cfg.Database.DSN = v })
+	override("JXH_REDIS_ADDR", func(v string) { cfg.Redis.Addr = v })
+	override("JXH_REDIS_PASSWORD", func(v string) { cfg.Redis.Password = v })
+	override("JXH_REDIS_DB", func(v string) {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Redis.DB = parsed
+		}
+	})
+	override("JXH_REDIS_DAILY_RETENTION_DAYS", func(v string) {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			cfg.Redis.DailyRetentionDays = parsed
+		}
+	})
 	override("JXH_QUOTE_BASE_URL", func(v string) { cfg.Quote.BaseURL = v })
 	override("JXH_AI_PROVIDER", func(v string) { cfg.AI.Provider = v })
 	override("JXH_AI_BASE_URL", func(v string) { cfg.AI.BaseURL = v })
@@ -226,6 +249,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.EventDedupe.CleanupIntervalHours <= 0 {
 		cfg.EventDedupe.CleanupIntervalHours = 6
+	}
+	if cfg.Redis.DailyRetentionDays <= 0 {
+		cfg.Redis.DailyRetentionDays = 180
 	}
 	if cfg.Quote.TimeoutSec <= 0 {
 		cfg.Quote.TimeoutSec = 10

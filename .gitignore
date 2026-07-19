@@ -5,3 +5,6 @@ data/cache/knowledge.xlsx
 config.yaml
 data/mysql/
 data/napcat/
+data/redis/
+data/media/
+data/exports/

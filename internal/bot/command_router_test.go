@@ -2,19 +2,28 @@ package bot
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/triggerstats"
 )
 
 type recordingSender struct {
-	groupID int64
-	text    string
+	groupID     int64
+	text        string
+	roles       map[int64]string
+	roleErrors  map[int64]error
+	roleQueries [][2]int64
 }
 
 func (s *recordingSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
@@ -31,11 +40,24 @@ func (s *recordingSender) SendGroupMessage(ctx context.Context, groupID int64, m
 	return nil
 }
 
+func (s *recordingSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
+	_ = ctx
+	s.roleQueries = append(s.roleQueries, [2]int64{groupID, userID})
+	if err := s.roleErrors[userID]; err != nil {
+		return "", err
+	}
+	if role := s.roles[userID]; role != "" {
+		return role, nil
+	}
+	return commands.GroupRoleMember, nil
+}
+
 type recordingModerator struct {
 	recordingSender
 	bannedUserID int64
 	bannedGroup  int64
 	banDuration  int64
+	banErr       error
 	restarted    bool
 }
 
@@ -59,12 +81,43 @@ func (q *recordingQuoteGenerator) Generate(_ context.Context, payload quote.Payl
 	return "R0lGODlh", nil
 }
 
+type botGroupRequestStore struct {
+	records []grouprequest.Record
+}
+
+func (s *botGroupRequestStore) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
+	_ = ctx
+	s.records = append(s.records, record)
+	return nil
+}
+
+func (s *botGroupRequestStore) ListGroupJoinRequests(ctx context.Context, limit int) ([]grouprequest.Record, error) {
+	_ = ctx
+	records := append([]grouprequest.Record(nil), s.records...)
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+	return append([]grouprequest.Record(nil), records...), nil
+}
+
+type groupRequestSyncSender struct {
+	recordingSender
+	count    int
+	requests []grouprequest.Record
+}
+
+func (s *groupRequestSyncSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
+	_ = ctx
+	s.count = count
+	return append([]grouprequest.Record(nil), s.requests...), nil
+}
+
 func (s *recordingModerator) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
 	_ = ctx
 	s.bannedGroup = groupID
 	s.bannedUserID = userID
 	s.banDuration = int64(duration.Seconds())
-	return nil
+	return s.banErr
 }
 
 func (s *recordingModerator) SetRestart(ctx context.Context) error {
@@ -169,6 +222,39 @@ func TestGroupCommandRouterHandlesCommandWhenMentioningSelf(t *testing.T) {
 	}
 }
 
+func TestPipelineShowsHelpWhenOnlyMentioningBot(t *testing.T) {
+	sender := &recordingSender{}
+	pipeline := NewPipeline(Options{Sender: sender})
+
+	err := pipeline.HandleGroupMessage(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		AtUsers: []int64{999},
+	})
+
+	if err != nil {
+		t.Fatalf("HandleGroupMessage returned error: %v", err)
+	}
+	for _, want := range []string{"/test", "/reload", "/ai <问题>", "/q", "/admin"} {
+		if !strings.Contains(sender.text, want) {
+			t.Fatalf("bot help %q does not contain %q", sender.text, want)
+		}
+	}
+}
+
+func TestPipelineIgnoresEmptyMessageWithoutMention(t *testing.T) {
+	sender := &recordingSender{}
+	pipeline := NewPipeline(Options{Sender: sender})
+
+	if err := pipeline.HandleGroupMessage(context.Background(), GroupMessage{GroupID: 123, UserID: 456, SelfID: 999}); err != nil {
+		t.Fatalf("HandleGroupMessage returned error: %v", err)
+	}
+	if sender.text != "" {
+		t.Fatalf("sent text = %q, want no response", sender.text)
+	}
+}
+
 func TestGroupCommandRouterIgnoresBareAICommand(t *testing.T) {
 	sender := &recordingSender{}
 	router := NewGroupCommandRouter(Options{})
@@ -216,6 +302,52 @@ func TestGroupCommandRouterHandlesAICommandWhenMentioningSelf(t *testing.T) {
 	}
 }
 
+func TestGroupCommandRouterRecordsAIRetrievalTriggers(t *testing.T) {
+	sender := &recordingSender{}
+	statsStore := &recordingTriggerStats{}
+	chat := &ai.StaticChat{Response: "交通说明"}
+	router := NewGroupCommandRouter(Options{
+		AI: ai.NewService(ai.Options{
+			Retriever: ai.StaticRetriever{Documents: []ai.Document{{
+				ID:      "traffic",
+				Content: "知识正文：交通说明",
+				Metadata: map[string]string{
+					"keyword": "交通",
+				},
+				Score: 0.9,
+			}}},
+			Chat: chat,
+		}),
+		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID:   123,
+		UserID:    456,
+		MessageID: 789,
+		SelfID:    999,
+		Text:      "/ai 交通怎么走",
+		AtUsers:   []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle /ai")
+	}
+	if sender.text != "交通说明" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+	if len(statsStore.events) != 1 {
+		t.Fatalf("stats events = %d, want 1", len(statsStore.events))
+	}
+	event := statsStore.events[0]
+	if event.TriggerType != triggerstats.TriggerTypeAIRetrieval || event.SourceKey != "traffic" || event.Keyword != "交通" {
+		t.Fatalf("recorded event = %+v", event)
+	}
+}
+
 func TestGroupCommandRouterQuotesMultipleMessages(t *testing.T) {
 	sender := &quoteCommandSender{messages: []QuotedMessage{
 		{MessageID: 10, UserID: 1, Nickname: "one", RawMessage: "first"},
@@ -248,6 +380,36 @@ func TestParseQuoteCount(t *testing.T) {
 	for _, input := range []string{"/q 0", "/q 11", "/q x", "/q 2 extra"} {
 		if _, err := parseQuoteCount(input); err == nil {
 			t.Fatalf("parseQuoteCount(%q) succeeded", input)
+		}
+	}
+}
+
+func TestGroupCommandRouterShowsAdminHelpWithoutPermission(t *testing.T) {
+	sender := &recordingSender{}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle bare /admin")
+	}
+	if len(sender.roleQueries) != 0 {
+		t.Fatalf("bare /admin queried roles: %v", sender.roleQueries)
+	}
+	for _, want := range []string{"群主", "管理员", "/admin ban", "/admin 群申请", "/admin 词条统计", "不能禁言群主、群管理员或机器人自己"} {
+		if !strings.Contains(sender.text, want) {
+			t.Fatalf("admin help %q does not contain %q", sender.text, want)
 		}
 	}
 }
@@ -296,8 +458,165 @@ func TestGroupCommandRouterRejectsRestartWhenNotAuthorized(t *testing.T) {
 	}
 }
 
+func TestGroupCommandRouterAllowsQQGroupAdminAfterLiveRoleLookup(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roles: map[int64]string{456: commands.GroupRoleAdmin},
+	}}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin restart",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || !sender.restarted {
+		t.Fatalf("handled/restarted = %v/%v", handled, sender.restarted)
+	}
+	if len(sender.roleQueries) != 1 || sender.roleQueries[0] != [2]int64{123, 456} {
+		t.Fatalf("role queries = %v, want [[123 456]]", sender.roleQueries)
+	}
+}
+
+func TestGroupCommandRouterReportsActorRoleLookupFailure(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roleErrors: map[int64]error{456: errors.New("napcat unavailable")},
+	}}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin restart",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || sender.restarted {
+		t.Fatalf("handled/restarted = %v/%v", handled, sender.restarted)
+	}
+	if sender.text != "暂时无法确认群身份，请稍后重试" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterProtectsNativeTargetFromRemoval(t *testing.T) {
+	store := commands.NewMemoryAdminStore()
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roles: map[int64]string{
+			456: commands.GroupRoleOwner,
+			321: commands.GroupRoleAdmin,
+		},
+	}}
+	router := NewGroupCommandRouter(Options{Admin: commands.NewAdminHandler(store)})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 移除管理员",
+		AtUsers: []int64{999, 321},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || !strings.Contains(sender.text, "QQ群管理员") || !strings.Contains(sender.text, "无法移除") {
+		t.Fatalf("handled/text = %v/%q", handled, sender.text)
+	}
+	wantQueries := [][2]int64{{123, 456}, {123, 321}}
+	if len(sender.roleQueries) != len(wantQueries) || sender.roleQueries[0] != wantQueries[0] || sender.roleQueries[1] != wantQueries[1] {
+		t.Fatalf("role queries = %v, want %v", sender.roleQueries, wantQueries)
+	}
+}
+
+func TestGroupCommandRouterDoesNotGrantWhenTargetRoleLookupFails(t *testing.T) {
+	store := commands.NewMemoryAdminStore()
+	sender := &recordingModerator{recordingSender: recordingSender{
+		roles:      map[int64]string{456: commands.GroupRoleOwner},
+		roleErrors: map[int64]error{321: errors.New("member lookup failed")},
+	}}
+	router := NewGroupCommandRouter(Options{Admin: commands.NewAdminHandler(store)})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 添加管理员",
+		AtUsers: []int64{999, 321},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || sender.text != "暂时无法确认该成员身份，请稍后重试" {
+		t.Fatalf("handled/text = %v/%q", handled, sender.text)
+	}
+	admins, err := store.ListAdmins(context.Background(), 123)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(admins) != 1 || admins[0].UserID != 456 {
+		t.Fatalf("admins = %+v; target must not be granted", admins)
+	}
+}
+
+func TestGroupCommandRouterManualAdminGrantAppliesOnlyToCurrentGroup(t *testing.T) {
+	store := commands.NewMemoryAdminStore()
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{
+		456: commands.GroupRoleOwner,
+		321: commands.GroupRoleMember,
+	}}}
+	router := NewGroupCommandRouter(Options{Admin: commands.NewAdminHandler(store)})
+
+	_, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 456, SelfID: 999,
+		Text: "/admin 添加管理员", AtUsers: []int64{999, 321},
+	}, sender)
+	if err != nil {
+		t.Fatalf("grant Handle returned error: %v", err)
+	}
+	if sender.text != "已添加当前群手动授权管理员" {
+		t.Fatalf("grant response = %q", sender.text)
+	}
+
+	_, err = router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 321, SelfID: 999,
+		Text: "/admin 所有管理员", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("same-group Handle returned error: %v", err)
+	}
+	if !strings.Contains(sender.text, "321（手动授权）") {
+		t.Fatalf("same-group response = %q", sender.text)
+	}
+
+	_, err = router.Handle(context.Background(), GroupMessage{
+		GroupID: 124, UserID: 321, SelfID: 999,
+		Text: "/admin 所有管理员", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("other-group Handle returned error: %v", err)
+	}
+	if sender.text != "~你好像没有权限执行该项操作耶~" {
+		t.Fatalf("other-group response = %q", sender.text)
+	}
+}
+
 func TestGroupCommandRouterAllowsRestartForOwner(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
 	})
@@ -353,21 +672,458 @@ func TestGroupCommandRouterRejectsBanWhenNotAuthorized(t *testing.T) {
 	}
 }
 
-type countingAdminStore struct {
-	*commands.MemoryAdminStore
-	isAdminCalls int
+func TestGroupCommandRouterExplainsNapCatBanRestrictionsOnError(t *testing.T) {
+	sender := &recordingModerator{
+		recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}},
+		banErr:          errors.New("cannot ban admin"),
+	}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin ban 60",
+		AtUsers: []int64{999, 321},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle failed /admin ban")
+	}
+	if sender.bannedUserID != 321 {
+		t.Fatalf("ban target = %d, want 321", sender.bannedUserID)
+	}
+	if !strings.Contains(sender.text, "cannot ban admin") || !strings.Contains(sender.text, "不能禁言群主、群管理员或机器人自己") {
+		t.Fatalf("sent text = %q", sender.text)
+	}
 }
 
-func (s *countingAdminStore) IsAdmin(ctx context.Context, userID int64) (bool, error) {
-	s.isAdminCalls++
-	return s.MemoryAdminStore.IsAdmin(ctx, userID)
+func TestGroupCommandRouterExportsGroupRequestsForOwner(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
+	exportDir := t.TempDir()
+	store := &botGroupRequestStore{records: []grouprequest.Record{{
+		ID:         1,
+		RequestKey: "flag-1",
+		Flag:       "flag-1",
+		GroupID:    123,
+		UserID:     456,
+		Comment:    "申请信息",
+		Status:     grouprequest.StatusPending,
+		Source:     grouprequest.SourceEvent,
+	}}}
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(store, grouprequest.Options{
+			ExportDir: exportDir,
+			Now:       func() time.Time { return time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local) },
+		}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin 群申请 导出",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle group request export")
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("export entries = %v, err %v", entries, err)
+	}
+	runDir := filepath.Join(exportDir, entries[0].Name())
+	if _, err := os.Stat(filepath.Join(runDir, "group_123.xlsx")); err != nil {
+		t.Fatalf("local group export does not exist: %v", err)
+	}
+	if !strings.Contains(sender.text, "已在本地导出全部群申请 1 条") || !strings.Contains(sender.text, runDir) {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterCreatesPersistentLocalGroupRequestExport(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
+	exportDir := t.TempDir()
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(&botGroupRequestStore{records: []grouprequest.Record{{
+			ID:         1,
+			RequestKey: "flag-1",
+			GroupID:    123,
+			UserID:     456,
+		}}}, grouprequest.Options{
+			ExportDir: exportDir,
+			Now:       func() time.Time { return time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local) },
+		}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin 群申请 导出",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle group request export")
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("export entries = %v, err %v", entries, err)
+	}
+	if !strings.Contains(sender.text, "已在本地导出全部群申请") || strings.Contains(sender.text, "上传") {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterExportsLocallyWithoutUploader(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
+	exportDir := t.TempDir()
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(&botGroupRequestStore{records: []grouprequest.Record{{
+			ID:         1,
+			RequestKey: "flag-1",
+			GroupID:    123,
+			UserID:     456,
+		}}}, grouprequest.Options{
+			ExportDir: exportDir,
+			Now:       func() time.Time { return time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local) },
+		}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin 群申请 导出",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle group request export")
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("read export dir: %v", err)
+	}
+	if len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("export dir contains %v, want one run directory", entries)
+	}
+	exportPath := filepath.Join(exportDir, entries[0].Name())
+	if !strings.Contains(sender.text, "已在本地导出全部群申请") || !strings.Contains(sender.text, exportPath) {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterExportsEveryGroupIntoSeparateFiles(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{789: commands.GroupRoleOwner}}}
+	exportDir := t.TempDir()
+	store := &botGroupRequestStore{records: []grouprequest.Record{
+		{ID: 1, RequestKey: "current", GroupID: 123, StudentID: "10000001"},
+		{ID: 2, RequestKey: "other", GroupID: 456, StudentID: "20000002"},
+	}}
+	router := NewGroupCommandRouter(Options{
+		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(store, grouprequest.Options{ExportDir: exportDir}),
+	})
+
+	_, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 789, SelfID: 999, IsOwner: true,
+		Text: "/admin 群申请 导出 全部", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("export entries = %v, err %v", entries, err)
+	}
+	runDir := filepath.Join(exportDir, entries[0].Name())
+	for _, groupID := range []string{"123", "456"} {
+		if _, err := os.Stat(filepath.Join(runDir, "group_"+groupID+".xlsx")); err != nil {
+			t.Fatalf("group %s export missing: %v", groupID, err)
+		}
+	}
+	if !strings.Contains(sender.text, "全部群申请 2 条") || !strings.Contains(sender.text, "按 2 个群") {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterRejectsGroupRequestExportWhenNotAuthorized(t *testing.T) {
+	sender := &recordingModerator{}
+	exportDir := t.TempDir()
+	router := NewGroupCommandRouter(Options{
+		Admin: commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(&botGroupRequestStore{records: []grouprequest.Record{{
+			ID:         1,
+			RequestKey: "flag-1",
+		}}}, grouprequest.Options{ExportDir: exportDir}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 群申请 导出",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle unauthorized group request export")
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil {
+		t.Fatalf("read export dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("export dir contains %d files, want none", len(entries))
+	}
+	if sender.text != "~你好像没有权限执行该项操作耶~" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterSyncsGroupRequestsForOwner(t *testing.T) {
+	sender := &groupRequestSyncSender{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}, requests: []grouprequest.Record{{
+		RequestKey: "flag-1",
+		Flag:       "flag-1",
+		GroupID:    123,
+		UserID:     456,
+		Comment:    "申请信息",
+	}}}
+	store := &botGroupRequestStore{}
+	router := NewGroupCommandRouter(Options{
+		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(store, grouprequest.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin 群申请 同步 3",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle group request sync")
+	}
+	if sender.count != 3 {
+		t.Fatalf("fetch count = %d, want 3", sender.count)
+	}
+	if len(store.records) != 1 || store.records[0].Flag != "flag-1" {
+		t.Fatalf("stored records = %+v", store.records)
+	}
+	if sender.text != "已同步群申请 1 条" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterSyncsGroupRequestsWithDefaultCount(t *testing.T) {
+	sender := &groupRequestSyncSender{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
+	router := NewGroupCommandRouter(Options{
+		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(&botGroupRequestStore{}, grouprequest.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin 群申请 同步",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle group request sync")
+	}
+	if sender.count != 20 {
+		t.Fatalf("fetch count = %d, want 20", sender.count)
+	}
+}
+
+func TestGroupCommandRouterRejectsGroupRequestSyncWhenNotAuthorized(t *testing.T) {
+	sender := &groupRequestSyncSender{requests: []grouprequest.Record{{Flag: "flag-1"}}}
+	store := &botGroupRequestStore{}
+	router := NewGroupCommandRouter(Options{
+		Admin:         commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		GroupRequests: grouprequest.NewService(store, grouprequest.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/admin 群申请 同步 3",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle unauthorized group request sync")
+	}
+	if sender.count != 0 {
+		t.Fatalf("fetch count = %d, want no fetch", sender.count)
+	}
+	if len(store.records) != 0 {
+		t.Fatalf("stored records = %+v, want none", store.records)
+	}
+	if sender.text != "~你好像没有权限执行该项操作耶~" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterShowsTriggerStatsForOwner(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
+	exportDir := t.TempDir()
+	statsStore := &recordingTriggerStats{summaries: []triggerstats.Summary{{
+		SourceKey:     "menu",
+		Keyword:       "菜单",
+		TriggerType:   triggerstats.TriggerTypeKeywordReply,
+		Count:         3,
+		LastTriggered: time.Date(2026, 7, 10, 20, 30, 0, 0, time.Local),
+	}}}
+	now := time.Date(2026, 7, 10, 20, 30, 0, 0, time.FixedZone("CST", 8*60*60))
+	router := NewGroupCommandRouter(Options{
+		Admin:        commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{Now: func() time.Time { return now }, ExportDir: exportDir}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		IsOwner: true,
+		Text:    "/admin 词条统计 7d",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle trigger stats")
+	}
+	entries, err := os.ReadDir(exportDir)
+	if err != nil || len(entries) != 1 || entries[0].IsDir() {
+		t.Fatalf("stats export entries = %v, err %v", entries, err)
+	}
+	exportPath := filepath.Join(exportDir, entries[0].Name())
+	if !strings.Contains(sender.text, "已在本地导出全部群的词条统计 1 项") || !strings.Contains(sender.text, exportPath) {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+	wantSince := time.Date(2026, 7, 4, 0, 0, 0, 0, now.Location())
+	if statsStore.since == nil || !statsStore.since.Equal(wantSince) {
+		t.Fatalf("stats since = %v, want %v", statsStore.since, wantSince)
+	}
+	if statsStore.limit != 0 {
+		t.Fatalf("stats limit = %d, want all summaries", statsStore.limit)
+	}
+}
+
+func TestGroupCommandRouterReportsUnavailableTriggerStats(t *testing.T) {
+	sender := &recordingModerator{recordingSender: recordingSender{roles: map[int64]string{456: commands.GroupRoleOwner}}}
+	router := NewGroupCommandRouter(Options{
+		Admin:        commands.NewAdminHandler(commands.NewMemoryAdminStore()),
+		TriggerStats: triggerstats.NewService(&recordingTriggerStats{err: errors.New("redis unavailable")}, triggerstats.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123, UserID: 456, SelfID: 999, IsOwner: true,
+		Text: "/admin 词条统计 7d", AtUsers: []int64{999},
+	}, sender)
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled || sender.text != "词条统计服务暂不可用" {
+		t.Fatalf("handled/text = %v/%q", handled, sender.text)
+	}
+}
+
+func TestGroupCommandRouterKeepsAIAnswerWhenStatsFails(t *testing.T) {
+	sender := &recordingModerator{}
+	router := NewGroupCommandRouter(Options{
+		AI: ai.NewService(ai.Options{
+			Retriever: ai.StaticRetriever{Documents: []ai.Document{{
+				ID:       "doc-1",
+				Content:  "答案材料",
+				Metadata: map[string]string{"keyword": "菜单"},
+				Score:    0.9,
+			}}},
+			Chat: &ai.StaticChat{Response: "AI 答案"},
+		}),
+		TriggerStats: triggerstats.NewService(&recordingTriggerStats{err: errors.New("stats unavailable")}, triggerstats.Options{}),
+	})
+
+	handled, err := router.Handle(context.Background(), GroupMessage{
+		GroupID: 123,
+		UserID:  456,
+		SelfID:  999,
+		Text:    "/ai 菜单",
+		AtUsers: []int64{999},
+	}, sender)
+
+	if err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("Handle did not handle /ai")
+	}
+	if sender.text != "AI 答案" {
+		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+type countingAdminStore struct {
+	*commands.MemoryAdminStore
+	syncRoleCalls int
+}
+
+func (s *countingAdminStore) SyncAdminRole(ctx context.Context, groupID, userID int64, role string) (commands.AdminRecord, error) {
+	s.syncRoleCalls++
+	return s.MemoryAdminStore.SyncAdminRole(ctx, groupID, userID, role)
 }
 
 func TestGroupCommandRouterChecksPermissionOnceForRegularAdminCommand(t *testing.T) {
 	sender := &recordingModerator{}
 	store := &countingAdminStore{MemoryAdminStore: commands.NewMemoryAdminStore()}
-	if err := store.AddAdmin(context.Background(), 456); err != nil {
-		t.Fatalf("AddAdmin returned error: %v", err)
+	if err := store.SetManualAdmin(context.Background(), 123, 456, true, commands.GroupRoleMember); err != nil {
+		t.Fatalf("SetManualAdmin returned error: %v", err)
 	}
 	router := NewGroupCommandRouter(Options{
 		Admin: commands.NewAdminHandler(store),
@@ -387,10 +1143,10 @@ func TestGroupCommandRouterChecksPermissionOnceForRegularAdminCommand(t *testing
 	if !handled {
 		t.Fatal("Handle did not handle /admin 所有管理员")
 	}
-	if store.isAdminCalls != 1 {
-		t.Fatalf("IsAdmin calls = %d, want 1", store.isAdminCalls)
+	if store.syncRoleCalls != 1 {
+		t.Fatalf("SyncAdminRole calls = %d, want 1", store.syncRoleCalls)
 	}
-	if sender.text != "当前管理员：456" {
+	if sender.text != "当前群管理员：456（手动授权）" {
 		t.Fatalf("sent text = %q", sender.text)
 	}
 }

@@ -3,31 +3,67 @@ package bot
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/triggerstats"
 )
 
 type GroupCommandRouter struct {
-	ai       *ai.Service
-	reloader Reloader
-	admin    *commands.AdminHandler
-	quote    QuoteGenerator
+	ai            *ai.Service
+	reloader      Reloader
+	admin         *commands.AdminHandler
+	quote         QuoteGenerator
+	groupRequests *grouprequest.Service
+	triggerStats  *triggerstats.Service
 }
 
 const maxQuoteMessages = 10
 
+const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
+/test - 检查精小弘是否存活！
+/reload - 重新加载知识库（刷新精小弘的记忆？！）
+/ai <问题> - 用大模型查找一些知识库中的答案（让精小弘更聪明？！）
+/q [数量] - 回复一条消息后生成最多 10 条消息的引用图（表情包生成器ww）
+/admin - 查看管理员命令和权限说明`
+
+const adminHelpText = `管理员命令（当前群群主、群管理员或手动授权用户可使用）：
+/admin ban <时长> @用户 - 禁言不听话的小朋友
+/admin restart - 重启 NapCat 框架
+/admin 添加管理员 @用户 / 移除管理员 @用户 / 移除所有管理员 / 所有管理员
+/admin 添加黑名单 @用户 / 移除黑名单 @用户 / 所有黑名单
+/admin 定时任务 查看
+/admin 定时任务 添加 <每天|单次> <HH:MM> <群号> <消息>
+/admin 定时任务 移除 <任务ID>
+/admin 群申请 同步 [数量]
+/admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
+/admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
+提示：手动管理员权限仅在当前群有效，QQ群主和群管理员的权限无法移除。
+精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
+
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	return &GroupCommandRouter{
-		ai:       opts.AI,
-		reloader: opts.Reloader,
-		admin:    opts.Admin,
-		quote:    opts.Quote,
+		ai:            opts.AI,
+		reloader:      opts.Reloader,
+		admin:         opts.Admin,
+		quote:         opts.Quote,
+		groupRequests: opts.GroupRequests,
+		triggerStats:  opts.TriggerStats,
 	}
+}
+
+type GroupRequestFetcher interface {
+	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
+}
+
+type GroupMemberRoleResolver interface {
+	GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error)
 }
 
 func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
@@ -35,6 +71,12 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		return false, nil
 	}
 	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		if mentionsSelf(msg) {
+			return true, sender.SendGroupText(ctx, msg.GroupID, botHelpText)
+		}
+		return false, nil
+	}
 	if isSlashCommand(text) && !mentionsSelf(msg) {
 		return true, nil
 	}
@@ -140,29 +182,84 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	if r.ai == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, ai.DisabledAnswer)
 	}
-	answer, err := r.ai.Answer(ctx, question)
+	answer, docs, err := r.ai.AnswerWithDocuments(ctx, question)
 	if err != nil {
 		return err
+	}
+	if r.triggerStats != nil {
+		for _, doc := range docs {
+			if err := r.triggerStats.RecordAIRetrieval(ctx, triggerstats.AIRetrievalInput{
+				SourceKey: doc.ID,
+				Keyword:   doc.Metadata["keyword"],
+				GroupID:   msg.GroupID,
+				UserID:    msg.UserID,
+				MessageID: msg.MessageID,
+				Question:  question,
+				Score:     doc.Score,
+			}); err != nil {
+				// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
+				log.Printf("record ai retrieval trigger failed: %v", err)
+			}
+		}
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, answer)
 }
 
 func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	adminText := strings.TrimSpace(strings.TrimPrefix(text, "/admin"))
+	if adminText == "" {
+		return sender.SendGroupText(ctx, msg.GroupID, adminHelpText)
+	}
 	if r.admin == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
 	}
-	adminText := strings.TrimSpace(strings.TrimPrefix(text, "/admin"))
+	roleResolver, ok := sender.(GroupMemberRoleResolver)
+	if !ok {
+		log.Printf("admin role lookup unavailable: sender %T does not implement GroupMemberRoleResolver", sender)
+		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	actorRole, err := roleResolver.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
+	if err != nil {
+		log.Printf("query admin actor role failed: group=%d user=%d: %v", msg.GroupID, msg.UserID, err)
+		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
+	actorRole, ok = commands.NormalizeGroupRole(actorRole)
+	if !ok {
+		log.Printf("query admin actor role returned invalid role: group=%d user=%d role=%q", msg.GroupID, msg.UserID, actorRole)
+		return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
+	}
 	adminInput := commands.AdminInput{
-		ActorID: msg.UserID,
-		Text:    adminText,
-		AtUsers: targetAtUsers(msg),
-		IsOwner: msg.IsOwner,
+		GroupID:   msg.GroupID,
+		ActorID:   msg.UserID,
+		ActorRole: actorRole,
+		Text:      adminText,
+		AtUsers:   targetAtUsers(msg),
 	}
 	if resp, err := r.admin.PermissionMessage(ctx, adminInput); resp != "" || err != nil {
 		if err != nil {
 			return err
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, resp)
+	}
+	if (adminText == "添加管理员" || adminText == "移除管理员") && len(adminInput.AtUsers) > 0 {
+		targetID := adminInput.AtUsers[0]
+		targetRole, err := roleResolver.GetGroupMemberRole(ctx, msg.GroupID, targetID)
+		if err != nil {
+			log.Printf("query admin target role failed: group=%d user=%d: %v", msg.GroupID, targetID, err)
+			return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认该成员身份，请稍后重试")
+		}
+		targetRole, ok = commands.NormalizeGroupRole(targetRole)
+		if !ok {
+			log.Printf("query admin target role returned invalid role: group=%d user=%d role=%q", msg.GroupID, targetID, targetRole)
+			return sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认该成员身份，请稍后重试")
+		}
+		adminInput.TargetRole = targetRole
+	}
+	if strings.HasPrefix(adminText, "群申请 ") {
+		return r.handleGroupRequestAdmin(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "群申请 ")))
+	}
+	if strings.HasPrefix(adminText, "词条统计") {
+		return r.handleTriggerStats(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "词条统计")))
 	}
 	if adminText == "restart" {
 		moderator, ok := sender.(Moderator)
@@ -188,7 +285,8 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 			return sender.SendGroupText(ctx, msg.GroupID, "禁言时间格式不正确")
 		}
 		if err := moderator.SetGroupBan(ctx, msg.GroupID, atUsers[0], duration); err != nil {
-			return err
+			log.Printf("ban group user failed: group=%d user=%d: %v", msg.GroupID, atUsers[0], err)
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("禁言失败：%v\n提示：精小弘不能禁言群主、群管理员或机器人自己！", err))
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
 	}
@@ -197,6 +295,67 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		return err
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, resp)
+}
+
+func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	if r.groupRequests == nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "群申请登记未初始化")
+	}
+	switch {
+	case strings.HasPrefix(text, "导出"):
+		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "导出")))
+		if err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [全部|最近N]")
+		}
+		result, err := r.groupRequests.Export(ctx, limit)
+		if err != nil {
+			return err
+		}
+		if result.Count == 0 {
+			return sender.SendGroupText(ctx, msg.GroupID, "暂无群申请记录可导出")
+		}
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群申请 %d 条，按 %d 个群分别保存到：%s", result.Count, len(result.Files), result.Dir))
+	case strings.HasPrefix(text, "同步"):
+		fetcher, ok := sender.(GroupRequestFetcher)
+		if !ok {
+			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 群申请接口未初始化")
+		}
+		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "同步")))
+		if err != nil {
+			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 同步 [数量]")
+		}
+		if limit <= 0 {
+			limit = 20
+		}
+		records, err := fetcher.FetchGroupJoinRequests(ctx, limit)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if err := r.groupRequests.Record(ctx, record); err != nil {
+				return err
+			}
+		}
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已同步群申请 %d 条", len(records)))
+	default:
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 <同步|导出>")
+	}
+}
+
+func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	if r.triggerStats == nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "词条统计未初始化")
+	}
+	days, err := parseStatsDays(text)
+	if err != nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 词条统计 [7d|30d|全部]")
+	}
+	result, err := r.triggerStats.ExportForDays(ctx, days)
+	if err != nil {
+		log.Printf("export trigger stats failed: %v", err)
+		return sender.SendGroupText(ctx, msg.GroupID, "词条统计服务暂不可用")
+	}
+	return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群的词条统计 %d 项，文件保存在：%s", result.Count, result.Path))
 }
 
 func targetAtUsers(msg GroupMessage) []int64 {
@@ -225,4 +384,35 @@ func parseBanDuration(raw string) (time.Duration, error) {
 		return 0, err
 	}
 	return time.Duration(seconds) * time.Second, nil
+}
+
+func parseOptionalLimit(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "全部" {
+		return 0, nil
+	}
+	raw = strings.TrimPrefix(raw, "最近")
+	limit, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || limit < 0 {
+		return 0, fmt.Errorf("invalid limit")
+	}
+	return limit, nil
+}
+
+func parseStatsDays(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "7d"
+	}
+	if raw == "全部" {
+		return 0, nil
+	}
+	if !strings.HasSuffix(raw, "d") {
+		return 0, fmt.Errorf("invalid range")
+	}
+	days, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
+	if err != nil || days <= 0 {
+		return 0, fmt.Errorf("invalid range")
+	}
+	return days, nil
 }

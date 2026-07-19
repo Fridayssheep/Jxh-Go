@@ -35,6 +35,8 @@ make gormgen
 
 `make gormgen` 会通过 `go generate ./internal/storage` 调用 `scripts/gormgen.sh`。生成参数固定在脚本里，不要手动拼临时 `gentool` 参数更新仓库代码。
 
+当前生成表清单包括知识库、管理员/黑名单、定时任务、事件去重和群申请登记相关表。新增 MySQL 表时先更新 `deploy/mysql/init/001_schema.sql`，再同步 `scripts/gormgen.sh` 的 `-tables` 参数。
+
 ## Model ownership
 
 当前阶段保留 `internal/storage/models.go` 作为 storage 对外返回类型和业务转换类型。

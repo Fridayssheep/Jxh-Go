@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/zjutjh/jxh-go/internal/cqreply"
 )
 
 type RetrievedDocument struct {
@@ -156,11 +158,11 @@ func (r *RetrievalEngine) setCached(key string, docs []RetrievedDocument) {
 
 func recallEntry(entry Entry, query string) []RetrievedDocument {
 	var docs []RetrievedDocument
-	if entry.Keyword == query {
+	if cqreply.Parse(entry.Keyword).PlainText == query {
 		docs = append(docs, RetrievedDocument{Entry: entry, Score: 1, Sources: []string{"exact"}})
 	}
 	for _, alias := range entry.Aliases {
-		if alias == query {
+		if cqreply.Parse(alias).PlainText == query {
 			docs = append(docs, RetrievedDocument{Entry: entry, Score: 0.9, Sources: []string{"exact"}})
 			break
 		}
@@ -173,7 +175,17 @@ func recallEntry(entry Entry, query string) []RetrievedDocument {
 
 func scoreText(entry Entry, query string) float64 {
 	var score float64
-	haystack := strings.Join([]string{entry.Keyword, entry.Path, strings.Join(entry.Aliases, " "), entry.Answer, entry.Content}, "\n")
+	aliases := make([]string, 0, len(entry.Aliases))
+	for _, alias := range entry.Aliases {
+		aliases = append(aliases, cqreply.Parse(alias).PlainText)
+	}
+	haystack := strings.Join([]string{
+		cqreply.Parse(entry.Keyword).PlainText,
+		cqreply.Parse(entry.Path).PlainText,
+		strings.Join(aliases, " "),
+		cqreply.Parse(entry.Answer).PlainText,
+		cqreply.Parse(entry.Content).PlainText,
+	}, "\n")
 	for _, term := range queryTerms(query) {
 		if strings.Contains(haystack, term) {
 			score += 0.1

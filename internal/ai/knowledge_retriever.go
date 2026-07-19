@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/cqreply"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 )
 
@@ -39,18 +40,18 @@ func (r KnowledgeRetriever) Retrieve(ctx context.Context, query string, topK int
 	out := make([]Document, 0, len(docs))
 	for _, doc := range docs {
 		metadata := map[string]string{
-			"keyword": doc.Entry.Keyword,
-			"answer":  doc.Entry.Answer,
+			"keyword": cqreply.Parse(doc.Entry.Keyword).PlainText,
+			"answer":  cqreply.Parse(doc.Entry.Answer).PlainText,
 		}
 		if doc.Entry.Category != "" {
-			metadata["category"] = doc.Entry.Category
+			metadata["category"] = cqreply.Parse(doc.Entry.Category).PlainText
 		}
 		if doc.Entry.Path != "" {
-			metadata["path"] = doc.Entry.Path
+			metadata["path"] = cqreply.Parse(doc.Entry.Path).PlainText
 		}
 		out = append(out, Document{
-			ID:       doc.Entry.SourceKey,
-			Content:  doc.Entry.Content,
+			ID:       cqreply.Parse(doc.Entry.SourceKey).PlainText,
+			Content:  cqreply.Parse(doc.Entry.Content).PlainText,
 			Metadata: metadata,
 			Score:    doc.Score,
 		})

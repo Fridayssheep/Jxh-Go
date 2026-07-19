@@ -111,3 +111,32 @@ func TestRetrievalEngineCachesUntilTTLExpires(t *testing.T) {
 		t.Fatalf("third docs length = %d, want expired cache miss", len(third))
 	}
 }
+
+func TestRetrievalDoesNotMatchImageCQURL(t *testing.T) {
+	retriever := NewTextRetriever([]Entry{{
+		SourceKey: "map",
+		Keyword:   "campus map",
+		Path:      "Campus [CQ:image,url=https://cdn.example.com/path.png]",
+		Aliases:   []string{"[CQ:image,url=https://cdn.example.com/alias.png]"},
+		Answer:    "[CQ:image,url=https://cdn.example.com/map.png]",
+		Content:   "campus map [CQ:image,url=https://cdn.example.com/map.png]",
+		Enabled:   true,
+		AIEnabled: true,
+	}})
+
+	docs, err := retriever.Retrieve(context.Background(), "cdn.example.com", 5)
+	if err != nil {
+		t.Fatalf("Retrieve returned error: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("documents = %#v, want no match from image URL", docs)
+	}
+
+	docs, err = retriever.Retrieve(context.Background(), "[CQ:image,url=https://cdn.example.com/alias.png]", 5)
+	if err != nil {
+		t.Fatalf("exact image CQ Retrieve returned error: %v", err)
+	}
+	if len(docs) != 0 {
+		t.Fatalf("documents = %#v, want no exact match from image CQ alias", docs)
+	}
+}

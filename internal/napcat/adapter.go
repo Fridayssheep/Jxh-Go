@@ -2,6 +2,7 @@ package napcat
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
+	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
 	"github.com/zjutjh/napcat-sdk/event"
@@ -20,8 +23,14 @@ type Handler interface {
 	HandleGroupIncrease(ctx context.Context, groupID int64, userID int64) error
 }
 
+type groupJoinRequestHandler interface {
+	HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error
+}
+
 type Dedupe interface {
-	SeenOrMark(key string) bool
+	Begin(ctx context.Context, key string) (duplicate bool, err error)
+	Complete(ctx context.Context, key string) error
+	Abort(key string)
 }
 
 type Server struct {
@@ -87,14 +96,36 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			if !ok {
 				return
 			}
-			if s.Dedupe != nil && s.Dedupe.SeenOrMark(eventKey(ev)) {
-				continue
-			}
-			if err := s.handleEvent(ctx, client, ev); err != nil {
+			if err := s.processEvent(ctx, client, ev); err != nil {
 				log.Printf("handle napcat event failed: %v", err)
 			}
 		}
 	}
+}
+
+func (s Server) processEvent(ctx context.Context, client *napcatsdk.Client, ev event.Event) error {
+	key := eventKey(ev)
+	if s.Dedupe != nil {
+		duplicate, err := s.Dedupe.Begin(ctx, key)
+		if err != nil {
+			log.Printf("begin napcat event dedupe failed: %v", err)
+		}
+		if duplicate {
+			return nil
+		}
+	}
+	if err := s.handleEvent(ctx, client, ev); err != nil {
+		if s.Dedupe != nil {
+			s.Dedupe.Abort(key)
+		}
+		return err
+	}
+	if s.Dedupe != nil {
+		if err := s.Dedupe.Complete(ctx, key); err != nil {
+			log.Printf("complete napcat event dedupe failed: %v", err)
+		}
+	}
+	return nil
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) bool {
@@ -119,6 +150,14 @@ func (s Server) handleEvent(ctx context.Context, client *napcatsdk.Client, ev ev
 		}
 		return s.Handler.HandleGroupMessage(ctx, toGroupMessage(e))
 	case *event.UnknownEvent:
+		if record, ok, err := grouprequest.RecordFromEvent(e.Raw()); err != nil {
+			return err
+		} else if ok {
+			if handler, ok := s.Handler.(groupJoinRequestHandler); ok {
+				return handler.HandleGroupJoinRequest(ctx, record)
+			}
+			return nil
+		}
 		var notice struct {
 			PostType   string `json:"post_type"`
 			NoticeType string `json:"notice_type"`
@@ -147,7 +186,16 @@ func toGroupMessage(e *event.GroupMessage) bot.GroupMessage {
 		IsSelf:         e.UserID == e.SelfID(),
 		IsOwner:        e.Sender.Role == "owner",
 		AtUsers:        extractAtUsers(e.Message),
+		Segments:       toMessageSegments(e.Message),
 	}
+}
+
+func toMessageSegments(chain message.Chain) []bot.MessageSegment {
+	segments := make([]bot.MessageSegment, 0, len(chain))
+	for _, segment := range chain {
+		segments = append(segments, bot.MessageSegment{Type: segment.Type, Data: segment.Data})
+	}
+	return segments
 }
 
 func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *event.GroupMessage) error {
@@ -167,6 +215,9 @@ func eventKey(ev event.Event) string {
 		return fmt.Sprintf("group-message:%d:%d:%d", e.GroupID, e.MessageID, e.Time())
 	case *event.PrivateMessage:
 		return fmt.Sprintf("private-message:%d:%d:%d", e.UserID, e.MessageID, e.Time())
+	case *event.UnknownEvent:
+		sum := sha1.Sum(e.Raw())
+		return fmt.Sprintf("unknown:%s:%d:%d:%x", e.PostType(), e.SelfID(), e.Time(), sum[:8])
 	default:
 		return fmt.Sprintf("%s:%d:%d", ev.PostType(), ev.SelfID(), ev.Time())
 	}
@@ -206,6 +257,32 @@ type quoteMessage struct {
 	RawMessage string         `json:"raw_message"`
 	Sender     map[string]any `json:"sender"`
 	Message    any            `json:"message"`
+}
+
+func (s SDKSender) UploadGroupFile(ctx context.Context, groupID int64, path, name string) error {
+	_, err := s.client.API().UploadGroupFile(ctx, api.UploadGroupFileRequest{
+		GroupID:    strconv.FormatInt(groupID, 10),
+		File:       path,
+		Name:       name,
+		UploadFile: true,
+	})
+	return err
+}
+
+func (s SDKSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
+	resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
+		GroupID: strconv.FormatInt(groupID, 10),
+		UserID:  strconv.FormatInt(userID, 10),
+		NoCache: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	role, ok := commands.NormalizeGroupRole(resp.Role)
+	if !ok {
+		return "", fmt.Errorf("get_group_member_info returned invalid role %q", resp.Role)
+	}
+	return role, nil
 }
 
 func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {
@@ -301,6 +378,19 @@ func (s SDKSender) SetGroupBan(ctx context.Context, groupID, userID int64, durat
 func (s SDKSender) SetRestart(ctx context.Context) error {
 	_, err := s.client.API().SetRestart(ctx, api.SetRestartRequest{})
 	return err
+}
+
+func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
+	if count <= 0 {
+		count = 20
+	}
+	resp, err := s.client.API().GetGroupSystemMsg(ctx, api.GetGroupSystemMsgRequest{Count: count})
+	if err != nil {
+		return nil, err
+	}
+	invited := append([]map[string]any{}, resp.InvitedRequest...)
+	invited = append(invited, resp.InvitedRequests...)
+	return grouprequest.RecordsFromSystemMessages(resp.JoinRequests, invited, time.Now()), nil
 }
 
 func extractAtUsers(chain message.Chain) []int64 {

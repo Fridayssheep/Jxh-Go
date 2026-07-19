@@ -20,6 +20,7 @@ func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 		db:                 db,
 		Admin:              newAdmin(db, opts...),
 		Blacklist:          newBlacklist(db, opts...),
+		GroupJoinRequest:   newGroupJoinRequest(db, opts...),
 		KnowledgeEntry:     newKnowledgeEntry(db, opts...),
 		KnowledgeImportRun: newKnowledgeImportRun(db, opts...),
 		ProcessedEvent:     newProcessedEvent(db, opts...),
@@ -32,6 +33,7 @@ type Query struct {
 
 	Admin              admin
 	Blacklist          blacklist
+	GroupJoinRequest   groupJoinRequest
 	KnowledgeEntry     knowledgeEntry
 	KnowledgeImportRun knowledgeImportRun
 	ProcessedEvent     processedEvent
@@ -45,6 +47,7 @@ func (q *Query) clone(db *gorm.DB) *Query {
 		db:                 db,
 		Admin:              q.Admin.clone(db),
 		Blacklist:          q.Blacklist.clone(db),
+		GroupJoinRequest:   q.GroupJoinRequest.clone(db),
 		KnowledgeEntry:     q.KnowledgeEntry.clone(db),
 		KnowledgeImportRun: q.KnowledgeImportRun.clone(db),
 		ProcessedEvent:     q.ProcessedEvent.clone(db),
@@ -65,6 +68,7 @@ func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 		db:                 db,
 		Admin:              q.Admin.replaceDB(db),
 		Blacklist:          q.Blacklist.replaceDB(db),
+		GroupJoinRequest:   q.GroupJoinRequest.replaceDB(db),
 		KnowledgeEntry:     q.KnowledgeEntry.replaceDB(db),
 		KnowledgeImportRun: q.KnowledgeImportRun.replaceDB(db),
 		ProcessedEvent:     q.ProcessedEvent.replaceDB(db),
@@ -75,6 +79,7 @@ func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 type queryCtx struct {
 	Admin              *adminDo
 	Blacklist          *blacklistDo
+	GroupJoinRequest   *groupJoinRequestDo
 	KnowledgeEntry     *knowledgeEntryDo
 	KnowledgeImportRun *knowledgeImportRunDo
 	ProcessedEvent     *processedEventDo
@@ -85,6 +90,7 @@ func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
 		Admin:              q.Admin.WithContext(ctx),
 		Blacklist:          q.Blacklist.WithContext(ctx),
+		GroupJoinRequest:   q.GroupJoinRequest.WithContext(ctx),
 		KnowledgeEntry:     q.KnowledgeEntry.WithContext(ctx),
 		KnowledgeImportRun: q.KnowledgeImportRun.WithContext(ctx),
 		ProcessedEvent:     q.ProcessedEvent.WithContext(ctx),

@@ -1,8 +1,6 @@
 package knowledge
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -297,8 +295,6 @@ func inferCategory(path, keyword, answer string) string {
 	case strings.Contains(text, "报到") || strings.Contains(text, "开学"):
 		return "报到"
 	default:
-		sum := sha1.Sum([]byte(keyword))
-		_ = hex.EncodeToString(sum[:])
 		return ""
 	}
 }

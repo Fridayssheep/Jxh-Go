@@ -2,205 +2,163 @@ package ai
 
 import (
 	"context"
-	"fmt"
-	"sort"
 	"strings"
-	"sync/atomic"
+	"sync"
+	"time"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	toolutils "github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/flow/agent"
+	"github.com/cloudwego/eino/flow/agent/react"
+	"github.com/cloudwego/eino/schema"
+	"github.com/zjutjh/jxh-go/internal/knowledge"
 )
 
 const EmptyKnowledgeAnswer = "小弘没有在大脑里找到相关内容呢~"
 const DisabledAnswer = "管理员没有启动AI问答呢"
+const maxAgentSteps = 6
 
-type Document struct {
-	ID       string
-	Content  string
-	Metadata map[string]string
-	Score    float64
+const agentPrompt = `你是精小弘，负责根据校务知识库回答问题。
+回答校务问题前必须调用 search_knowledge 工具。你可以改写关键词、切换 AND、OR 或正则模式并多次搜索。
+只能依据工具返回的内容回答，不得编造政策、流程、时间、地点或联系方式。搜索不到时直接说明知识库没有相关内容。
+回答应简洁、准确，不要展示内部 source_key，也不要声称访问了数据库。`
+
+type SearchToolInput struct {
+	Query string `json:"query" jsonschema:"required" jsonschema_description:"搜索关键词或正则表达式"`
+	Mode  string `json:"mode" jsonschema:"required,enum=and,enum=or,enum=regex" jsonschema_description:"and 要求所有词命中，or 要求任一词命中，regex 使用 Go 正则表达式"`
+	Limit int    `json:"limit" jsonschema_description:"返回条数，默认 5，最大 10"`
 }
 
-type Retriever interface {
-	Retrieve(ctx context.Context, query string, topK int) ([]Document, error)
-}
-
-type RetrieverRef struct {
-	value atomic.Value
-}
-
-func NewRetrieverRef(initial Retriever) *RetrieverRef {
-	ref := &RetrieverRef{}
-	if initial != nil {
-		ref.Set(initial)
-	}
-	return ref
-}
-
-func (r *RetrieverRef) Set(next Retriever) {
-	r.value.Store(next)
-}
-
-func (r *RetrieverRef) Retrieve(ctx context.Context, query string, topK int) ([]Document, error) {
-	if r == nil {
-		return nil, nil
-	}
-	value := r.value.Load()
-	if value == nil {
-		return nil, nil
-	}
-	return value.(Retriever).Retrieve(ctx, query, topK)
-}
-
-type Chat interface {
-	Generate(ctx context.Context, prompt string) (string, error)
+type SearchToolOutput struct {
+	Results []knowledge.SearchResult `json:"results,omitempty"`
+	Error   string                   `json:"error,omitempty"`
 }
 
 type Options struct {
-	Retriever        Retriever
-	Chat             Chat
-	TopK             int
+	Model            model.ToolCallingChatModel
+	Knowledge        *knowledge.IndexRef
+	Timeout          time.Duration
 	MaxQuestionChars int
 }
 
+type agentRunner interface {
+	Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error)
+}
+
 type Service struct {
-	retriever        Retriever
-	chat             Chat
-	topK             int
+	agent            agentRunner
+	timeout          time.Duration
 	maxQuestionChars int
 }
 
-func NewService(opts Options) *Service {
-	topK := opts.TopK
-	if topK <= 0 {
-		topK = 5
+func NewService(ctx context.Context, opts Options) (*Service, error) {
+	searchTool, err := toolutils.InferTool("search_knowledge", "搜索精小弘当前内存知识库。支持 AND、OR 和 Go 正则表达式查询。", func(ctx context.Context, input SearchToolInput) (SearchToolOutput, error) {
+		return searchKnowledge(ctx, opts.Knowledge, input)
+	})
+	if err != nil {
+		return nil, err
 	}
-	maxQuestionChars := opts.MaxQuestionChars
+	reactAgent, err := react.NewAgent(ctx, &react.AgentConfig{
+		ToolCallingModel: opts.Model,
+		ToolsConfig: compose.ToolsNodeConfig{
+			Tools: []tool.BaseTool{searchTool},
+		},
+		MaxStep: maxAgentSteps,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newService(reactAgent, opts.Timeout, opts.MaxQuestionChars), nil
+}
+
+func newService(runner agentRunner, timeout time.Duration, maxQuestionChars int) *Service {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
 	if maxQuestionChars <= 0 {
 		maxQuestionChars = 500
 	}
-	return &Service{
-		retriever:        opts.Retriever,
-		chat:             opts.Chat,
-		topK:             topK,
-		maxQuestionChars: maxQuestionChars,
-	}
+	return &Service{agent: runner, timeout: timeout, maxQuestionChars: maxQuestionChars}
 }
 
-func (s *Service) Answer(ctx context.Context, question string) (string, error) {
-	answer, _, err := s.AnswerWithDocuments(ctx, question)
-	return answer, err
-}
-
-func (s *Service) AnswerWithDocuments(ctx context.Context, question string) (string, []Document, error) {
+func (s *Service) AnswerWithSources(ctx context.Context, question string) (string, []string, error) {
 	question = strings.TrimSpace(question)
-	if question == "" {
+	if question == "" || s == nil || s.agent == nil {
 		return EmptyKnowledgeAnswer, nil, nil
 	}
-	if len([]rune(question)) > s.maxQuestionChars {
-		question = string([]rune(question)[:s.maxQuestionChars])
-	}
-	if s.retriever == nil {
-		return EmptyKnowledgeAnswer, nil, nil
-	}
-	docs, err := s.retriever.Retrieve(ctx, question, s.topK)
+	question = truncateRunes(question, s.maxQuestionChars)
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	collector := &sourceCollector{seen: make(map[string]struct{})}
+	ctx = context.WithValue(ctx, sourceCollectorKey{}, collector)
+	message, err := s.agent.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(agentPrompt),
+		schema.UserMessage(question),
+	})
+	sourceKeys := collector.keys()
 	if err != nil {
-		return "", nil, err
+		return "", sourceKeys, err
 	}
-	if len(docs) == 0 {
+	if len(sourceKeys) == 0 || message == nil || strings.TrimSpace(message.Content) == "" {
 		return EmptyKnowledgeAnswer, nil, nil
 	}
-	prompt := BuildPrompt(question, docs)
-	if s.chat == nil {
-		return EmptyKnowledgeAnswer, docs, nil
-	}
-	answer, err := s.chat.Generate(ctx, prompt)
+	return strings.TrimSpace(message.Content), sourceKeys, nil
+}
+
+func searchKnowledge(ctx context.Context, index *knowledge.IndexRef, input SearchToolInput) (SearchToolOutput, error) {
+	results, err := index.Search(knowledge.SearchQuery{Query: input.Query, Mode: input.Mode, Limit: input.Limit})
 	if err != nil {
-		return "", nil, err
+		return SearchToolOutput{Error: err.Error()}, nil
 	}
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return EmptyKnowledgeAnswer, docs, nil
-	}
-	return answer, docs, nil
-}
-
-func BuildPrompt(question string, docs []Document) string {
-	var b strings.Builder
-	b.WriteString("你是精小弘。只能基于以下知识库内容回答用户问题；如果知识库没有答案，回答“")
-	b.WriteString(EmptyKnowledgeAnswer)
-	b.WriteString("”。不要编造学校政策、流程、时间、联系方式。\n\n")
-	b.WriteString("用户问题：")
-	b.WriteString(question)
-	b.WriteString("\n\n知识库内容：\n")
-	for i, doc := range docs {
-		b.WriteString(fmt.Sprintf("[%d] ID=%s\n", i+1, doc.ID))
-		if len(doc.Metadata) > 0 {
-			keys := make([]string, 0, len(doc.Metadata))
-			for key := range doc.Metadata {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				b.WriteString(key)
-				b.WriteString(": ")
-				b.WriteString(doc.Metadata[key])
-				b.WriteString("\n")
-			}
-		}
-		b.WriteString(doc.Content)
-		b.WriteString("\n\n")
-	}
-	return b.String()
-}
-
-type StaticRetriever struct {
-	Documents []Document
-}
-
-func (r StaticRetriever) Retrieve(ctx context.Context, query string, topK int) ([]Document, error) {
-	_ = ctx
-	_ = query
-	if topK > 0 && len(r.Documents) > topK {
-		return r.Documents[:topK], nil
-	}
-	return r.Documents, nil
-}
-
-type StaticChat struct {
-	Response   string
-	LastPrompt string
-}
-
-func (c *StaticChat) Generate(ctx context.Context, prompt string) (string, error) {
-	_ = ctx
-	c.LastPrompt = prompt
-	if c.Response == "" {
-		return EmptyKnowledgeAnswer, nil
-	}
-	return c.Response, nil
-}
-
-type ExtractiveChat struct{}
-
-func (ExtractiveChat) Generate(ctx context.Context, prompt string) (string, error) {
-	_ = ctx
-	const marker = "answer: "
-	if idx := strings.Index(prompt, marker); idx >= 0 {
-		rest := prompt[idx+len(marker):]
-		if end := strings.Index(rest, "\n"); end >= 0 {
-			rest = rest[:end]
-		}
-		if answer := strings.TrimSpace(rest); answer != "" {
-			return answer, nil
+	if collector := sourceCollectorFromContext(ctx); collector != nil {
+		for _, result := range results {
+			collector.add(result.SourceKey)
 		}
 	}
-	const body = "知识正文："
-	if idx := strings.Index(prompt, body); idx >= 0 {
-		answer := strings.TrimSpace(prompt[idx+len(body):])
-		if answer != "" {
-			if end := strings.Index(answer, "\n\n"); end >= 0 {
-				answer = answer[:end]
-			}
-			return strings.TrimSpace(answer), nil
-		}
+	return SearchToolOutput{Results: results}, nil
+}
+
+type sourceCollectorKey struct{}
+
+type sourceCollector struct {
+	mu    sync.Mutex
+	seen  map[string]struct{}
+	order []string
+}
+
+func sourceCollectorFromContext(ctx context.Context) *sourceCollector {
+	collector, _ := ctx.Value(sourceCollectorKey{}).(*sourceCollector)
+	return collector
+}
+
+func (c *sourceCollector) add(sourceKey string) {
+	if c == nil || sourceKey == "" {
+		return
 	}
-	return EmptyKnowledgeAnswer, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.seen[sourceKey]; ok {
+		return
+	}
+	c.seen[sourceKey] = struct{}{}
+	c.order = append(c.order, sourceKey)
+}
+
+func (c *sourceCollector) keys() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.order...)
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
 }

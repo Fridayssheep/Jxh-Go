@@ -20,6 +20,7 @@ import (
 type recordingSender struct {
 	groupID     int64
 	text        string
+	sent        chan struct{}
 	roles       map[int64]string
 	roleErrors  map[int64]error
 	roleQueries [][2]int64
@@ -29,6 +30,12 @@ func (s *recordingSender) SendGroupText(ctx context.Context, groupID int64, text
 	_ = ctx
 	s.groupID = groupID
 	s.text = text
+	if s.sent != nil {
+		select {
+		case s.sent <- struct{}{}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -77,6 +84,27 @@ type recordingQuoteGenerator struct {
 
 type recordingReloader struct {
 	calls int
+}
+
+type recordingAI struct {
+	answer  string
+	sources []string
+	err     error
+}
+
+func (a recordingAI) AnswerWithSources(context.Context, string) (string, []string, error) {
+	return a.answer, append([]string(nil), a.sources...), a.err
+}
+
+type blockingAI struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *blockingAI) AnswerWithSources(context.Context, string) (string, []string, error) {
+	a.started <- struct{}{}
+	<-a.release
+	return "答案", []string{"source"}, nil
 }
 
 func (r *recordingReloader) Reload(context.Context) error {
@@ -328,21 +356,10 @@ func TestGroupCommandRouterHandlesAICommandWhenMentioningSelf(t *testing.T) {
 }
 
 func TestGroupCommandRouterRecordsAIRetrievalTriggers(t *testing.T) {
-	sender := &recordingSender{}
+	sender := &recordingSender{sent: make(chan struct{}, 1)}
 	statsStore := &recordingTriggerStats{}
-	chat := &ai.StaticChat{Response: "交通说明"}
 	router := NewGroupCommandRouter(Options{
-		AI: ai.NewService(ai.Options{
-			Retriever: ai.StaticRetriever{Documents: []ai.Document{{
-				ID:      "traffic",
-				Content: "知识正文：交通说明",
-				Metadata: map[string]string{
-					"keyword": "交通",
-				},
-				Score: 0.9,
-			}}},
-			Chat: chat,
-		}),
+		AI:           recordingAI{answer: "交通说明", sources: []string{"traffic"}},
 		TriggerStats: triggerstats.NewService(statsStore, triggerstats.Options{}),
 	})
 
@@ -360,6 +377,11 @@ func TestGroupCommandRouterRecordsAIRetrievalTriggers(t *testing.T) {
 	}
 	if !handled {
 		t.Fatal("Handle did not handle /ai")
+	}
+	select {
+	case <-sender.sent:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async AI answer")
 	}
 	if sender.text != "交通说明" {
 		t.Fatalf("sent text = %q", sender.text)
@@ -1020,17 +1042,9 @@ func TestGroupCommandRouterReportsUnavailableTriggerStats(t *testing.T) {
 }
 
 func TestGroupCommandRouterKeepsAIAnswerWhenStatsFails(t *testing.T) {
-	sender := &recordingModerator{}
+	sender := &recordingModerator{recordingSender: recordingSender{sent: make(chan struct{}, 1)}}
 	router := NewGroupCommandRouter(Options{
-		AI: ai.NewService(ai.Options{
-			Retriever: ai.StaticRetriever{Documents: []ai.Document{{
-				ID:       "doc-1",
-				Content:  "答案材料",
-				Metadata: map[string]string{"keyword": "菜单"},
-				Score:    0.9,
-			}}},
-			Chat: &ai.StaticChat{Response: "AI 答案"},
-		}),
+		AI:           recordingAI{answer: "AI 答案", sources: []string{"doc-1"}},
 		TriggerStats: triggerstats.NewService(&recordingTriggerStats{err: errors.New("stats unavailable")}, triggerstats.Options{}),
 	})
 
@@ -1048,7 +1062,48 @@ func TestGroupCommandRouterKeepsAIAnswerWhenStatsFails(t *testing.T) {
 	if !handled {
 		t.Fatal("Handle did not handle /ai")
 	}
+	select {
+	case <-sender.sent:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for async AI answer")
+	}
 	if sender.text != "AI 答案" {
 		t.Fatalf("sent text = %q", sender.text)
+	}
+}
+
+func TestGroupCommandRouterRejectsThirdConcurrentAIRequest(t *testing.T) {
+	aiService := &blockingAI{started: make(chan struct{}, 2), release: make(chan struct{}, 2)}
+	router := NewGroupCommandRouter(Options{AI: aiService})
+	message := GroupMessage{GroupID: 123, SelfID: 999, Text: "/ai 问题", AtUsers: []int64{999}}
+	first := &recordingSender{sent: make(chan struct{}, 1)}
+	second := &recordingSender{sent: make(chan struct{}, 1)}
+	for _, sender := range []*recordingSender{first, second} {
+		if handled, err := router.Handle(context.Background(), message, sender); err != nil || !handled {
+			t.Fatalf("Handle returned handled/error = %v/%v", handled, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-aiService.started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for AI request to start")
+		}
+	}
+	third := &recordingSender{}
+	if handled, err := router.Handle(context.Background(), message, third); err != nil || !handled {
+		t.Fatalf("third Handle returned handled/error = %v/%v", handled, err)
+	}
+	if third.text != "AI问答繁忙，请稍后再试" {
+		t.Fatalf("third response = %q", third.text)
+	}
+	aiService.release <- struct{}{}
+	aiService.release <- struct{}{}
+	for _, sender := range []*recordingSender{first, second} {
+		select {
+		case <-sender.sent:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for AI answer")
+		}
 	}
 }

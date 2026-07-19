@@ -5,15 +5,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/config"
+	"github.com/zjutjh/jxh-go/internal/knowledge"
 )
 
 func TestNewAIServiceReturnsNilWhenDisabled(t *testing.T) {
 	cfg := config.Default()
 	cfg.AI.Enabled = false
 
-	service, err := newAIService(context.Background(), cfg, ai.StaticRetriever{})
+	service, err := newAIService(context.Background(), cfg, knowledge.NewIndexRef(nil))
 	if err != nil {
 		t.Fatalf("newAIService returned error: %v", err)
 	}

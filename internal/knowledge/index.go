@@ -117,7 +117,6 @@ func cloneEntries(entries []Entry) []Entry {
 
 func cloneEntry(entry Entry) Entry {
 	entry.Aliases = append([]string(nil), entry.Aliases...)
-	entry.Tags = append([]string(nil), entry.Tags...)
 	return entry
 }
 

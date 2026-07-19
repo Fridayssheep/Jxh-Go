@@ -16,7 +16,8 @@ import (
 )
 
 type GroupCommandRouter struct {
-	ai            *ai.Service
+	ai            AIAnswerer
+	aiSlots       chan struct{}
 	reloader      Reloader
 	admin         *commands.AdminHandler
 	quote         QuoteGenerator
@@ -47,6 +48,7 @@ const adminHelpText = `管理员命令（当前群群主或群管理员可使用
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	return &GroupCommandRouter{
 		ai:            opts.AI,
+		aiSlots:       make(chan struct{}, 2),
 		reloader:      opts.Reloader,
 		admin:         opts.Admin,
 		quote:         opts.Quote,
@@ -85,7 +87,7 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	case text == "/q" || strings.HasPrefix(text, "/q "):
 		return true, r.handleQuote(ctx, msg, sender, text)
 	case strings.HasPrefix(text, "/ai"):
-		return true, r.handleAI(ctx, msg, sender, text)
+		return true, r.startAI(ctx, msg, sender, text)
 	case strings.HasPrefix(text, "/admin"):
 		return true, r.handleAdmin(ctx, msg, sender, text)
 	default:
@@ -178,20 +180,34 @@ func parseQuoteCount(text string) (int, error) {
 	return count, nil
 }
 
-func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
-	question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
+func (r *GroupCommandRouter) startAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
 	if r.ai == nil {
 		return sender.SendGroupText(ctx, msg.GroupID, ai.DisabledAnswer)
 	}
-	answer, docs, err := r.ai.AnswerWithDocuments(ctx, question)
+	select {
+	case r.aiSlots <- struct{}{}:
+		go func() {
+			defer func() { <-r.aiSlots }()
+			if err := r.handleAI(ctx, msg, sender, text); err != nil {
+				log.Printf("handle ai command failed: %v", err)
+				if sendErr := sender.SendGroupText(ctx, msg.GroupID, "AI问答失败，请稍后再试"); sendErr != nil {
+					log.Printf("send ai failure message failed: %v", sendErr)
+				}
+			}
+		}()
+		return nil
+	default:
+		return sender.SendGroupText(ctx, msg.GroupID, "AI问答繁忙，请稍后再试")
+	}
+}
+
+func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
+	answer, sourceKeys, err := r.ai.AnswerWithSources(ctx, question)
 	if err != nil {
 		return err
 	}
 	if r.triggerStats != nil {
-		sourceKeys := make([]string, 0, len(docs))
-		for _, doc := range docs {
-			sourceKeys = append(sourceKeys, doc.ID)
-		}
 		if err := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); err != nil {
 			// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
 			log.Printf("record ai retrieval trigger failed: %v", err)

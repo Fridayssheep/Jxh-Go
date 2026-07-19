@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
@@ -22,6 +21,10 @@ type Sender interface {
 
 type Reloader interface {
 	Reload(ctx context.Context) error
+}
+
+type AIAnswerer interface {
+	AnswerWithSources(ctx context.Context, question string) (string, []string, error)
 }
 
 type LinkCleaner interface {
@@ -54,7 +57,7 @@ type Moderator interface {
 type Options struct {
 	Knowledge     *knowledge.IndexRef
 	Sender        Sender
-	AI            *ai.Service
+	AI            AIAnswerer
 	Reloader      Reloader
 	Admin         *commands.AdminHandler
 	Quote         QuoteGenerator

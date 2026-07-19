@@ -15,7 +15,6 @@ type Config struct {
 	WPS       WPSConfig       `yaml:"wps"`
 	Database  DatabaseConfig  `yaml:"database"`
 	AI        AIConfig        `yaml:"ai"`
-	Cache     CacheConfig     `yaml:"cache"`
 	Quote     QuoteConfig     `yaml:"quote"`
 	Scheduler SchedulerConfig `yaml:"scheduler"`
 	Debug     DebugConfig     `yaml:"debug"`
@@ -61,19 +60,13 @@ type DatabaseConfig struct {
 }
 
 type AIConfig struct {
-	Enabled          bool    `yaml:"enabled"`
-	Provider         string  `yaml:"provider"`
-	BaseURL          string  `yaml:"base_url"`
-	APIKey           string  `yaml:"api_key"`
-	Model            string  `yaml:"model"`
-	TimeoutSec       int     `yaml:"timeout_sec"`
-	MaxQuestionChars int     `yaml:"max_question_chars"`
-	TopK             int     `yaml:"top_k"`
-	ScoreThreshold   float64 `yaml:"score_threshold"`
-}
-
-type CacheConfig struct {
-	AIRetrievalTTLSec int `yaml:"ai_retrieval_ttl_sec"`
+	Enabled          bool   `yaml:"enabled"`
+	Provider         string `yaml:"provider"`
+	BaseURL          string `yaml:"base_url"`
+	APIKey           string `yaml:"api_key"`
+	Model            string `yaml:"model"`
+	TimeoutSec       int    `yaml:"timeout_sec"`
+	MaxQuestionChars int    `yaml:"max_question_chars"`
 }
 
 type QuoteConfig struct {
@@ -135,10 +128,7 @@ func Default() Config {
 			Provider:         "openai",
 			TimeoutSec:       30,
 			MaxQuestionChars: 500,
-			TopK:             5,
-			ScoreThreshold:   0.1,
 		},
-		Cache:     CacheConfig{AIRetrievalTTLSec: 300},
 		Quote:     QuoteConfig{BaseURL: "http://quote:5000", TimeoutSec: 10},
 		Scheduler: SchedulerConfig{Timezone: "Asia/Shanghai"},
 		Debug:     DebugConfig{EnableTestCommand: true},
@@ -203,8 +193,8 @@ func normalize(cfg *Config) {
 	}
 	cfg.OneBot.APITimeout = time.Duration(cfg.OneBot.APITimeoutSec) * time.Second
 	cfg.OneBot.ReconnectInterval = time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second
-	if cfg.AI.TopK <= 0 {
-		cfg.AI.TopK = 5
+	if cfg.AI.TimeoutSec <= 0 {
+		cfg.AI.TimeoutSec = 30
 	}
 	if cfg.AI.MaxQuestionChars <= 0 {
 		cfg.AI.MaxQuestionChars = 500

@@ -15,7 +15,6 @@ type SyncerOptions struct {
 	CacheFile string
 	Index     *IndexRef
 	Parse     ParseWorkbookFunc
-	OnSynced  func([]Entry)
 }
 
 type Syncer struct {
@@ -24,7 +23,6 @@ type Syncer struct {
 	cacheFile string
 	index     *IndexRef
 	parse     ParseWorkbookFunc
-	onSynced  func([]Entry)
 }
 
 func NewSyncer(opts SyncerOptions) *Syncer {
@@ -38,7 +36,6 @@ func NewSyncer(opts SyncerOptions) *Syncer {
 		cacheFile: opts.CacheFile,
 		index:     opts.Index,
 		parse:     parse,
-		onSynced:  opts.OnSynced,
 	}
 }
 
@@ -65,7 +62,7 @@ func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
 	if err := saveAtomic(s.cacheFile, data); err != nil {
 		return SyncResult{}, err
 	}
-	s.install(index, result.Entries)
+	s.index.Store(index)
 	return result, nil
 }
 
@@ -84,7 +81,7 @@ func (s *Syncer) LoadCache() (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, err
 	}
-	s.install(index, result.Entries)
+	s.index.Store(index)
 	return result, nil
 }
 
@@ -97,13 +94,6 @@ func (s *Syncer) parseAndBuild(data []byte) (SyncResult, *Index, error) {
 		return SyncResult{}, nil, fmt.Errorf("knowledge workbook contains no valid entries")
 	}
 	return result, NewIndex(result.Entries), nil
-}
-
-func (s *Syncer) install(index *Index, entries []Entry) {
-	s.index.Store(index)
-	if s.onSynced != nil {
-		s.onSynced(entries)
-	}
 }
 
 func saveAtomic(path string, data []byte) error {

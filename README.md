@@ -8,32 +8,30 @@
   <a href="https://github.com/NapNeko/NapCatQQ"><img alt="NapCat" src="https://img.shields.io/badge/NapCat-OneBot11-green?style=flat-square"></a>
   <img alt="Go" src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go">
   <img alt="MySQL" src="https://img.shields.io/badge/MySQL-8.4+-4479A1?style=flat-square&logo=mysql&logoColor=white">
-  <img alt="Redis" src="https://img.shields.io/badge/Redis-7+-DC382D?style=flat-square&logo=redis&logoColor=white">
 </p>
 
 ## 简介
 
 Jxh-Go 是精弘 QQ 群助手的 Go 重构版本，面向浙江工业大学相关 QQ 群的自动问答、知识库回复和群管理场景。
 
-它通过 NapCat 接入 OneBot 11，用 MySQL 保存知识库和群申请登记，用 Redis 记录词条触发统计，并用 Eino 接入 `/ai`。同一份 WPS 回复表既可以做关键词精确回复，也可以作为 AI 检索问答的知识源。
+它通过 NapCat 接入 OneBot 11，以 WPS 回复表作为知识唯一真源，在内存中同时支持关键词回复和 AI 搜索；MySQL 只保存群申请、定时任务和词条触发日志。`/ai` 使用 Eino ReAct Agent 自主选择关键词并调用内存搜索工具。
 
 ## 主要能力
 
 - **关键词回复**：从 WPS 回复表导入 `keyword`、`answer` 和 `aliases`，在群聊中精确匹配。
 - **菜单问答**：兼容 `%编号` 菜单树，导入时生成路径，方便回复和检索。
-- **AI 问答**：`/ai <问题>` 基于知识库检索回答；未配置模型时使用抽取式 fallback。
-- **群管理**：支持管理员、黑名单、禁言、NapCat 重启和定时任务。
+- **AI 问答**：`/ai <问题>` 由 ReAct Agent 使用 AND、OR 或正则表达式搜索当前内存知识库。
+- **群管理**：当前群群主和群管理员可执行禁言、NapCat 重启和定时任务命令。
 - **引用图**：回复消息后发送 `/q [数量]`，生成最多 10 条消息的动态 GIF 引用图，失败时回退 PNG。
 - **分享链接净化**：自动展开 Bilibili、小红书短链，清除分享跟踪参数；支持纯文本和 QQ 小程序卡片。
 - **群申请登记**：登记 NapCat 群申请信息，支持管理员同步并在本地按来源群分别导出 Excel。
-- **词条统计**：用 Redis 记录关键词回复和 `/ai` 检索命中的知识条目，便于查看高频问题。
-- **事件去重**：记录已处理事件，降低 NapCat 重连时重复响应的概率。
+- **词条统计**：用 MySQL 日志记录关键词回复和 `/ai` 实际搜索命中的知识条目。
 
 ## 快速开始
 
 ### 1. 准备依赖
 
-本地使用 compose 部署只需要 Docker Compose；如果需要本地运行/调试 bot（make run / go run），还需要 Go 1.25+。`docker-compose.yaml` 现在会一次启动 MySQL、Redis、NapCat、引用图服务和 bot。
+本地使用 compose 部署只需要 Docker Compose；如果需要本地运行/调试 bot（make run / go run），还需要 Go 1.25+。`docker-compose.yaml` 会一次启动 MySQL、NapCat、引用图服务和 bot。
 
 ### 2. 复制配置
 
@@ -44,11 +42,10 @@ cp config.example.yaml config.yaml
 先重点检查这些配置：
 
 - `onebot.access_token`：必须和 NapCat WebSocket token 一致。
-- `wps.share_url`：WPS 导出文档链接；为空时不会自动同步知识库。
+- `wps.share_url`：WPS 导出文档链接；为空或下载失败时，启动会尝试读取最后一份有效的本地 XLSX 缓存。
 - `wps.sid`：受保护 WPS 文档需要填写，也可用 `JXH_WPS_SID` 注入。
 - `database.password`：默认匹配 compose 的 `jxh_password`。
-- `redis.addr`：词条统计 Redis 地址；compose 会自动注入 `redis:6379`。
-- `ai.api_key`、`ai.model`：可选；为空时 `/ai` 使用抽取式 fallback。
+- `ai.api_key`、`ai.model`：配置完整且 `ai.enabled` 开启时才启用 `/ai`。
 
 ### 3. 启动全部服务
 
@@ -62,7 +59,7 @@ make compose-up
 NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up -d --build
 ```
 
-compose 会同时启动 MySQL、Redis、NapCat、quote 和 bot。
+compose 会同时启动 MySQL、NapCat、quote 和 bot。
 
 持久化数据默认放在仓库根目录的 `./data/` 下，便于直接打包备份和迁移。
 
@@ -153,7 +150,7 @@ go run ./cmd/bot -config config.yaml
 | `@bot /admin` | 查看管理员命令说明和权限提示 |
 | `@bot /test` | 连通性测试 |
 | `@bot /reload` | 从 WPS 同步知识库，并刷新缓存 |
-| `@bot /ai <问题>` | 基于知识库检索回答 |
+| `@bot /ai <问题>` | 让 Agent 自主搜索当前知识库并回答；同时最多处理 2 个请求 |
 | `@bot /q [数量]` | 从被回复消息开始生成 1–10 条消息的引用图；默认 1 条 |
 | `@bot /admin restart` | 请求 NapCat 重启 |
 | `@bot /admin ban <时长> @用户` | 禁言被 @ 的用户；时长支持 `10m`、`1h` 或秒数 |
@@ -162,13 +159,6 @@ go run ./cmd/bot -config config.yaml
 
 | 命令 | 说明 |
 | --- | --- |
-| `@bot /admin 添加管理员 @用户` | 在当前群手动授权普通成员使用管理命令 |
-| `@bot /admin 移除管理员 @用户` | 移除当前群普通成员的手动授权；不能移除 QQ 群主或群管理员 |
-| `@bot /admin 移除所有管理员` | 清除当前群全部手动授权；不影响 QQ 群主或群管理员 |
-| `@bot /admin 所有管理员` | 查看当前群已记录的管理员及权限来源 |
-| `@bot /admin 添加黑名单 @用户` | 添加黑名单 |
-| `@bot /admin 移除黑名单 @用户` | 移除黑名单 |
-| `@bot /admin 所有黑名单` | 查看黑名单 |
 | `@bot /admin 定时任务 查看` | 查看定时任务 |
 | `@bot /admin 定时任务 添加 <每天|单次> <HH:MM> <群聊ID> <消息内容>` | 添加定时任务 |
 | `@bot /admin 定时任务 移除 <任务ID>` | 移除定时任务 |
@@ -176,9 +166,7 @@ go run ./cmd/bot -config config.yaml
 | `@bot /admin 群申请 导出 [全部|最近N]` | 将所有群申请按来源群分别导出到本地 `data/exports/group_requests/` |
 | `@bot /admin 词条统计 [7d|30d|全部]` | 将所有群的关键词回复和 `/ai` 检索统计导出到本地 Excel |
 
-当前群的 QQ 群主和群管理员天然拥有 bot 管理权限。bot 会在每次执行管理命令时通过 NapCat 查询执行者的实时群角色并更新 MySQL；普通成员可以由当前群有权限的用户手动授权，手动授权不会跨群生效。
-
-QQ群主和群管理员的权限由 QQ 群角色提供，不能通过 bot 移除；`移除所有管理员` 也只清除当前群的手动授权。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
+bot 会在每次执行 `/admin` 或 `/reload` 时通过 NapCat 查询执行者的实时群角色，只允许当前群群主和群管理员。角色不缓存也不写入 MySQL。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
 
 群申请和词条统计面向后台维护人员，导出文件只保存在 bot 本地，不上传到 QQ 群文件。群申请一次查询所有群的数据，并在单次批次目录中按来源群号生成独立 Excel；词条统计跨群汇总为一个 Excel。系统消息中尚未处理的申请状态为 `pending`，已处理但无法判断批准或拒绝的状态为 `observed`。
 
@@ -200,10 +188,6 @@ QQ群主和群管理员的权限由 QQ 群角色提供，不能通过 bot 移除
 | `MYSQL_ROOT_PASSWORD` | MySQL root 密码，compose 部署使用 |
 | `JXH_MYSQL_PASSWORD` | bot 直连运行时的 MySQL 密码；compose 部署通常用 `MYSQL_PASSWORD` |
 | `JXH_MYSQL_DSN` | 完整 MySQL DSN，设置后优先使用 |
-| `JXH_REDIS_ADDR` | Redis 地址；compose 默认 `redis:6379` |
-| `JXH_REDIS_PASSWORD` | Redis 密码；本地 compose 默认留空 |
-| `JXH_REDIS_DB` | Redis DB 编号 |
-| `JXH_REDIS_DAILY_RETENTION_DAYS` | 词条每日统计 key 保留天数，默认 `180` |
 | `JXH_AI_PROVIDER` | ChatModel 提供方，支持 `openai`、`ark` |
 | `JXH_AI_BASE_URL` | ChatModel base URL |
 | `JXH_AI_API_KEY` | ChatModel API Key |
@@ -213,10 +197,9 @@ QQ群主和群管理员的权限由 QQ 群角色提供，不能通过 bot 移除
 AI 行为：
 
 - `ai.enabled: false`：`/ai` 返回未启用。
-- 未配置 `ai.api_key` 或 `ai.model`：使用抽取式 fallback。
+- 未配置 `ai.api_key` 或 `ai.model`：`/ai` 返回未启用。
 - `ai.provider: ark` 时，`ai.model` 填方舟推理接入点 ID，例如 `ep-xxxxxxxx`。
-
-Redis 无法连接时 bot 会记录警告并关闭词条统计，关键词回复、AI 问答和群管理仍会继续运行。`7d` 和 `30d` 分别表示应用时区内含今天的最近 7 个和 30 个自然日。
+- Agent 必须至少成功搜索并命中一条知识后才会采用模型回答；无命中时返回固定提示。`7d` 和 `30d` 分别表示应用时区内含今天的最近 7 个和 30 个自然日。
 
 ## 引用图服务
 
@@ -233,8 +216,7 @@ quote:
 
 项目采用 schema-first，运行时不使用 `AutoMigrate`。表结构以 `deploy/mysql/init/001_schema.sql` 为准。
 
-MySQL 首次初始化时会自动执行该 SQL。若 `./data/mysql` 目录里已经有旧数据，初始化 SQL 不会重复执行。
-开发阶段的新版 `admins` 表改为 `(group_id, user_id)` 联合主键，不兼容旧的全局管理员表。已有开发数据库需要删除旧 `admins` 表后重新执行 `deploy/mysql/init/001_schema.sql`，或直接重建空库。新增群申请登记表后，已有数据库也需要执行同一 schema 中对应的建表语句。词条统计存储在 Redis，不需要 MySQL 表。
+MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests` 三张表，统一使用 `utf8mb4_0900_ai_ci`。本次结构不迁移旧数据，升级时直接重建 `data/mysql`，但不要删除 `data/cache/knowledge.xlsx`。
 
 需要重建空库时：
 
@@ -272,20 +254,18 @@ make compose-logs  # 查看 compose 日志
 | --- | --- |
 | `cmd/bot` | bot 启动入口 |
 | `internal/config` | 配置加载、默认值和环境变量覆盖 |
-| `internal/cache` | 关键词索引和事件去重的内存缓存 |
 | `internal/bot` | 群消息处理管线和命令路由 |
-| `internal/commands` | 管理员、黑名单、定时任务命令 |
-| `internal/knowledge` | WPS 解析、关键词索引、文本检索 |
-| `internal/ai` | `/ai` RAG 服务和 Eino ChatModel 适配 |
+| `internal/commands` | 群管理和定时任务命令 |
+| `internal/knowledge` | WPS 解析、原子内存索引和 Agent 搜索 |
+| `internal/ai` | `/ai` ReAct Agent、知识搜索工具和 Eino 模型适配 |
 | `internal/storage` | GORM repository、业务存储模型和 generated query/model |
-| `internal/triggerstats` | Redis-backed 词条触发统计 |
+| `internal/triggerstats` | MySQL-backed 词条触发统计 |
 | `internal/napcat` | NapCat SDK 适配层 |
 | `internal/quote` | 引用图请求和消息内容转换 |
 | `internal/scheduler` | 定时任务运行时 |
-| `internal/vector` | 向量检索预留目录，当前未放置实现文件 |
 | `deploy/mysql/init` | MySQL 初始化 SQL |
 | `docs` | 设计文档、实现计划和 GORM Gen 说明 |
 | `scripts` | 代码生成和工具安装脚本 |
-| `data/` | MySQL、Redis、NapCat、bot 和 WPS 缓存的持久化根目录 |
+| `data/` | MySQL、NapCat、bot 和 WPS 缓存的持久化根目录 |
 | `Dockerfile` | bot 容器镜像构建文件 |
-| `docker-compose.yaml` | MySQL、Redis、NapCat、quote 和 bot 的完整 compose |
+| `docker-compose.yaml` | MySQL、NapCat、quote 和 bot 的完整 compose |

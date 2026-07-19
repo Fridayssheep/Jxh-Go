@@ -13,7 +13,6 @@ type Entry struct {
 	Path       string
 	Aliases    []string
 	Category   string
-	Tags       []string
 	Answer     string
 	Content    string
 	Enabled    bool

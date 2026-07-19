@@ -44,11 +44,6 @@ func main() {
 	store := storage.NewStore(db)
 
 	knowledgeIndex := knowledge.NewIndexRef(nil)
-	knowledgeRetrieverOptions := ai.KnowledgeRetrieverOptions{
-		ScoreThreshold: cfg.AI.ScoreThreshold,
-		CacheTTL:       time.Duration(cfg.Cache.AIRetrievalTTLSec) * time.Second,
-	}
-	aiRetriever := ai.NewRetrieverRef(nil)
 	knowledgeSync := knowledge.NewSyncer(knowledge.SyncerOptions{
 		Source: knowledge.WPSClient{
 			ShareURL: cfg.WPS.ShareURL,
@@ -58,9 +53,6 @@ func main() {
 		Sheet:     cfg.WPS.Sheet,
 		CacheFile: cfg.WPS.CacheFile,
 		Index:     knowledgeIndex,
-		OnSynced: func(entries []knowledge.Entry) {
-			aiRetriever.Set(ai.NewKnowledgeRetriever(entries, knowledgeRetrieverOptions))
-		},
 	})
 	if _, err := knowledgeSync.Sync(ctx); err != nil {
 		log.Printf("load knowledge from WPS failed, trying local cache: %v", err)
@@ -70,7 +62,7 @@ func main() {
 		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
 	}
 
-	aiSvc, err := newAIService(ctx, cfg, aiRetriever)
+	aiSvc, err := newAIService(ctx, cfg, knowledgeIndex)
 	if err != nil {
 		log.Fatalf("create ai service: %v", err)
 	}
@@ -115,39 +107,29 @@ func main() {
 	}
 }
 
-func shouldCreateEinoChat(cfg config.AIConfig) bool {
-	if cfg.Model == "" {
-		return false
-	}
-	if cfg.APIKey != "" {
-		return true
-	}
-	return false
+func hasAIModelConfig(cfg config.AIConfig) bool {
+	return cfg.APIKey != "" && cfg.Model != ""
 }
 
-func newAIService(ctx context.Context, cfg config.Config, retriever ai.Retriever) (*ai.Service, error) {
-	if !cfg.AI.Enabled {
+func newAIService(ctx context.Context, cfg config.Config, index *knowledge.IndexRef) (*ai.Service, error) {
+	if !cfg.AI.Enabled || !hasAIModelConfig(cfg.AI) {
 		return nil, nil
 	}
-	chat := ai.Chat(ai.ExtractiveChat{})
-	if shouldCreateEinoChat(cfg.AI) {
-		einoChat, err := ai.NewEinoChat(ctx, ai.EinoChatConfig{
-			Provider: cfg.AI.Provider,
-			BaseURL:  cfg.AI.BaseURL,
-			APIKey:   cfg.AI.APIKey,
-			Model:    cfg.AI.Model,
-		})
-		if err != nil {
-			return nil, err
-		}
-		chat = einoChat
+	chatModel, err := ai.NewEinoModel(ctx, ai.EinoModelConfig{
+		Provider: cfg.AI.Provider,
+		BaseURL:  cfg.AI.BaseURL,
+		APIKey:   cfg.AI.APIKey,
+		Model:    cfg.AI.Model,
+	})
+	if err != nil {
+		return nil, err
 	}
-	return ai.NewService(ai.Options{
-		Retriever:        retriever,
-		Chat:             chat,
-		TopK:             cfg.AI.TopK,
+	return ai.NewService(ctx, ai.Options{
+		Model:            chatModel,
+		Knowledge:        index,
+		Timeout:          time.Duration(cfg.AI.TimeoutSec) * time.Second,
 		MaxQuestionChars: cfg.AI.MaxQuestionChars,
-	}), nil
+	})
 }
 
 func applicationLocation(cfg config.Config) *time.Location {

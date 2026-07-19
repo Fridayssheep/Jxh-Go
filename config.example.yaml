@@ -61,7 +61,7 @@ database:
   dsn: ""
 
 ai:
-  # 是否启用 /ai 入口。关闭后 /ai 会直接返回未启用；启用但模型未配置时使用抽取式 fallback。
+  # 是否启用 /ai 入口。关闭或模型配置不完整时 /ai 会直接返回未启用。
   enabled: true
   # ChatModel 提供方。支持 openai 和 ark；空值按 openai 处理。
   provider: "openai"
@@ -74,18 +74,10 @@ ai:
   api_key: ""
   # ChatModel 名称。openai 填模型名；ark 填方舟推理接入点 ID，如 ep-xxxxxxxx。
   model: ""
-  # 调用 ChatModel 的超时时间，单位秒。
+  # 单次 ReAct Agent 问答的总超时时间，包含模型和知识搜索，单位秒。
   timeout_sec: 30
-  # /ai 问题最大长度，超过后会截断，避免超长 prompt。
+  # /ai 问题最大长度，超过后会截断。
   max_question_chars: 500
-  # 每次 RAG 检索送入 prompt 的知识条数。
-  top_k: 5
-  # 检索分数阈值。当前文本检索会使用该值过滤低相关知识。
-  score_threshold: 0.1
-
-cache:
-  # /ai 检索结果缓存 TTL，单位秒。设置为 0 可关闭缓存。
-  ai_retrieval_ttl_sec: 300
 
 quote:
   # 引用图服务地址。启用 quote profile 后默认映射到宿主机 5000。

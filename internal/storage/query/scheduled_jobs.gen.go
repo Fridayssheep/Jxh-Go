@@ -47,12 +47,12 @@ type scheduledJob struct {
 
 	ALL       field.Asterisk
 	ID        field.Uint64
-	Type      field.String // ä»»åŠ¡ç±»åž‹ï¼šæ¯å¤©/å•æ¬¡
-	TimeHhmm  field.String // è§¦å‘æ—¶é—´ï¼Œæ ¼å¼ HH:MM
-	GroupID   field.Int64  // QQç¾¤å·
-	Message   field.String // å®šæ—¶å‘é€å†…å®¹
-	Enabled   field.Bool   // æ˜¯å¦å¯ç”¨
-	LastRunAt field.Time   // æœ€è¿‘æ‰§è¡Œæ—¶é—´ï¼›ç”¨äºŽé˜²æ­¢åŒä¸€å¤©é‡å¤è§¦å‘
+	Type      field.String // 任务类型：每天/单次
+	TimeHhmm  field.String // 触发时间，格式 HH:MM
+	GroupID   field.Int64  // QQ群号
+	Message   field.String // 定时发送内容
+	Enabled   field.Bool   // 是否启用
+	LastRunAt field.Time   // 最近执行时间；用于防止同一天重复触发
 	CreatedAt field.Time
 	UpdatedAt field.Time
 

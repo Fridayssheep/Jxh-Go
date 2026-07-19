@@ -53,20 +53,20 @@ type groupJoinRequest struct {
 
 	ALL         field.Asterisk
 	ID          field.Uint64
-	RequestKey  field.String // ç¾¤ç”³è¯·åŽ»é‡é”®ï¼›ä¼˜å…ˆä½¿ç”¨ NapCat flag
-	Flag        field.String // å¤„ç†ç¾¤ç”³è¯·æ—¶éœ€è¦çš„ flag
-	GroupID     field.Int64  // QQç¾¤å·
-	UserID      field.Int64  // ç”³è¯·äºº QQ
-	StudentID   field.String // ç”³è¯·ä¿¡æ¯ä¸­æ˜¾å¼å¡«å†™çš„å­¦å·
-	StudentName field.String // ç”³è¯·ä¿¡æ¯ä¸­æ˜¾å¼å¡«å†™çš„å§“å
-	SubType     field.String // ç”³è¯·ç±»åž‹ï¼šadd/invite ç­‰
-	Comment     field.String // ç”³è¯·éªŒè¯ä¿¡æ¯
-	Status      field.String // ç™»è®°çŠ¶æ€ï¼špending/observed ç­‰
-	Source      field.String // æ¥æºï¼ševent/system
-	RawJSON     field.String // NapCat åŽŸå§‹äº‹ä»¶æˆ–ç³»ç»Ÿæ¶ˆæ¯ JSON
-	RequestedAt field.Time   // ç”³è¯·æ—¶é—´
-	FirstSeenAt field.Time   // é¦–æ¬¡ç™»è®°æ—¶é—´
-	LastSeenAt  field.Time   // æœ€è¿‘å‡ºçŽ°æ—¶é—´
+	RequestKey  field.String // 群申请业务去重键
+	Flag        field.String // 处理群申请时需要的 flag
+	GroupID     field.Int64  // QQ群号
+	UserID      field.Int64  // 申请人 QQ
+	StudentID   field.String // 申请信息中显式填写的学号
+	StudentName field.String // 申请信息中显式填写的姓名
+	SubType     field.String // 申请类型：add/invite 等
+	Comment     field.String // 申请验证信息
+	Status      field.String // 登记状态：pending/observed 等
+	Source      field.String // 来源：event/system
+	RawJSON     field.String // NapCat 原始事件或系统消息 JSON
+	RequestedAt field.Time   // 申请时间
+	FirstSeenAt field.Time   // 首次登记时间
+	LastSeenAt  field.Time   // 最近出现时间
 
 	fieldMap map[string]field.Expr
 }

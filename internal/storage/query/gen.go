@@ -17,26 +17,29 @@ import (
 
 func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
-		db:               db,
-		GroupJoinRequest: newGroupJoinRequest(db, opts...),
-		ScheduledJob:     newScheduledJob(db, opts...),
+		db:                  db,
+		GroupJoinRequest:    newGroupJoinRequest(db, opts...),
+		KnowledgeTriggerLog: newKnowledgeTriggerLog(db, opts...),
+		ScheduledJob:        newScheduledJob(db, opts...),
 	}
 }
 
 type Query struct {
 	db *gorm.DB
 
-	GroupJoinRequest groupJoinRequest
-	ScheduledJob     scheduledJob
+	GroupJoinRequest    groupJoinRequest
+	KnowledgeTriggerLog knowledgeTriggerLog
+	ScheduledJob        scheduledJob
 }
 
 func (q *Query) Available() bool { return q.db != nil }
 
 func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
-		db:               db,
-		GroupJoinRequest: q.GroupJoinRequest.clone(db),
-		ScheduledJob:     q.ScheduledJob.clone(db),
+		db:                  db,
+		GroupJoinRequest:    q.GroupJoinRequest.clone(db),
+		KnowledgeTriggerLog: q.KnowledgeTriggerLog.clone(db),
+		ScheduledJob:        q.ScheduledJob.clone(db),
 	}
 }
 
@@ -50,21 +53,24 @@ func (q *Query) WriteDB() *Query {
 
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
-		db:               db,
-		GroupJoinRequest: q.GroupJoinRequest.replaceDB(db),
-		ScheduledJob:     q.ScheduledJob.replaceDB(db),
+		db:                  db,
+		GroupJoinRequest:    q.GroupJoinRequest.replaceDB(db),
+		KnowledgeTriggerLog: q.KnowledgeTriggerLog.replaceDB(db),
+		ScheduledJob:        q.ScheduledJob.replaceDB(db),
 	}
 }
 
 type queryCtx struct {
-	GroupJoinRequest *groupJoinRequestDo
-	ScheduledJob     *scheduledJobDo
+	GroupJoinRequest    *groupJoinRequestDo
+	KnowledgeTriggerLog *knowledgeTriggerLogDo
+	ScheduledJob        *scheduledJobDo
 }
 
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
-		GroupJoinRequest: q.GroupJoinRequest.WithContext(ctx),
-		ScheduledJob:     q.ScheduledJob.WithContext(ctx),
+		GroupJoinRequest:    q.GroupJoinRequest.WithContext(ctx),
+		KnowledgeTriggerLog: q.KnowledgeTriggerLog.WithContext(ctx),
+		ScheduledJob:        q.ScheduledJob.WithContext(ctx),
 	}
 }
 

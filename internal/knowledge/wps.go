@@ -9,16 +9,14 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 )
 
 type WPSClient struct {
-	ShareURL  string
-	SID       string
-	CacheFile string
-	Timeout   time.Duration
-	HTTP      *http.Client
+	ShareURL string
+	SID      string
+	Timeout  time.Duration
+	HTTP     *http.Client
 }
 
 func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
@@ -57,7 +55,7 @@ func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 		if err := ensureXLSX(body); err != nil {
 			return nil, err
 		}
-		return body, c.save(body)
+		return body, nil
 	}
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, meta.DownloadURL, nil)
 	if err != nil {
@@ -78,7 +76,7 @@ func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 	if err := ensureXLSX(data); err != nil {
 		return nil, err
 	}
-	return data, c.save(data)
+	return data, nil
 }
 
 func wrapWPSError(stage string, timeout time.Duration, err error) error {
@@ -100,14 +98,4 @@ func ensureXLSX(data []byte) error {
 		preview = preview[:120]
 	}
 	return fmt.Errorf("wps download is not an xlsx file; share_url must be a WPS 导出文档链接 or direct xlsx URL, and protected documents need a valid wps_sid; normal 365.kdocs.cn/l share pages return HTML, response preview: %q", preview)
-}
-
-func (c WPSClient) save(data []byte) error {
-	if c.CacheFile == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(c.CacheFile), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(c.CacheFile, data, 0o644)
 }

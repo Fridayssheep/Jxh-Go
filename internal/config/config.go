@@ -43,12 +43,11 @@ type OneBotConfig struct {
 }
 
 type WPSConfig struct {
-	ShareURL    string `yaml:"share_url"`
-	SID         string `yaml:"sid"`
-	Sheet       string `yaml:"sheet"`
-	CacheFile   string `yaml:"cache_file"`
-	TimeoutSec  int    `yaml:"timeout_sec"`
-	SyncOnStart bool   `yaml:"sync_on_start"`
+	ShareURL   string `yaml:"share_url"`
+	SID        string `yaml:"sid"`
+	Sheet      string `yaml:"sheet"`
+	CacheFile  string `yaml:"cache_file"`
+	TimeoutSec int    `yaml:"timeout_sec"`
 }
 
 type DatabaseConfig struct {
@@ -132,10 +131,9 @@ func Default() Config {
 			ReconnectIntervalSec: 5,
 		},
 		WPS: WPSConfig{
-			Sheet:       "release",
-			CacheFile:   "./data/cache/knowledge.xlsx",
-			TimeoutSec:  120,
-			SyncOnStart: true,
+			Sheet:      "release",
+			CacheFile:  "./data/cache/knowledge.xlsx",
+			TimeoutSec: 120,
 		},
 		Database: DatabaseConfig{
 			Host:      "127.0.0.1",

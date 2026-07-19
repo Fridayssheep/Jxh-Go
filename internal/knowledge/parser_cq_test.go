@@ -19,8 +19,19 @@ func TestParseRowsKeepsCQAnswerButRemovesImagesFromAIContent(t *testing.T) {
 	if strings.Contains(entries[0].Content, "[CQ:image") || strings.Contains(entries[0].Content, "cdn.example.com") {
 		t.Fatalf("AI content still contains image CQ data: %q", entries[0].Content)
 	}
-	if !strings.Contains(entries[0].Content, "See the map:  Gate 1.") {
+	if !strings.Contains(entries[0].Content, "campus map guide see the map: gate 1.") {
 		t.Fatalf("AI content lost surrounding text: %q", entries[0].Content)
+	}
+}
+
+func TestParseRowsExplicitAIUsageOverridesChitchatInference(t *testing.T) {
+	entries, _ := ParseRows([][]string{{"你好", "你好呀", "", "", "", "ai", "enabled", "hello"}})
+
+	if len(entries) != 1 || entries[0].EntryType != EntryTypeChitchat {
+		t.Fatalf("entries = %+v, want one chitchat entry", entries)
+	}
+	if !entries[0].AIEnabled || entries[0].ExactReply {
+		t.Fatalf("entry flags = AI %v, exact %v", entries[0].AIEnabled, entries[0].ExactReply)
 	}
 }
 

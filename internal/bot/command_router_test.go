@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
-	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
@@ -171,17 +170,16 @@ func TestGroupCommandRouterIgnoresCommandWhenMentioningAnotherUser(t *testing.T)
 }
 
 func TestPipelineSwallowsBareSlashCommandBeforeKnowledgeLookup(t *testing.T) {
-	knowledgeCache := cache.NewKnowledge()
-	knowledgeCache.Replace(knowledge.NewKeywordIndex([]knowledge.Entry{{
+	knowledgeIndex := knowledge.NewIndexRef([]knowledge.Entry{{
 		SourceKey:  "slash-test",
 		Keyword:    "/test",
 		Answer:     "不应该触发",
 		Enabled:    true,
 		ExactReply: true,
-	}}))
+	}})
 	sender := &recordingSender{}
 	pipeline := NewPipeline(Options{
-		Knowledge: knowledgeCache,
+		Knowledge: knowledgeIndex,
 		Sender:    sender,
 	})
 

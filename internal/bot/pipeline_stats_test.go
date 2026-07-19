@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 )
@@ -42,18 +41,17 @@ func (r *recordingTriggerStats) ListKnowledgeTriggerSummaries(ctx context.Contex
 }
 
 func TestPipelineRecordsKeywordReplyTrigger(t *testing.T) {
-	knowledgeCache := cache.NewKnowledge()
-	knowledgeCache.Replace(knowledge.NewKeywordIndex([]knowledge.Entry{{
+	knowledgeIndex := knowledge.NewIndexRef([]knowledge.Entry{{
 		SourceKey:  "menu",
 		Keyword:    "菜单",
 		Answer:     "菜单内容",
 		Enabled:    true,
 		ExactReply: true,
-	}}))
+	}})
 	stats := &recordingTriggerStats{}
 	sender := &recordingSender{}
 	pipeline := NewPipeline(Options{
-		Knowledge:    knowledgeCache,
+		Knowledge:    knowledgeIndex,
 		Sender:       sender,
 		TriggerStats: triggerstats.NewService(stats, triggerstats.Options{Now: func() time.Time { return time.Unix(1, 0) }}),
 	})
@@ -80,17 +78,16 @@ func TestPipelineRecordsKeywordReplyTrigger(t *testing.T) {
 }
 
 func TestPipelineKeepsKeywordReplyWhenStatsFails(t *testing.T) {
-	knowledgeCache := cache.NewKnowledge()
-	knowledgeCache.Replace(knowledge.NewKeywordIndex([]knowledge.Entry{{
+	knowledgeIndex := knowledge.NewIndexRef([]knowledge.Entry{{
 		SourceKey:  "menu",
 		Keyword:    "菜单",
 		Answer:     "菜单内容",
 		Enabled:    true,
 		ExactReply: true,
-	}}))
+	}})
 	sender := &recordingSender{}
 	pipeline := NewPipeline(Options{
-		Knowledge:    knowledgeCache,
+		Knowledge:    knowledgeIndex,
 		Sender:       sender,
 		TriggerStats: triggerstats.NewService(&recordingTriggerStats{err: errors.New("stats unavailable")}, triggerstats.Options{}),
 	})

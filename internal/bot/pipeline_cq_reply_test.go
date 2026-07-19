@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 )
 
@@ -32,15 +31,14 @@ func (s *cqReplySender) SendGroupMessage(ctx context.Context, groupID int64, mes
 }
 
 func pipelineWithCQAnswer(sender Sender, answer string) *Pipeline {
-	knowledgeCache := cache.NewKnowledge()
-	knowledgeCache.Replace(knowledge.NewKeywordIndex([]knowledge.Entry{{
+	knowledgeIndex := knowledge.NewIndexRef([]knowledge.Entry{{
 		SourceKey:  "map",
 		Keyword:    "map",
 		Answer:     answer,
 		Enabled:    true,
 		ExactReply: true,
-	}}))
-	return NewPipeline(Options{Knowledge: knowledgeCache, Sender: sender})
+	}})
+	return NewPipeline(Options{Knowledge: knowledgeIndex, Sender: sender})
 }
 
 func TestPipelineSendsCQImageAnswerAsOrderedMessageChain(t *testing.T) {

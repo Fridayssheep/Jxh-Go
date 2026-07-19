@@ -46,41 +46,36 @@ func main() {
 	}
 	store := storage.NewStore(db)
 
-	knowledgeCache := cache.NewKnowledge()
+	knowledgeIndex := knowledge.NewIndexRef(nil)
 	eventDedupe := &persistentDedupe{
 		memory: cache.NewEventDedupe(time.Duration(cfg.EventDedupe.RetentionHours) * time.Hour),
 		store:  store,
 	}
 	go cleanupProcessedEvents(ctx, store, cfg)
-	entries, err := store.ListEnabledKnowledge(ctx)
-	if err != nil {
-		log.Fatalf("load knowledge: %v", err)
-	}
-	domainEntries := storage.ToKnowledgeEntries(entries)
-	knowledgeCache.Replace(knowledge.NewKeywordIndex(domainEntries))
 	knowledgeRetrieverOptions := ai.KnowledgeRetrieverOptions{
 		ScoreThreshold: cfg.AI.ScoreThreshold,
 		CacheTTL:       time.Duration(cfg.Cache.AIRetrievalTTLSec) * time.Second,
 	}
-	aiRetriever := ai.NewRetrieverRef(ai.NewKnowledgeRetriever(domainEntries, knowledgeRetrieverOptions))
+	aiRetriever := ai.NewRetrieverRef(nil)
 	knowledgeSync := knowledge.NewSyncer(knowledge.SyncerOptions{
 		Source: knowledge.WPSClient{
-			ShareURL:  cfg.WPS.ShareURL,
-			SID:       cfg.WPS.SID,
-			CacheFile: cfg.WPS.CacheFile,
-			Timeout:   time.Duration(cfg.WPS.TimeoutSec) * time.Second,
+			ShareURL: cfg.WPS.ShareURL,
+			SID:      cfg.WPS.SID,
+			Timeout:  time.Duration(cfg.WPS.TimeoutSec) * time.Second,
 		},
-		Sheet: cfg.WPS.Sheet,
-		Store: store,
+		Sheet:     cfg.WPS.Sheet,
+		CacheFile: cfg.WPS.CacheFile,
+		Index:     knowledgeIndex,
 		OnSynced: func(entries []knowledge.Entry) {
-			knowledgeCache.Replace(knowledge.NewKeywordIndex(entries))
 			aiRetriever.Set(ai.NewKnowledgeRetriever(entries, knowledgeRetrieverOptions))
 		},
 	})
-	if cfg.WPS.SyncOnStart && cfg.WPS.ShareURL != "" {
-		if err := knowledgeSync.Reload(ctx); err != nil {
-			log.Printf("sync wps on start failed: %v", err)
+	if _, err := knowledgeSync.Sync(ctx); err != nil {
+		log.Printf("load knowledge from WPS failed, trying local cache: %v", err)
+		if _, cacheErr := knowledgeSync.LoadCache(); cacheErr != nil {
+			log.Fatalf("load knowledge: WPS error: %v; cache error: %v", err, cacheErr)
 		}
+		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
 	}
 
 	aiSvc, err := newAIService(ctx, cfg, aiRetriever)
@@ -91,7 +86,7 @@ func main() {
 	defer closeTriggerStats()
 	groupRequests := grouprequest.NewService(store, grouprequest.Options{ExportDir: "./data/exports/group_requests"})
 	pipeline := bot.NewPipeline(bot.Options{
-		Knowledge:     knowledgeCache,
+		Knowledge:     knowledgeIndex,
 		AI:            aiSvc,
 		Blacklist:     store,
 		Reloader:      knowledgeSync,

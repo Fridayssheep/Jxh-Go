@@ -185,6 +185,7 @@ func enrich(raw rawRow, titles map[string]string, children map[string][]string, 
 	if category == "" {
 		category = inferCategory(paths[raw.keyword], raw.keyword, raw.answer)
 	}
+	explicitAIUsage := raw.usage == "ai" || raw.usage == "both"
 	return Entry{
 		SourceKey:  sourceKey,
 		Keyword:    raw.keyword,
@@ -193,10 +194,10 @@ func enrich(raw rawRow, titles map[string]string, children map[string][]string, 
 		Aliases:    aliases,
 		Category:   category,
 		Answer:     raw.answer,
-		Content:    buildContent(paths[raw.keyword], raw.keyword, aliases, raw.answer),
+		Content:    buildContent(raw.keyword, aliases, paths[raw.keyword], category, raw.answer),
 		Enabled:    enabled,
 		ExactReply: enabled && (usage == "both" || usage == "exact"),
-		AIEnabled:  enabled && (usage == "both" || usage == "ai") && entryType != EntryTypeChitchat,
+		AIEnabled:  enabled && (usage == "both" || usage == "ai") && (entryType != EntryTypeChitchat || explicitAIUsage),
 	}
 }
 
@@ -226,21 +227,15 @@ func hasFacts(answer string) bool {
 	return strings.Contains(answer, "。") || strings.Contains(answer, "：") || strings.Contains(answer, "【")
 }
 
-func buildContent(path, keyword string, aliases []string, answer string) string {
-	var b strings.Builder
-	if path != "" {
-		b.WriteString(path)
-		b.WriteString("\n")
+func buildContent(keyword string, aliases []string, path, category, answer string) string {
+	parts := make([]string, 0, len(aliases)+4)
+	parts = append(parts, keyword)
+	parts = append(parts, aliases...)
+	parts = append(parts, path, category, answer)
+	for i := range parts {
+		parts[i] = cqreply.Parse(parts[i]).PlainText
 	}
-	b.WriteString("关键词：")
-	b.WriteString(keyword)
-	if len(aliases) > 0 {
-		b.WriteString("，")
-		b.WriteString(strings.Join(aliases, "，"))
-	}
-	b.WriteString("\n知识正文：\n")
-	b.WriteString(cqreply.Parse(answer).PlainText)
-	return b.String()
+	return strings.ToLower(strings.Join(strings.Fields(strings.Join(parts, " ")), " "))
 }
 
 func splitList(value string) []string {

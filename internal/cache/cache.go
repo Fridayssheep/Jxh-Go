@@ -2,36 +2,8 @@ package cache
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/zjutjh/jxh-go/internal/knowledge"
 )
-
-type Knowledge struct {
-	index atomic.Pointer[knowledge.KeywordIndex]
-}
-
-func NewKnowledge() *Knowledge {
-	k := &Knowledge{}
-	k.Replace(knowledge.NewKeywordIndex(nil))
-	return k
-}
-
-func (k *Knowledge) Replace(index *knowledge.KeywordIndex) {
-	if index == nil {
-		index = knowledge.NewKeywordIndex(nil)
-	}
-	k.index.Store(index)
-}
-
-func (k *Knowledge) Lookup(message string) (knowledge.Entry, bool) {
-	idx := k.index.Load()
-	if idx == nil {
-		return knowledge.Entry{}, false
-	}
-	return idx.Lookup(message)
-}
 
 type EventDedupe struct {
 	mu        sync.Mutex

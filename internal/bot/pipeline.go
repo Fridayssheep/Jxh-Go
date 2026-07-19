@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
-	"github.com/zjutjh/jxh-go/internal/cache"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
+	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 )
@@ -56,7 +56,7 @@ type Moderator interface {
 }
 
 type Options struct {
-	Knowledge     *cache.Knowledge
+	Knowledge     *knowledge.IndexRef
 	Sender        Sender
 	AI            *ai.Service
 	Reloader      Reloader
@@ -70,7 +70,7 @@ type Options struct {
 
 type Pipeline struct {
 	mu            sync.RWMutex
-	knowledge     *cache.Knowledge
+	knowledge     *knowledge.IndexRef
 	sender        Sender
 	blacklist     Blacklist
 	groupRequests *grouprequest.Service

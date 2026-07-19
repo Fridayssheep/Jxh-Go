@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
@@ -108,7 +109,18 @@ func main() {
 }
 
 func hasAIModelConfig(cfg config.AIConfig) bool {
-	return cfg.APIKey != "" && cfg.Model != ""
+	if cfg.APIKey == "" || cfg.Model == "" {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	switch provider {
+	case "", "openai":
+		return cfg.BaseURL != ""
+	case "ark":
+		return true
+	default:
+		return true
+	}
 }
 
 func newAIService(ctx context.Context, cfg config.Config, index *knowledge.IndexRef) (*ai.Service, error) {

@@ -22,6 +22,23 @@ func TestNewAIServiceReturnsNilWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestNewAIServiceReturnsNilWhenOpenAIBaseURLIsMissing(t *testing.T) {
+	cfg := config.Default()
+	cfg.AI.Enabled = true
+	cfg.AI.Provider = "openai"
+	cfg.AI.APIKey = "test-key"
+	cfg.AI.Model = "test-model"
+	cfg.AI.BaseURL = ""
+
+	service, err := newAIService(context.Background(), cfg, knowledge.NewIndexRef(nil))
+	if err != nil {
+		t.Fatalf("newAIService returned error: %v", err)
+	}
+	if service != nil {
+		t.Fatal("newAIService returned service, want nil")
+	}
+}
+
 func TestApplicationLocationUsesConfiguredTimezone(t *testing.T) {
 	cfg := config.Default()
 	cfg.App.Timezone = "Asia/Shanghai"

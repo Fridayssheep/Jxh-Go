@@ -12,7 +12,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const defaultRedisKeyPrefix = "jxh:triggerstats"
+const (
+	defaultRedisKeyPrefix = "jxh:triggerstats"
+	defaultEventRetention = 24 * time.Hour
+)
 
 var recordKnowledgeTriggerScript = redis.NewScript(`
 if redis.call("EXISTS", KEYS[1]) == 1 then
@@ -43,13 +46,14 @@ redis.call("HSET", KEYS[4],
   "trigger_text", ARGV[8],
   "score", ARGV[9],
   "last_triggered", ARGV[10])
-redis.call("SET", KEYS[1], "1", "PX", ARGV[11])
+redis.call("SET", KEYS[1], "1", "PX", ARGV[12])
 return 1
 `)
 
 type RedisStoreOptions struct {
 	KeyPrefix      string
 	DailyRetention time.Duration
+	EventRetention time.Duration
 	Now            func() time.Time
 }
 
@@ -57,6 +61,7 @@ type RedisStore struct {
 	client         *redis.Client
 	keyPrefix      string
 	dailyRetention time.Duration
+	eventRetention time.Duration
 	now            func() time.Time
 }
 
@@ -69,11 +74,21 @@ func NewRedisStore(client *redis.Client, opts RedisStoreOptions) *RedisStore {
 	if keyPrefix == "" {
 		keyPrefix = defaultRedisKeyPrefix
 	}
-	retention := opts.DailyRetention
-	if retention <= 0 {
-		retention = 180 * 24 * time.Hour
+	dailyRetention := opts.DailyRetention
+	if dailyRetention <= 0 {
+		dailyRetention = 180 * 24 * time.Hour
 	}
-	return &RedisStore{client: client, keyPrefix: keyPrefix, dailyRetention: retention, now: now}
+	eventRetention := opts.EventRetention
+	if eventRetention <= 0 {
+		eventRetention = defaultEventRetention
+	}
+	return &RedisStore{
+		client:         client,
+		keyPrefix:      keyPrefix,
+		dailyRetention: dailyRetention,
+		eventRetention: eventRetention,
+		now:            now,
+	}
 }
 
 func (s *RedisStore) RecordKnowledgeTrigger(ctx context.Context, event Event) error {
@@ -105,6 +120,7 @@ func (s *RedisStore) RecordKnowledgeTrigger(ctx context.Context, event Event) er
 		event.Score,
 		event.TriggeredAt.UnixNano(),
 		s.dailyRetention.Milliseconds(),
+		s.eventRetention.Milliseconds(),
 	).Result()
 	return err
 }
@@ -177,6 +193,7 @@ func (s *RedisStore) windowCounts(ctx context.Context, since time.Time) (map[str
 	end := dayStart(s.now())
 	for day := dayStart(since); !day.After(end); day = day.AddDate(0, 0, 1) {
 		items, err := s.client.ZRangeWithScores(ctx, s.dayKey(day), 0, -1).Result()
+		if err != nil {
 			return nil, err
 		}
 		for _, item := range items {

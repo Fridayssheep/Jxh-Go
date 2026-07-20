@@ -157,7 +157,7 @@ func (p *Pipeline) HandleGroupIncrease(ctx context.Context, groupID int64, userI
 	}
 	message := []any{
 		map[string]any{"type": "at", "data": map[string]any{"qq": userID}},
-		map[string]any{"type": "text", "data": map[string]any{"text": "欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单 哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"}},
+		map[string]any{"type": "text", "data": map[string]any{"text": "欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"}},
 	}
 	return sender.SendGroupMessage(ctx, groupID, message)
 }

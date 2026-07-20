@@ -72,7 +72,9 @@ func (f fakeAgent) Generate(ctx context.Context, input []*schema.Message, _ ...a
 
 func TestServiceReturnsNoResultAnswerWithoutSources(t *testing.T) {
 	service := newService(fakeAgent{generate: func(_ context.Context, messages []*schema.Message) (*schema.Message, error) {
-		if messages[0].Role != schema.System || !strings.Contains(messages[0].Content, "不得使用模型自身知识补全") {
+		if messages[0].Role != schema.System ||
+			!strings.Contains(messages[0].Content, "首次搜索优先使用 and 模式") ||
+			!strings.Contains(messages[0].Content, "不得使用模型自身知识补全") {
 			t.Fatalf("system prompt = %+v", messages[0])
 		}
 		return schema.AssistantMessage("知识库暂时没有足够信息", nil), nil

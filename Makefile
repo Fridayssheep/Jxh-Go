@@ -20,7 +20,7 @@ build: ## Build the bot binary
 	@mkdir -p $(dir $(BINARY))
 	$(GO) build -o $(BINARY) ./cmd/bot
 
-test: ## Run Go tests
+test: ## Compile-check all Go packages
 	$(GO) test ./...
 
 fmt: ## Format Go source files

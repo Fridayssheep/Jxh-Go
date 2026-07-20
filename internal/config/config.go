@@ -17,12 +17,9 @@ type Config struct {
 	AI        AIConfig        `yaml:"ai"`
 	Quote     QuoteConfig     `yaml:"quote"`
 	Scheduler SchedulerConfig `yaml:"scheduler"`
-	Debug     DebugConfig     `yaml:"debug"`
 }
 
 type AppConfig struct {
-	Debug    bool   `yaml:"debug"`
-	LogLevel string `yaml:"log_level"`
 	Timezone string `yaml:"timezone"`
 }
 
@@ -78,10 +75,6 @@ type SchedulerConfig struct {
 	Timezone string `yaml:"timezone"`
 }
 
-type DebugConfig struct {
-	EnableTestCommand bool `yaml:"enable_test_command"`
-}
-
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path != "" {
@@ -100,7 +93,7 @@ func Load(path string) (Config, error) {
 
 func Default() Config {
 	return Config{
-		App: AppConfig{LogLevel: "info", Timezone: "Asia/Shanghai"},
+		App: AppConfig{Timezone: "Asia/Shanghai"},
 		Server: ServerConfig{
 			Addr: ":8080",
 		},
@@ -131,7 +124,6 @@ func Default() Config {
 		},
 		Quote:     QuoteConfig{BaseURL: "http://quote:5000", TimeoutSec: 10},
 		Scheduler: SchedulerConfig{Timezone: "Asia/Shanghai"},
-		Debug:     DebugConfig{EnableTestCommand: true},
 	}
 }
 

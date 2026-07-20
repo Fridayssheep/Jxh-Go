@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/zjutjh/jxh-go/internal/scheduler"
 )
 
 const (
@@ -71,8 +74,14 @@ func (h *AdminHandler) Execute(ctx context.Context, input AdminInput) (string, e
 		if len(parts) < 4 {
 			return "格式：/admin 定时任务 添加 <每天|单次> <时间> <群聊ID> <消息内容>", nil
 		}
+		if parts[0] != scheduler.JobTypeDaily && parts[0] != scheduler.JobTypeOnce {
+			return "任务类型只能是每天或单次", nil
+		}
+		if _, err := time.Parse("15:04", parts[1]); err != nil {
+			return "时间格式不正确，请使用 HH:MM", nil
+		}
 		groupID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
+		if err != nil || groupID <= 0 {
 			return "群聊ID格式不正确", nil
 		}
 		id, err := h.store.AddScheduledJob(ctx, ScheduledJobInput{Type: parts[0], TimeHHMM: parts[1], GroupID: groupID, Message: parts[3]})

@@ -4,12 +4,15 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
+	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/bot"
 	"github.com/zjutjh/jxh-go/internal/commands"
@@ -170,25 +173,20 @@ func schedulerLocation(cfg config.Config) *time.Location {
 func openDB(cfg config.Config) (*gorm.DB, error) {
 	dsn := cfg.Database.DSN
 	if dsn == "" {
-		parseTime := "False"
-		if cfg.Database.ParseTime {
-			parseTime = "True"
+		location, err := time.LoadLocation(cfg.Database.Loc)
+		if err != nil {
+			return nil, err
 		}
-		dsn = cfg.Database.User + ":" + cfg.Database.Password + "@tcp(" + cfg.Database.Host + ":" + itoa(cfg.Database.Port) + ")/" + cfg.Database.Name + "?charset=" + cfg.Database.Charset + "&parseTime=" + parseTime + "&loc=" + cfg.Database.Loc
+		driverConfig := drivermysql.NewConfig()
+		driverConfig.User = cfg.Database.User
+		driverConfig.Passwd = cfg.Database.Password
+		driverConfig.Net = "tcp"
+		driverConfig.Addr = net.JoinHostPort(cfg.Database.Host, strconv.Itoa(cfg.Database.Port))
+		driverConfig.DBName = cfg.Database.Name
+		driverConfig.Params = map[string]string{"charset": cfg.Database.Charset}
+		driverConfig.ParseTime = cfg.Database.ParseTime
+		driverConfig.Loc = location
+		dsn = driverConfig.FormatDSN()
 	}
 	return gorm.Open(mysql.Open(dsn), &gorm.Config{})
-}
-
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
-	}
-	return string(buf[i:])
 }

@@ -234,15 +234,13 @@ export JXH_GORMGEN_DSN="jxh:jxh_password@tcp(127.0.0.1:3306)/jxh_bot?charset=utf
 make gormgen
 ```
 
-更多说明见 `docs/storage-gormgen.md`。
-
 ## 开发命令
 
 ```bash
 make help          # 查看所有 make target
 make run           # 本地运行 bot
 make build         # 构建 bin/jxh-go
-make test          # 运行测试
+make test          # 编译检查所有 Go 包
 make fmt           # go fmt ./...
 make compose-up    # 启动 mysql 和 napcat
 make compose-logs  # 查看 compose 日志
@@ -264,7 +262,6 @@ make compose-logs  # 查看 compose 日志
 | `internal/quote` | 引用图请求和消息内容转换 |
 | `internal/scheduler` | 定时任务运行时 |
 | `deploy/mysql/init` | MySQL 初始化 SQL |
-| `docs` | 设计文档、实现计划和 GORM Gen 说明 |
 | `scripts` | 代码生成和工具安装脚本 |
 | `data/` | MySQL、NapCat、bot 和 WPS 缓存的持久化根目录 |
 | `Dockerfile` | bot 容器镜像构建文件 |

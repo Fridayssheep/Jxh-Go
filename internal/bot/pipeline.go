@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -172,7 +173,7 @@ func (p *Pipeline) HandleGroupJoinRequest(ctx context.Context, record groupreque
 func (p *Pipeline) SendGroupText(ctx context.Context, groupID int64, text string) error {
 	sender := p.currentSender()
 	if sender == nil {
-		return nil
+		return fmt.Errorf("napcat sender is not connected")
 	}
 	return sender.SendGroupText(ctx, groupID, text)
 }

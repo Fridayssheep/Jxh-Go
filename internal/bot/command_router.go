@@ -86,9 +86,9 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		return true, r.handleReload(ctx, msg, sender)
 	case text == "/q" || strings.HasPrefix(text, "/q "):
 		return true, r.handleQuote(ctx, msg, sender, text)
-	case strings.HasPrefix(text, "/ai"):
+	case text == "/ai" || strings.HasPrefix(text, "/ai "):
 		return true, r.startAI(ctx, msg, sender, text)
-	case strings.HasPrefix(text, "/admin"):
+	case text == "/admin" || strings.HasPrefix(text, "/admin "):
 		return true, r.handleAdmin(ctx, msg, sender, text)
 	default:
 		return false, nil

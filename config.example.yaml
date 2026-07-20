@@ -1,9 +1,5 @@
 # 精小弘 Go bot 示例配置。
 app:
-  # 是否开启调试模式。当前主要作为运行环境标记保留。
-  debug: false
-  # 日志级别，预期值：debug、info、warn、error。
-  log_level: "info"
   # 应用默认时区。定时任务、日志和时间计算建议统一使用 Asia/Shanghai。
   timezone: "Asia/Shanghai"
 
@@ -88,7 +84,3 @@ quote:
 scheduler:
   # 定时任务使用的时区。建议和 app.timezone 保持一致。
   timezone: "Asia/Shanghai"
-
-debug:
-  # 是否启用 /test 命令。生产环境可关闭。
-  enable_test_command: true

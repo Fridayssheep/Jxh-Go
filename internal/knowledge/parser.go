@@ -135,7 +135,12 @@ func buildPaths(titles map[string]string, children map[string][]string) map[stri
 	paths := make(map[string]string)
 	for code := range titles {
 		var parts []string
+		seen := make(map[string]struct{})
 		for cur := code; cur != ""; cur = parent[cur] {
+			if _, ok := seen[cur]; ok {
+				break
+			}
+			seen[cur] = struct{}{}
 			if title := titles[cur]; title != "" {
 				parts = append([]string{title}, parts...)
 			}

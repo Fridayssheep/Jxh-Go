@@ -73,11 +73,13 @@ func (r *Runtime) RunOnce(ctx context.Context, now time.Time) error {
 		if !IsDue(job, now) {
 			continue
 		}
-		if r.send != nil {
-			if err := r.send(ctx, job.GroupID, job.Message); err != nil {
-				r.log("send scheduled job %d failed: %v", job.ID, err)
-				continue
-			}
+		if r.send == nil {
+			r.log("send scheduled job %d failed: sender is not initialized", job.ID)
+			continue
+		}
+		if err := r.send(ctx, job.GroupID, job.Message); err != nil {
+			r.log("send scheduled job %d failed: %v", job.ID, err)
+			continue
 		}
 		disable := job.Type == JobTypeOnce
 		if err := r.store.MarkScheduledJobRan(ctx, job.ID, now, disable); err != nil {

@@ -2,7 +2,6 @@ package knowledge
 
 import (
 	"io"
-	"strconv"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -37,11 +36,4 @@ func rowIsEmpty(row []string) bool {
 		}
 	}
 	return true
-}
-
-func SyntheticSourceID(keyword string, rowNumber int) string {
-	if keyword != "" {
-		return normalizeKey(keyword)
-	}
-	return "row-" + strconv.Itoa(rowNumber)
 }

@@ -23,10 +23,6 @@ func NewStore(db *gorm.DB) *Store {
 	return &Store{db: db, q: query.Use(db)}
 }
 
-func (s *Store) DB() *gorm.DB {
-	return s.db
-}
-
 func (s *Store) RecordKnowledgeTriggers(ctx context.Context, events []triggerstats.Event) error {
 	if len(events) == 0 {
 		return nil

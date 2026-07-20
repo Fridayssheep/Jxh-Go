@@ -112,21 +112,6 @@ func (s *Service) SummariesForDays(ctx context.Context, days, limit int) ([]Summ
 	return s.Summaries(ctx, &since, limit)
 }
 
-func FormatSummaries(summaries []Summary) string {
-	if len(summaries) == 0 {
-		return "暂无统计数据"
-	}
-	lines := []string{"词条触发 Top 10:"}
-	for i, summary := range summaries {
-		keyword := strings.TrimSpace(summary.Keyword)
-		if keyword == "" {
-			keyword = summary.SourceKey
-		}
-		lines = append(lines, fmt.Sprintf("%d. %s（%s）%d 次，最近：%s", i+1, keyword, triggerTypeLabel(summary.TriggerType), summary.Count, formatTime(summary.LastTriggered)))
-	}
-	return strings.Join(lines, "\n")
-}
-
 func uniqueSourceKeys(sourceKeys []string) []string {
 	seen := make(map[string]struct{}, len(sourceKeys))
 	out := make([]string, 0, len(sourceKeys))

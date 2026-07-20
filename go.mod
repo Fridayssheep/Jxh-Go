@@ -6,6 +6,7 @@ require (
 	github.com/cloudwego/eino v0.9.1
 	github.com/cloudwego/eino-ext/components/model/ark v0.1.68
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/xuri/excelize/v2 v2.10.1
 	github.com/zjutjh/napcat-sdk v1.0.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -29,7 +30,6 @@ require (
 	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/go-resty/resty/v2 v2.17.2 // indirect
-	github.com/go-sql-driver/mysql v1.10.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect

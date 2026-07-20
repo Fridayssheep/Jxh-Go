@@ -1,0 +1,50 @@
+# AGENTS.md
+
+本文件适用于整个仓库。修改代码前先阅读本文件、`README.md`、相关入口和完整调用链。
+
+## 项目现状
+
+- 项目是 Go 1.25+ 编写的精弘 QQ 群助手，通过 NapCat SDK 接入 OneBot 11。入口是 `cmd/bot/main.go`。
+- WPS XLSX 是知识唯一真源。启动和 `/reload` 下载并解析表格，验证成功后写入 `data/cache/knowledge.xlsx`，再原子替换进程内 `knowledge.IndexRef`。MySQL 不保存知识正文。
+- 普通关键词回复使用 keyword/alias 精确匹配；`/ai` 使用 Eino ReAct Agent 调用内存 `search_knowledge` 工具，支持 AND、OR 和 Go 正则搜索。
+- MySQL 只保存 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests`。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。
+- `internal/storage/model` 和 `internal/storage/query` 是 GORM Gen 生成代码。不要手工编辑；先改 schema，再同步 `scripts/gormgen.sh` 的表清单并运行 `make gormgen`。
+- Compose 包含 MySQL、NapCat、quote 和 bot。quote 服务从 `zjutjh/qq-quote-generator` 构建，客户端先请求 `/gif/base64/`，失败后回退 `/png/base64/`。
+- 仓库当前不保留 `docs/` 内容，也不提交 `*_test.go`。不要自行恢复历史设计文档或测试文件，除非任务明确要求。
+
+## 关键业务约束
+
+- 所有群聊 `/` 命令必须 @机器人；未 @ 的 slash 消息静默吞掉。关键词回复不要求 @。命令名必须完整匹配，不能用宽泛前缀把 `/air` 当成 `/ai`。
+- `/reload`、`/admin` 只允许当前群 owner/admin。权限每次通过 NapCat 实时查询，不缓存、不持久化。
+- `/ai` 同时最多处理 2 个请求，必须受配置超时和问题长度限制；回答只能依据工具搜索结果，不得回退到模型自身知识编造校务信息。
+- WPS 导入为空或解析失败时不得替换现有索引或有效缓存。菜单 `%编号` 路径构建必须能终止循环父子关系。
+- WPS 基础列为 keyword、answer、维护备注；可选列为 aliases、category、usage、status、source_id。空 keyword/answer 跳过，冲突 source_key 不得静默覆盖不同答案。
+- 关键词 answer 中只执行 CQ image。远程图片仅允许合法 HTTP(S)；本地图片仅允许 `/` 分隔的安全相对路径，并映射到 NapCat 的 `/app/jxh-media/`。拒绝绝对路径、反斜杠、`.`、`..`、查询参数、`file://` 和 `base64://` 输入。
+- 定时任务只接受 `每天` 或 `单次`、严格 `HH:MM` 和正群号。只有消息实际发送成功后才能更新 `last_run_at` 或禁用单次任务；NapCat 未连接和发送错误必须保留任务等待重试。
+- 群申请以 `request_key` 去重；过长 flag 必须哈希，原始 flag 和 JSON 仍要保留。导出文件按来源群拆分，只写本地，不默认上传 QQ。
+- 词条统计失败不能阻断关键词回复或 `/ai` 回答。统计使用应用时区的自然日边界。
+- 链接净化只处理受支持的 Bilibili/小红书域名。短链跳转必须限制协议、端口、目标域名、跳转次数和超时，不能放宽成通用 URL 抓取器。
+
+## 实现规范
+
+- 优先复用现有实现、Go 标准库和已安装依赖。不要添加单实现接口、无调用 wrapper、兼容层、未来配置或重复 helper。
+- 修 bug 前搜索所有调用者，尽量在共享根因位置修一次。保持改动文件和 diff 最少，不做任务外重构或格式化。
+- 错误必须保留上下文；附加能力失败可以记录并降级，但消息发送、缓存替换、数据库写入等关键操作不得伪装成功。
+- 外部输入边界必须验证：OneBot/NapCat 动态 JSON、WPS 内容、管理员命令、URL、文件路径、配置和数据库字段。
+- 并发共享状态沿用现有策略：知识索引用 `atomic.Pointer`，Pipeline sender 用互斥锁，AI 来源收集和并发槽必须保持线程安全。
+- 不在日志、错误、提交内容或示例中泄露 access token、WPS sid、AI key、数据库密码和原始敏感申请信息。
+- 不手工编辑 `go.sum` 或生成文件；依赖变化使用 `go mod tidy`，生成变化使用仓库脚本。
+- 当前生产镜像使用 `CGO_ENABLED=0`，新增依赖不得破坏纯 Go 构建，除非任务明确批准部署变更。
+
+## 验证要求
+
+- 当前仓库没有测试文件，因此 `go test ./...` 只能证明所有包可编译，不能证明业务行为。不要把它描述为完整回归测试。
+- 每次代码改动至少运行：`gofmt`（仅改动的 Go 文件）、`go test ./...`、`go build ./...`、`go vet ./...`、`go mod tidy -diff` 和 `git diff --check`。
+- 可用时补跑 `staticcheck ./...`、`deadcode ./...`、`golangci-lint run` 和 `docker-compose config --quiet`。
+- 涉及 NapCat、WPS、MySQL、quote、文件挂载或真实 QQ 行为时，明确区分静态/编译验证与真实服务联调；没有实际联调就不能声称生产行为已验证。
+
+## Git 与交付
+
+- 工作区可能已有用户改动；不要重置、覆盖或顺手清理无关文件。禁止未经明确授权执行 `git reset --hard`、强推、提交或推送。
+- 提交前查看现有提交风格。当前提交消息以简短中文 Conventional Commit 为主，例如 `fix: ...`、`feat: ...`、`refactor: ...`。
+- 最终说明必须列出实际改动、验证命令及未验证的外部环境，不得用推测替代证据。

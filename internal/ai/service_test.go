@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,15 +70,18 @@ func (f fakeAgent) Generate(ctx context.Context, input []*schema.Message, _ ...a
 	return f.generate(ctx, input)
 }
 
-func TestServiceRequiresSuccessfulSearch(t *testing.T) {
-	service := newService(fakeAgent{generate: func(context.Context, []*schema.Message) (*schema.Message, error) {
-		return schema.AssistantMessage("模型自行回答", nil), nil
+func TestServiceReturnsNoResultAnswerWithoutSources(t *testing.T) {
+	service := newService(fakeAgent{generate: func(_ context.Context, messages []*schema.Message) (*schema.Message, error) {
+		if messages[0].Role != schema.System || !strings.Contains(messages[0].Content, "不得使用模型自身知识补全") {
+			t.Fatalf("system prompt = %+v", messages[0])
+		}
+		return schema.AssistantMessage("知识库暂时没有足够信息", nil), nil
 	}}, time.Second, 100)
 	answer, sources, err := service.AnswerWithSources(context.Background(), "问题")
 	if err != nil {
 		t.Fatalf("AnswerWithSources returned error: %v", err)
 	}
-	if answer != EmptyKnowledgeAnswer || len(sources) != 0 {
+	if answer != "知识库暂时没有足够信息" || len(sources) != 0 {
 		t.Fatalf("answer/sources = %q/%v", answer, sources)
 	}
 }

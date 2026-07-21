@@ -132,13 +132,16 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	}
 	if p.knowledge != nil {
 		if entry, ok := p.knowledge.Lookup(text); ok {
+			if err := sendKeywordReply(ctx, sender, msg.GroupID, entry.SourceKey, entry.Answer); err != nil {
+				return err
+			}
 			if p.stats != nil {
 				if err := p.stats.RecordKeywordReply(ctx, entry.SourceKey, msg.GroupID); err != nil {
 					// 统计是附加能力，失败时不能阻断原本的关键词回复。
 					log.Printf("record keyword reply trigger failed: %v", err)
 				}
 			}
-			return sendKeywordReply(ctx, sender, msg.GroupID, entry.SourceKey, entry.Answer)
+			return nil
 		}
 	}
 	return nil

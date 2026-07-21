@@ -22,6 +22,9 @@ func (s *Service) ExportForDays(ctx context.Context, days int) (ExportResult, er
 	if err != nil {
 		return ExportResult{}, err
 	}
+	if len(summaries) == 0 {
+		return ExportResult{}, nil
+	}
 	if err := os.MkdirAll(s.exportDir, 0o755); err != nil {
 		return ExportResult{}, err
 	}
@@ -52,7 +55,7 @@ func writeSummariesXLSX(path, rangeLabel string, summaries []Summary) error {
 	if err := f.SetSheetName(f.GetSheetName(0), sheet); err != nil {
 		return err
 	}
-	headers := []string{"关键词", "词条ID", "触发类型", "触发次数", "最近触发时间", "统计范围"}
+	headers := []string{"关键词", "词条ID", "关键词回复次数", "AI 检索次数", "总触发次数", "最近触发时间", "统计范围"}
 	for i, header := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		if err := f.SetCellValue(sheet, cell, header); err != nil {
@@ -67,8 +70,9 @@ func writeSummariesXLSX(path, rangeLabel string, summaries []Summary) error {
 		values := []any{
 			keyword,
 			summary.SourceKey,
-			triggerTypeLabel(summary.TriggerType),
-			summary.Count,
+			summary.KeywordReplyCount,
+			summary.AIRetrievalCount,
+			summary.TotalCount,
 			formatTime(summary.LastTriggered),
 			rangeLabel,
 		}
@@ -82,13 +86,17 @@ func writeSummariesXLSX(path, rangeLabel string, summaries []Summary) error {
 	if err := f.SetColWidth(sheet, "A", "B", 24); err != nil {
 		return err
 	}
-	if err := f.SetColWidth(sheet, "C", "C", 16); err != nil {
+	if err := f.SetColWidth(sheet, "C", "E", 16); err != nil {
 		return err
 	}
-	if err := f.SetColWidth(sheet, "D", "D", 12); err != nil {
+	if err := f.SetColWidth(sheet, "F", "G", 22); err != nil {
 		return err
 	}
-	if err := f.SetColWidth(sheet, "E", "F", 22); err != nil {
+	if err := f.SetPanes(sheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"}); err != nil {
+		return err
+	}
+	lastRow := len(summaries) + 1
+	if err := f.AutoFilter(sheet, fmt.Sprintf("A1:G%d", lastRow), nil); err != nil {
 		return err
 	}
 	return f.SaveAs(filepath.Clean(path))

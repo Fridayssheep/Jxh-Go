@@ -208,13 +208,16 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	if err != nil {
 		return err
 	}
+	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
+		return err
+	}
 	if r.triggerStats != nil {
 		if err := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); err != nil {
 			// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
 			log.Printf("record ai retrieval trigger failed: %v", err)
 		}
 	}
-	return sender.SendGroupText(ctx, msg.GroupID, answer)
+	return nil
 }
 
 func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
@@ -350,6 +353,9 @@ func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMe
 	if err != nil {
 		log.Printf("export trigger stats failed: %v", err)
 		return sender.SendGroupText(ctx, msg.GroupID, "词条统计服务暂不可用")
+	}
+	if result.Count == 0 {
+		return sender.SendGroupText(ctx, msg.GroupID, "暂无词条统计记录可导出")
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群的词条统计 %d 项，文件保存在：%s", result.Count, result.Path))
 }

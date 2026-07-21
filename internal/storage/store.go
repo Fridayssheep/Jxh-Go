@@ -37,12 +37,15 @@ func (s *Store) RecordKnowledgeTriggers(ctx context.Context, events []triggersta
 func (s *Store) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]triggerstats.Summary, error) {
 	query := s.db.WithContext(ctx).
 		Table((KnowledgeTriggerLog{}).TableName()).
-		Select("source_key, trigger_type, COUNT(*) AS count, MAX(triggered_at) AS last_triggered")
+		Select(`source_key,
+SUM(CASE WHEN trigger_type = ? THEN 1 ELSE 0 END) AS keyword_reply_count,
+SUM(CASE WHEN trigger_type = ? THEN 1 ELSE 0 END) AS ai_retrieval_count,
+COUNT(*) AS total_count,
+MAX(triggered_at) AS last_triggered`, triggerstats.TriggerTypeKeywordReply, triggerstats.TriggerTypeAIRetrieval)
 	if since != nil {
 		query = query.Where("triggered_at >= ?", *since)
 	}
-	query = query.Group("source_key, trigger_type").
-		Order("count DESC").Order("source_key").Order("trigger_type")
+	query = query.Group("source_key").Order("total_count DESC").Order("source_key")
 	if limit > 0 {
 		query = query.Limit(limit)
 	}

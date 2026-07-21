@@ -21,11 +21,12 @@ type Event struct {
 }
 
 type Summary struct {
-	SourceKey     string
-	Keyword       string
-	TriggerType   string
-	Count         int64
-	LastTriggered time.Time
+	SourceKey         string
+	Keyword           string
+	KeywordReplyCount int64
+	AIRetrievalCount  int64
+	TotalCount        int64
+	LastTriggered     time.Time
 }
 
 type Store interface {
@@ -127,17 +128,6 @@ func uniqueSourceKeys(sourceKeys []string) []string {
 		out = append(out, sourceKey)
 	}
 	return out
-}
-
-func triggerTypeLabel(triggerType string) string {
-	switch triggerType {
-	case TriggerTypeKeywordReply:
-		return "关键词回复"
-	case TriggerTypeAIRetrieval:
-		return "/ai 检索"
-	default:
-		return triggerType
-	}
 }
 
 func formatTime(t time.Time) string {

@@ -8,7 +8,7 @@
 - WPS XLSX 是知识唯一真源。启动和 `/reload` 下载并解析表格，验证成功后写入 `data/cache/knowledge.xlsx`，再原子替换进程内 `knowledge.IndexRef`。MySQL 不保存知识正文。
 - 普通关键词回复使用 keyword/alias 精确匹配；`/ai` 使用 Eino ReAct Agent 调用内存 `search_knowledge` 工具，支持 AND、OR 和 Go 正则搜索。
 - MySQL 只保存 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests`。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。
-- `internal/storage/model` 和 `internal/storage/query` 是 GORM Gen 生成代码。不要手工编辑；先改 schema，再同步 `scripts/gormgen.sh` 的表清单并运行 `make gormgen`。
+- 数据访问统一位于 `internal/storage`，使用直接 GORM 调用。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
 - Compose 包含 MySQL、NapCat、quote 和 bot。quote 服务从 `zjutjh/qq-quote-generator` 构建，客户端先请求 `/gif/base64/`，失败后回退 `/png/base64/`。
 - 仓库当前不保留 `docs/` 内容，也不提交 `*_test.go`。不要自行恢复历史设计文档或测试文件，除非任务明确要求。
 
@@ -17,6 +17,7 @@
 - 所有群聊 `/` 命令必须 @机器人；未 @ 的 slash 消息静默吞掉。关键词回复不要求 @。命令名必须完整匹配，不能用宽泛前缀把 `/air` 当成 `/ai`。
 - `/reload`、`/admin` 只允许当前群 owner/admin。权限每次通过 NapCat 实时查询，不缓存、不持久化。
 - `/ai` 同时最多处理 2 个请求，必须受配置超时和问题长度限制；回答只能依据工具搜索结果，不得回退到模型自身知识编造校务信息。
+- `/q N` 包含被回复消息及其之前的 `N-1` 条消息，按时间从旧到新生成引用图，不能包含后续消息。
 - WPS 导入为空或解析失败时不得替换现有索引或有效缓存。菜单 `%编号` 路径构建必须能终止循环父子关系。
 - WPS 基础列为 keyword、answer、维护备注；可选列为 aliases、category、usage、status、source_id。空 keyword/answer 跳过，冲突 source_key 不得静默覆盖不同答案。
 - 关键词 answer 中只执行 CQ image。远程图片仅允许合法 HTTP(S)；本地图片仅允许 `/` 分隔的安全相对路径，并映射到 NapCat 的 `/app/jxh-media/`。拒绝绝对路径、反斜杠、`.`、`..`、查询参数、`file://` 和 `base64://` 输入。
@@ -33,7 +34,7 @@
 - 外部输入边界必须验证：OneBot/NapCat 动态 JSON、WPS 内容、管理员命令、URL、文件路径、配置和数据库字段。
 - 并发共享状态沿用现有策略：知识索引用 `atomic.Pointer`，Pipeline sender 用互斥锁，AI 来源收集和并发槽必须保持线程安全。
 - 不在日志、错误、提交内容或示例中泄露 access token、WPS sid、AI key、数据库密码和原始敏感申请信息。
-- 不手工编辑 `go.sum` 或生成文件；依赖变化使用 `go mod tidy`，生成变化使用仓库脚本。
+- 不手工编辑 `go.sum`；依赖变化使用 `go mod tidy`。
 - 当前生产镜像使用 `CGO_ENABLED=0`，新增依赖不得破坏纯 Go 构建，除非任务明确批准部署变更。
 
 ## 验证要求

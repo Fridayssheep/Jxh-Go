@@ -4,13 +4,15 @@ import (
 	"context"
 	"maps"
 	"strings"
+
+	"github.com/zjutjh/napcat-sdk/message"
 )
 
 type MessageInput struct {
 	UserID     int64
 	Nickname   string
 	RawMessage string
-	Message    any
+	Message    message.Chain
 }
 
 type ImageResolver interface {
@@ -20,11 +22,11 @@ type ImageResolver interface {
 func BuildPayload(ctx context.Context, inputs []MessageInput, resolver ImageResolver) Payload {
 	payload := make(Payload, 0, len(inputs))
 	for _, input := range inputs {
-		message := input.Message
-		if message != nil {
-			message = enrichMessageImages(ctx, message, resolver)
+		chain := input.Message
+		if chain != nil {
+			chain = enrichMessageImages(ctx, chain, resolver)
 		}
-		content := contentFromMessage(input.RawMessage, message)
+		content := contentFromMessage(input.RawMessage, chain)
 		if isEmptyContent(content) {
 			continue
 		}
@@ -37,29 +39,23 @@ func BuildPayload(ctx context.Context, inputs []MessageInput, resolver ImageReso
 	return payload
 }
 
-func enrichMessageImages(ctx context.Context, raw any, resolver ImageResolver) any {
-	segments, ok := decodeOneBotSegments(raw)
-	if !ok {
-		return raw
-	}
-	out := make([]map[string]any, 0, len(segments))
-	for _, segment := range segments {
-		outSegment := map[string]any{
-			"type": segment.Type,
-			"data": maps.Clone(segment.Data),
-		}
+func enrichMessageImages(ctx context.Context, chain message.Chain, resolver ImageResolver) message.Chain {
+	out := message.ChainOf(chain...)
+	for i, segment := range out {
 		switch segment.Type {
 		case "image", "mface", "marketface", "emoji":
-			outSegment["data"] = enrichImageData(ctx, segment.Data, resolver)
+			data, ok := segment.Data.(map[string]any)
+			if ok {
+				out[i].Data = enrichImageData(ctx, segment, data, resolver)
+			}
 		}
-		out = append(out, outSegment)
 	}
 	return out
 }
 
-func enrichImageData(ctx context.Context, data map[string]any, resolver ImageResolver) map[string]any {
+func enrichImageData(ctx context.Context, segment message.Segment, data map[string]any, resolver ImageResolver) map[string]any {
 	out := maps.Clone(data)
-	for _, source := range []string{segmentDataString(data, "url"), segmentDataString(data, "file")} {
+	for _, source := range []string{segment.String("url"), segment.String("file")} {
 		if source == "" {
 			continue
 		}

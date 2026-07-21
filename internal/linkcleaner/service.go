@@ -6,14 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/bot"
+	"github.com/zjutjh/napcat-sdk/message"
 )
 
 const (
@@ -58,7 +59,7 @@ func NewService(opts Options) *Service {
 	return &Service{client: &clientCopy, maxRedirects: maxRedirects}
 }
 
-func (s *Service) CleanMessage(ctx context.Context, text string, segments []bot.MessageSegment) ([]string, error) {
+func (s *Service) CleanMessage(ctx context.Context, text string, segments message.Chain) ([]string, error) {
 	candidates := extractMessageURLs(text, segments)
 	cleaned := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
@@ -171,7 +172,7 @@ func (s *Service) resolveShortURL(ctx context.Context, initial *url.URL, shortKi
 	return nil, fmt.Errorf("short link exceeded %d redirects", s.maxRedirects)
 }
 
-func extractMessageURLs(text string, segments []bot.MessageSegment) []string {
+func extractMessageURLs(text string, segments message.Chain) []string {
 	var candidates []string
 	seen := make(map[string]struct{})
 	appendFromString(&candidates, seen, text)
@@ -208,21 +209,11 @@ func appendFromValue(out *[]string, seen map[string]struct{}, value any, depth i
 			appendFromValue(out, seen, nested, depth+1)
 		}
 	case map[string]any:
-		keys := make([]string, 0, len(current))
-		for key := range current {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
+		for _, key := range slices.Sorted(maps.Keys(current)) {
 			appendFromValue(out, seen, current[key], depth+1)
 		}
 	case map[string]string:
-		keys := make([]string, 0, len(current))
-		for key := range current {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
+		for _, key := range slices.Sorted(maps.Keys(current)) {
 			appendFromValue(out, seen, current[key], depth+1)
 		}
 	case []any:

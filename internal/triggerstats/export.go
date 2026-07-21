@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -99,7 +98,7 @@ func rangeFileLabel(days int) string {
 	if days == 0 {
 		return "all"
 	}
-	return strconv.Itoa(days) + "d"
+	return fmt.Sprintf("%dd", days)
 }
 
 func rangeDisplayLabel(days int) string {

@@ -16,10 +16,6 @@ const (
 	GroupRoleMember = "member"
 )
 
-type AdminInput struct {
-	Text string
-}
-
 type SchedulerStore interface {
 	ListScheduledJobs(ctx context.Context) ([]ScheduledJobView, error)
 	AddScheduledJob(ctx context.Context, job ScheduledJobInput) (uint64, error)
@@ -39,7 +35,6 @@ type ScheduledJobView struct {
 	TimeHHMM string
 	GroupID  int64
 	Message  string
-	Enabled  bool
 }
 
 type AdminHandler struct {
@@ -50,11 +45,11 @@ func NewAdminHandler(store SchedulerStore) *AdminHandler {
 	return &AdminHandler{store: store}
 }
 
-func (h *AdminHandler) Execute(ctx context.Context, input AdminInput) (string, error) {
+func (h *AdminHandler) Execute(ctx context.Context, input string) (string, error) {
 	if h == nil || h.store == nil {
 		return "定时任务存储未初始化", nil
 	}
-	text := strings.TrimSpace(input.Text)
+	text := strings.TrimSpace(input)
 	switch {
 	case text == "定时任务 查看":
 		jobs, err := h.store.ListScheduledJobs(ctx)

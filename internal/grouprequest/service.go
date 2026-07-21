@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -119,7 +119,7 @@ func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 	for groupID := range groups {
 		groupIDs = append(groupIDs, groupID)
 	}
-	sort.Slice(groupIDs, func(i, j int) bool { return groupIDs[i] < groupIDs[j] })
+	slices.Sort(groupIDs)
 	result := ExportResult{Dir: runDir, Count: len(records), Files: make([]ExportFile, 0, len(groupIDs))}
 	for _, groupID := range groupIDs {
 		path := filepath.Join(runDir, fmt.Sprintf("group_%d.xlsx", groupID))
@@ -200,7 +200,6 @@ func recordFromMap(raw map[string]any, source string, fallbackTime time.Time) Re
 	userID := firstInt64(raw, "user_id", "requester_uin", "requester_id", "uin", "qq")
 	flag := firstString(raw, "flag", "request_id", "seq")
 	comment := firstString(raw, "comment", "message", "request_content", "answer", "reason")
-	studentID, studentName := extractStudentInfo(comment)
 	rawJSON, _ := json.Marshal(raw)
 	status := StatusPending
 	if firstBool(raw, "checked") {
@@ -211,8 +210,8 @@ func recordFromMap(raw map[string]any, source string, fallbackTime time.Time) Re
 		Flag:        flag,
 		GroupID:     groupID,
 		UserID:      userID,
-		StudentID:   studentID,
-		StudentName: studentName,
+		StudentID:   extractStudentID(comment),
+		StudentName: extractStudentName(comment),
 		SubType:     firstString(raw, "sub_type", "type"),
 		Comment:     comment,
 		Status:      status,
@@ -237,10 +236,6 @@ func stableKey(record Record) string {
 func hashedKey(prefix string, value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return prefix + ":" + hex.EncodeToString(sum[:])
-}
-
-func extractStudentInfo(comment string) (string, string) {
-	return extractStudentID(comment), extractStudentName(comment)
 }
 
 func extractStudentID(comment string) string {

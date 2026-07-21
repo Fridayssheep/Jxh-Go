@@ -2,6 +2,34 @@ package storage
 
 import "time"
 
+type KnowledgeTriggerLog struct {
+	ID          uint64    `gorm:"primaryKey"`
+	SourceKey   string    `gorm:"size:255;not null;index:idx_trigger_stats,priority:2"`
+	TriggerType string    `gorm:"size:32;not null;index:idx_trigger_stats,priority:3"`
+	GroupID     int64     `gorm:"not null"`
+	TriggeredAt time.Time `gorm:"not null;index:idx_trigger_stats,priority:1"`
+}
+
+func (KnowledgeTriggerLog) TableName() string {
+	return "knowledge_trigger_logs"
+}
+
+type ScheduledJob struct {
+	ID        uint64 `gorm:"primaryKey"`
+	Type      string `gorm:"size:16;not null"`
+	TimeHHMM  string `gorm:"column:time_hhmm;size:5;not null"`
+	GroupID   int64  `gorm:"not null"`
+	Message   string `gorm:"type:text;not null"`
+	Enabled   bool   `gorm:"not null"`
+	LastRunAt *time.Time
+	CreatedAt *time.Time
+	UpdatedAt *time.Time
+}
+
+func (ScheduledJob) TableName() string {
+	return "scheduled_jobs"
+}
+
 type GroupJoinRequest struct {
 	ID          uint64 `gorm:"primaryKey"`
 	RequestKey  string `gorm:"size:191;not null;uniqueIndex"`

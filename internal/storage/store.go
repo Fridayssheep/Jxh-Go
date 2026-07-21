@@ -7,8 +7,6 @@ import (
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
-	storagemodel "github.com/zjutjh/jxh-go/internal/storage/model"
-	"github.com/zjutjh/jxh-go/internal/storage/query"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -16,20 +14,19 @@ import (
 
 type Store struct {
 	db *gorm.DB
-	q  *query.Query
 }
 
 func NewStore(db *gorm.DB) *Store {
-	return &Store{db: db, q: query.Use(db)}
+	return &Store{db: db}
 }
 
 func (s *Store) RecordKnowledgeTriggers(ctx context.Context, events []triggerstats.Event) error {
 	if len(events) == 0 {
 		return nil
 	}
-	models := make([]*storagemodel.KnowledgeTriggerLog, 0, len(events))
+	models := make([]KnowledgeTriggerLog, 0, len(events))
 	for _, event := range events {
-		models = append(models, &storagemodel.KnowledgeTriggerLog{
+		models = append(models, KnowledgeTriggerLog{
 			SourceKey: event.SourceKey, TriggerType: event.TriggerType,
 			GroupID: event.GroupID, TriggeredAt: event.TriggeredAt,
 		})
@@ -39,7 +36,7 @@ func (s *Store) RecordKnowledgeTriggers(ctx context.Context, events []triggersta
 
 func (s *Store) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]triggerstats.Summary, error) {
 	query := s.db.WithContext(ctx).
-		Table(storagemodel.TableNameKnowledgeTriggerLog).
+		Table((KnowledgeTriggerLog{}).TableName()).
 		Select("source_key, trigger_type, COUNT(*) AS count, MAX(triggered_at) AS last_triggered")
 	if since != nil {
 		query = query.Where("triggered_at >= ?", *since)
@@ -54,34 +51,30 @@ func (s *Store) ListKnowledgeTriggerSummaries(ctx context.Context, since *time.T
 }
 
 func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobView, error) {
-	job := s.q.ScheduledJob
-	jobs, err := job.WithContext(ctx).Where(job.Enabled.Is(true)).Order(job.ID).Find()
-	if err != nil {
+	var jobs []ScheduledJob
+	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id").Find(&jobs).Error; err != nil {
 		return nil, err
 	}
 	out := make([]commands.ScheduledJobView, 0, len(jobs))
 	for _, job := range jobs {
-		out = append(out, commands.ScheduledJobView{ID: job.ID, Type: job.Type, TimeHHMM: job.TimeHhmm, GroupID: job.GroupID, Message: job.Message, Enabled: job.Enabled})
+		out = append(out, commands.ScheduledJobView{ID: job.ID, Type: job.Type, TimeHHMM: job.TimeHHMM, GroupID: job.GroupID, Message: job.Message})
 	}
 	return out, nil
 }
 
 func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJobInput) (uint64, error) {
-	job := &storagemodel.ScheduledJob{Type: input.Type, TimeHhmm: input.TimeHHMM, GroupID: input.GroupID, Message: input.Message, Enabled: true}
-	err := s.q.ScheduledJob.WithContext(ctx).Create(job)
+	job := ScheduledJob{Type: input.Type, TimeHHMM: input.TimeHHMM, GroupID: input.GroupID, Message: input.Message, Enabled: true}
+	err := s.db.WithContext(ctx).Create(&job).Error
 	return job.ID, err
 }
 
 func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) error {
-	job := s.q.ScheduledJob
-	_, err := job.WithContext(ctx).Where(job.ID.Eq(id)).Update(job.Enabled, false)
-	return err
+	return s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false).Error
 }
 
 func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, error) {
-	job := s.q.ScheduledJob
-	jobs, err := job.WithContext(ctx).Where(job.Enabled.Is(true)).Order(job.ID).Find()
-	if err != nil {
+	var jobs []ScheduledJob
+	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id").Find(&jobs).Error; err != nil {
 		return nil, err
 	}
 	out := make([]scheduler.Job, 0, len(jobs))
@@ -91,7 +84,7 @@ func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, e
 			Type:      job.Type,
 			GroupID:   job.GroupID,
 			Message:   job.Message,
-			TimeHHMM:  job.TimeHhmm,
+			TimeHHMM:  job.TimeHHMM,
 			Enabled:   job.Enabled,
 			LastRunAt: job.LastRunAt,
 		})
@@ -104,9 +97,7 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 	if disable {
 		updates["enabled"] = false
 	}
-	job := s.q.ScheduledJob
-	_, err := job.WithContext(ctx).Where(job.ID.Eq(id)).Updates(updates)
-	return err
+	return s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {

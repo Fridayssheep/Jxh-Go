@@ -10,7 +10,6 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	toolutils "github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
@@ -47,12 +46,8 @@ type Options struct {
 	MaxQuestionChars int
 }
 
-type agentRunner interface {
-	Generate(ctx context.Context, input []*schema.Message, opts ...agent.AgentOption) (*schema.Message, error)
-}
-
 type Service struct {
-	agent            agentRunner
+	agent            *react.Agent
 	timeout          time.Duration
 	maxQuestionChars int
 }
@@ -74,17 +69,13 @@ func NewService(ctx context.Context, opts Options) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newService(reactAgent, opts.Timeout, opts.MaxQuestionChars), nil
-}
-
-func newService(runner agentRunner, timeout time.Duration, maxQuestionChars int) *Service {
-	if timeout <= 0 {
-		timeout = 30 * time.Second
+	if opts.Timeout <= 0 {
+		opts.Timeout = 30 * time.Second
 	}
-	if maxQuestionChars <= 0 {
-		maxQuestionChars = 500
+	if opts.MaxQuestionChars <= 0 {
+		opts.MaxQuestionChars = 500
 	}
-	return &Service{agent: runner, timeout: timeout, maxQuestionChars: maxQuestionChars}
+	return &Service{agent: reactAgent, timeout: opts.Timeout, maxQuestionChars: opts.MaxQuestionChars}, nil
 }
 
 func (s *Service) AnswerWithSources(ctx context.Context, question string) (string, []string, error) {

@@ -1,21 +1,17 @@
 package quote
 
 import (
-	"encoding/json"
 	"html"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/zjutjh/napcat-sdk/message"
 )
 
-type onebotSegment struct {
-	Type string         `json:"type"`
-	Data map[string]any `json:"data"`
-}
-
-func contentFromMessage(raw string, structured any) []MessageSegment {
-	if content, ok := structuredMessageContent(structured); ok {
-		return content
+func contentFromMessage(raw string, structured message.Chain) []MessageSegment {
+	if len(structured) > 0 {
+		return structuredMessageContent(structured)
 	}
 	return parseCQMessage(raw)
 }
@@ -29,54 +25,35 @@ func isEmptyContent(content []MessageSegment) bool {
 	return true
 }
 
-func structuredMessageContent(raw any) ([]MessageSegment, bool) {
-	onebotSegments, ok := decodeOneBotSegments(raw)
-	if !ok {
-		return nil, false
-	}
+func structuredMessageContent(chain message.Chain) []MessageSegment {
 	var segments []MessageSegment
-	for _, segment := range onebotSegments {
+	for _, segment := range chain {
 		switch segment.Type {
 		case "reply":
 			continue
 		case "text":
-			appendTextSegment(&segments, segmentDataString(segment.Data, "text"))
+			appendTextSegment(&segments, segment.String("text"))
 		case "image":
-			appendDataImageSegment(&segments, segment.Data, "", "[图片]")
+			appendStructuredImageSegment(&segments, segment, "", "[图片]")
 		case "mface", "marketface":
-			appendDataImageSegment(&segments, segment.Data, "sticker", "[表情]")
+			appendStructuredImageSegment(&segments, segment, "sticker", "[表情]")
 		case "face", "sface", "bface":
-			appendQQFaceSegment(&segments, stringMapFromAnyMap(segment.Data))
+			appendQQFaceSegment(&segments, firstNonEmpty(segment.String("id"), segment.String("face_id"), segment.String("emoji_id")), segment.String("url"))
 		case "emoji":
-			appendStructuredEmojiSegment(&segments, segment.Data)
+			if source := firstUsableImageSource(segment.String("url"), segment.String("file")); source != "" {
+				appendImageSegment(&segments, source, "emoji")
+			} else {
+				appendEmojiSegment(&segments, firstNonEmpty(segment.String("id"), segment.String("emoji_id")), "")
+			}
 		case "at":
-			appendAtSegment(&segments, segment.Data)
+			appendAtSegment(&segments, segment)
 		case "record":
 			appendTextSegment(&segments, "[语音]")
 		case "video":
 			appendTextSegment(&segments, "[视频]")
 		}
 	}
-	segments = mergeAdjacentTextSegments(segments)
-	if len(segments) == 0 {
-		return nil, true
-	}
-	return segments, true
-}
-
-func decodeOneBotSegments(raw any) ([]onebotSegment, bool) {
-	if raw == nil {
-		return nil, false
-	}
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return nil, false
-	}
-	var segments []onebotSegment
-	if err := json.Unmarshal(data, &segments); err != nil || len(segments) == 0 {
-		return nil, false
-	}
-	return segments, true
+	return mergeAdjacentTextSegments(segments)
 }
 
 func parseCQMessage(raw string) []MessageSegment {
@@ -132,9 +109,9 @@ func appendCQSegment(segments *[]MessageSegment, body string) {
 	case "mface", "marketface":
 		appendURLImageSegment(segments, params["url"], "sticker", "[表情]")
 	case "face", "sface", "bface":
-		appendQQFaceSegment(segments, params)
+		appendQQFaceSegment(segments, firstNonEmpty(params["id"], params["face_id"], params["emoji_id"]), params["url"])
 	case "emoji":
-		appendCQEmojiSegment(segments, params)
+		appendEmojiSegment(segments, firstNonEmpty(params["id"], params["emoji_id"]), params["url"])
 	case "dice", "rps":
 		appendTextSegment(segments, "[表情]")
 	case "text":
@@ -151,8 +128,8 @@ func appendURLImageSegment(segments *[]MessageSegment, url, kind, fallback strin
 	appendImageSegment(segments, url, kind)
 }
 
-func appendDataImageSegment(segments *[]MessageSegment, data map[string]any, kind, fallback string) {
-	source := firstUsableImageSource(segmentDataString(data, "url"), segmentDataString(data, "file"))
+func appendStructuredImageSegment(segments *[]MessageSegment, segment message.Segment, kind, fallback string) {
+	source := firstUsableImageSource(segment.String("url"), segment.String("file"))
 	if source == "" {
 		appendTextSegment(segments, fallback)
 		return
@@ -173,27 +150,25 @@ func normalizeImageSource(source string) string {
 	return source
 }
 
-func appendQQFaceSegment(segments *[]MessageSegment, params map[string]string) {
-	id := firstNonEmpty(params["id"], params["face_id"], params["emoji_id"])
+func appendQQFaceSegment(segments *[]MessageSegment, id, url string) {
 	if len(id) <= 10 {
 		if _, err := strconv.ParseUint(id, 10, 64); err == nil {
 			*segments = append(*segments, MessageSegment{Type: "face", ID: id})
 			return
 		}
 	}
-	if url := strings.TrimSpace(params["url"]); url != "" {
+	if url = strings.TrimSpace(url); url != "" {
 		appendImageSegment(segments, url, "emoji")
 		return
 	}
 	appendTextSegment(segments, "[表情]")
 }
 
-func appendCQEmojiSegment(segments *[]MessageSegment, params map[string]string) {
-	if url := strings.TrimSpace(params["url"]); url != "" {
+func appendEmojiSegment(segments *[]MessageSegment, id, url string) {
+	if url = strings.TrimSpace(url); url != "" {
 		appendImageSegment(segments, url, "emoji")
 		return
 	}
-	id := firstNonEmpty(params["id"], params["emoji_id"])
 	if text, ok := unicodeEmoji(id); ok {
 		appendTextSegment(segments, text)
 		return
@@ -201,18 +176,10 @@ func appendCQEmojiSegment(segments *[]MessageSegment, params map[string]string) 
 	appendTextSegment(segments, "[表情]")
 }
 
-func appendStructuredEmojiSegment(segments *[]MessageSegment, data map[string]any) {
-	if source := firstUsableImageSource(segmentDataString(data, "url"), segmentDataString(data, "file")); source != "" {
-		appendImageSegment(segments, source, "emoji")
-		return
-	}
-	appendCQEmojiSegment(segments, stringMapFromAnyMap(data))
-}
-
-func appendAtSegment(segments *[]MessageSegment, data map[string]any) {
-	name := firstNonEmpty(segmentDataString(data, "name"), segmentDataString(data, "card"), segmentDataString(data, "nickname"))
+func appendAtSegment(segments *[]MessageSegment, segment message.Segment) {
+	name := firstNonEmpty(segment.String("name"), segment.String("card"), segment.String("nickname"))
 	if name == "" {
-		name = segmentDataString(data, "qq")
+		name = segment.String("qq")
 	}
 	if name == "" {
 		return
@@ -245,32 +212,6 @@ func isUsableImageSource(value string) bool {
 		strings.HasPrefix(lower, "https://") ||
 		strings.HasPrefix(lower, "data:image/") ||
 		strings.HasPrefix(lower, "base64://")
-}
-
-func segmentDataString(data map[string]any, key string) string {
-	if data == nil {
-		return ""
-	}
-	switch value := data[key].(type) {
-	case string:
-		return value
-	case float64:
-		return strconv.FormatInt(int64(value), 10)
-	case int:
-		return strconv.Itoa(value)
-	case int64:
-		return strconv.FormatInt(value, 10)
-	default:
-		return ""
-	}
-}
-
-func stringMapFromAnyMap(data map[string]any) map[string]string {
-	out := make(map[string]string, len(data))
-	for key := range data {
-		out[key] = segmentDataString(data, key)
-	}
-	return out
 }
 
 func unicodeEmoji(id string) (string, bool) {

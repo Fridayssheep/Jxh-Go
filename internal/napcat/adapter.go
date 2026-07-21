@@ -1,6 +1,7 @@
 package napcat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
-	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
@@ -151,18 +151,9 @@ func toGroupMessage(e *event.GroupMessage) bot.GroupMessage {
 		MessageID:      e.MessageID,
 		ReplyMessageID: extractReplyID(e.Message),
 		IsSelf:         e.UserID == e.SelfID(),
-		IsOwner:        e.Sender.Role == "owner",
 		AtUsers:        extractAtUsers(e.Message),
-		Segments:       toMessageSegments(e.Message),
+		Segments:       e.Message,
 	}
-}
-
-func toMessageSegments(chain message.Chain) []bot.MessageSegment {
-	segments := make([]bot.MessageSegment, 0, len(chain))
-	for _, segment := range chain {
-		segments = append(segments, bot.MessageSegment{Type: segment.Type, Data: segment.Data})
-	}
-	return segments
 }
 
 func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *event.GroupMessage) error {
@@ -192,10 +183,10 @@ type SDKSender struct {
 }
 
 func (s SDKSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
-	return s.SendGroupMessage(ctx, groupID, message.Text(text))
+	return s.SendGroupMessage(ctx, groupID, message.ChainOf(message.Text(text)))
 }
 
-func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg any) error {
+func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg message.Chain) error {
 	_, err := s.client.API().SendGroupMsg(ctx, api.SendGroupMsgRequest{
 		GroupID: strconv.FormatInt(groupID, 10),
 		Message: msg,
@@ -203,23 +194,52 @@ func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg any)
 	return err
 }
 
-type quoteMessage struct {
-	MessageID  any            `json:"message_id"`
-	MessageSeq any            `json:"message_seq"`
-	UserID     any            `json:"user_id"`
-	RawMessage string         `json:"raw_message"`
-	Sender     map[string]any `json:"sender"`
-	Message    any            `json:"message"`
+type oneBotInt64 int64
+
+func (v *oneBotInt64) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("null")) {
+		return nil
+	}
+	if len(data) >= 2 && data[0] == '"' && data[len(data)-1] == '"' {
+		data = data[1 : len(data)-1]
+	}
+	parsed, err := strconv.ParseInt(string(data), 10, 64)
+	if err != nil {
+		return fmt.Errorf("decode OneBot integer %q: %w", data, err)
+	}
+	*v = oneBotInt64(parsed)
+	return nil
 }
 
-func (s SDKSender) UploadGroupFile(ctx context.Context, groupID int64, path, name string) error {
-	_, err := s.client.API().UploadGroupFile(ctx, api.UploadGroupFileRequest{
-		GroupID:    strconv.FormatInt(groupID, 10),
-		File:       path,
-		Name:       name,
-		UploadFile: true,
-	})
-	return err
+type quoteSender struct {
+	UserID   oneBotInt64 `json:"user_id"`
+	Card     string      `json:"card"`
+	Nickname string      `json:"nickname"`
+}
+
+type oneBotMessage struct {
+	Chain message.Chain
+}
+
+func (m *oneBotMessage) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if bytes.Equal(data, []byte("null")) || (len(data) > 0 && data[0] == '"') {
+		return nil
+	}
+	if len(data) == 0 || data[0] != '[' {
+		return fmt.Errorf("decode OneBot message: expected segment array or string")
+	}
+	return json.Unmarshal(data, &m.Chain)
+}
+
+type quoteMessage struct {
+	MessageID  oneBotInt64   `json:"message_id"`
+	MessageSeq oneBotInt64   `json:"message_seq"`
+	UserID     oneBotInt64   `json:"user_id"`
+	RawMessage string        `json:"raw_message"`
+	Sender     quoteSender   `json:"sender"`
+	Message    oneBotMessage `json:"message"`
 }
 
 func (s SDKSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
@@ -231,11 +251,7 @@ func (s SDKSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64
 	if err != nil {
 		return "", err
 	}
-	role, ok := commands.NormalizeGroupRole(resp.Role)
-	if !ok {
-		return "", fmt.Errorf("get_group_member_info returned invalid role %q", resp.Role)
-	}
-	return role, nil
+	return resp.Role, nil
 }
 
 func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {
@@ -246,34 +262,38 @@ func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int6
 	if count <= 1 {
 		return []bot.QuotedMessage{target.quoted()}, nil
 	}
-	messageSeq := anyString(target.MessageSeq)
-	if messageSeq == "" {
+	messageSeq := int64(target.MessageSeq)
+	if messageSeq <= 0 {
 		return nil, fmt.Errorf("被引用消息缺少 message_seq")
 	}
-	history, err := s.client.API().GetGroupMsgHistory(ctx, api.GetGroupMsgHistoryRequest{
-		GroupID: strconv.FormatInt(groupID, 10), MessageSeq: messageSeq, Count: int64(count),
-	})
+	var history struct {
+		Messages []quoteMessage `json:"messages"`
+	}
+	err = s.client.API().Call(ctx, string(api.ActionGetGroupMsgHistory), api.GetGroupMsgHistoryRequest{
+		GroupID:    strconv.FormatInt(groupID, 10),
+		MessageSeq: strconv.FormatInt(max(1, messageSeq-int64(count-1)), 10),
+		Count:      int64(count),
+	}, &history)
 	if err != nil {
 		return nil, err
 	}
 	messages := make([]bot.QuotedMessage, 0, count)
 	targetFound := false
-	for _, item := range history.Messages {
-		message, err := decodeQuoteMessage(item)
-		if err != nil {
-			return nil, err
-		}
+	for _, message := range history.Messages {
 		quoted := message.quoted()
-		targetFound = targetFound || quoted.MessageID == messageID
 		messages = append(messages, quoted)
+		if quoted.MessageID == messageID {
+			targetFound = true
+			break
+		}
 		if len(messages) == count {
 			break
 		}
 	}
 	if !targetFound {
-		messages = append([]bot.QuotedMessage{target.quoted()}, messages...)
+		messages = append(messages, target.quoted())
 		if len(messages) > count {
-			messages = messages[:count]
+			messages = messages[len(messages)-count:]
 		}
 	}
 	return messages, nil
@@ -285,38 +305,29 @@ func (s SDKSender) getQuoteMessage(ctx context.Context, messageID int64) (quoteM
 	return message, err
 }
 
-func decodeQuoteMessage(raw any) (quoteMessage, error) {
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return quoteMessage{}, fmt.Errorf("encode quote history message: %w", err)
-	}
-	var message quoteMessage
-	if err := json.Unmarshal(data, &message); err != nil {
-		return quoteMessage{}, fmt.Errorf("decode quote history message: %w", err)
-	}
-	return message, nil
-}
-
 func (m quoteMessage) quoted() bot.QuotedMessage {
-	userID := anyInt64(m.UserID)
+	userID := int64(m.UserID)
 	if userID == 0 {
-		userID = anyInt64(m.Sender["user_id"])
+		userID = int64(m.Sender.UserID)
 	}
 	return bot.QuotedMessage{
-		MessageID: anyInt64(m.MessageID), UserID: userID,
-		Nickname: senderNickname(m.Sender), RawMessage: m.RawMessage, Message: m.Message,
+		MessageID: int64(m.MessageID), UserID: userID,
+		Nickname: senderNickname(m.Sender), RawMessage: m.RawMessage, Message: m.Message.Chain,
 	}
 }
 
 func (s SDKSender) ResolveImage(ctx context.Context, file string) (string, error) {
-	var data map[string]any
+	var data struct {
+		URL  string `json:"url"`
+		File string `json:"file"`
+	}
 	if err := s.client.API().Call(ctx, "get_image", map[string]any{"file": file}, &data); err != nil {
 		return "", err
 	}
-	if url := anyString(data["url"]); url != "" {
-		return url, nil
+	if data.URL != "" {
+		return data.URL, nil
 	}
-	return anyString(data["file"]), nil
+	return data.File, nil
 }
 
 func (s SDKSender) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
@@ -361,43 +372,9 @@ func extractAtUsers(chain message.Chain) []int64 {
 	return out
 }
 
-func senderNickname(sender map[string]any) string {
-	if card, ok := sender["card"].(string); ok && card != "" {
-		return card
+func senderNickname(sender quoteSender) string {
+	if sender.Card != "" {
+		return sender.Card
 	}
-	if nickname, ok := sender["nickname"].(string); ok {
-		return nickname
-	}
-	return ""
-}
-
-func anyString(v any) string {
-	switch value := v.(type) {
-	case string:
-		return value
-	case float64:
-		return strconv.FormatInt(int64(value), 10)
-	case int:
-		return strconv.Itoa(value)
-	case int64:
-		return strconv.FormatInt(value, 10)
-	default:
-		return ""
-	}
-}
-
-func anyInt64(v any) int64 {
-	switch value := v.(type) {
-	case int64:
-		return value
-	case int:
-		return int64(value)
-	case float64:
-		return int64(value)
-	case string:
-		id, _ := strconv.ParseInt(value, 10, 64)
-		return id
-	default:
-		return 0
-	}
+	return sender.Nickname
 }

@@ -1,99 +1,91 @@
 package knowledge
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
-type ParseWorkbookFunc func(data []byte, sheet string) (SyncResult, error)
-
 type SyncerOptions struct {
-	Source    RowSource
+	Source    WPSClient
 	Sheet     string
 	CacheFile string
 	Index     *IndexRef
-	Parse     ParseWorkbookFunc
 }
 
 type Syncer struct {
-	source    RowSource
+	source    WPSClient
 	sheet     string
 	cacheFile string
 	index     *IndexRef
-	parse     ParseWorkbookFunc
 }
 
 func NewSyncer(opts SyncerOptions) *Syncer {
-	parse := opts.Parse
-	if parse == nil {
-		parse = ParseWorkbook
-	}
 	return &Syncer{
 		source:    opts.Source,
 		sheet:     opts.Sheet,
 		cacheFile: opts.CacheFile,
 		index:     opts.Index,
-		parse:     parse,
 	}
 }
 
 func (s *Syncer) Reload(ctx context.Context) error {
-	_, err := s.Sync(ctx)
-	return err
+	return s.Sync(ctx)
 }
 
-func (s *Syncer) Sync(ctx context.Context) (SyncResult, error) {
-	if s == nil || s.source == nil {
-		return SyncResult{}, fmt.Errorf("knowledge sync source is nil")
+func (s *Syncer) Sync(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("knowledge syncer is nil")
 	}
 	if s.index == nil {
-		return SyncResult{}, fmt.Errorf("knowledge index is nil")
+		return fmt.Errorf("knowledge index is nil")
 	}
 	data, err := s.source.Download(ctx)
 	if err != nil {
-		return SyncResult{}, err
+		return err
 	}
-	result, index, err := s.parseAndBuild(data)
+	index, err := s.parseAndBuild(data)
 	if err != nil {
-		return SyncResult{}, err
+		return err
 	}
 	if err := saveAtomic(s.cacheFile, data); err != nil {
-		return SyncResult{}, err
+		return err
 	}
 	s.index.Store(index)
-	return result, nil
+	return nil
 }
 
-func (s *Syncer) LoadCache() (SyncResult, error) {
+func (s *Syncer) LoadCache() error {
 	if s == nil || s.index == nil {
-		return SyncResult{}, fmt.Errorf("knowledge index is nil")
+		return fmt.Errorf("knowledge index is nil")
 	}
 	if s.cacheFile == "" {
-		return SyncResult{}, fmt.Errorf("knowledge cache file is empty")
+		return fmt.Errorf("knowledge cache file is empty")
 	}
 	data, err := os.ReadFile(s.cacheFile)
 	if err != nil {
-		return SyncResult{}, err
+		return err
 	}
-	result, index, err := s.parseAndBuild(data)
+	index, err := s.parseAndBuild(data)
 	if err != nil {
-		return SyncResult{}, err
+		return err
 	}
 	s.index.Store(index)
-	return result, nil
+	return nil
 }
 
-func (s *Syncer) parseAndBuild(data []byte) (SyncResult, *Index, error) {
-	result, err := s.parse(data, s.sheet)
+func (s *Syncer) parseAndBuild(data []byte) (*Index, error) {
+	rows, err := ReadRowsFromXLSX(bytes.NewReader(data), s.sheet)
 	if err != nil {
-		return SyncResult{}, nil, err
+		return nil, err
 	}
-	if len(result.Entries) == 0 {
-		return SyncResult{}, nil, fmt.Errorf("knowledge workbook contains no valid entries")
+	entries := ParseRows(rows)
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("knowledge workbook contains no valid entries")
 	}
-	return result, NewIndex(result.Entries), nil
+	return NewIndex(entries), nil
 }
 
 func saveAtomic(path string, data []byte) error {

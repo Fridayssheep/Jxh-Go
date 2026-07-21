@@ -58,9 +58,9 @@ func main() {
 		CacheFile: cfg.WPS.CacheFile,
 		Index:     knowledgeIndex,
 	})
-	if _, err := knowledgeSync.Sync(ctx); err != nil {
+	if err := knowledgeSync.Sync(ctx); err != nil {
 		log.Printf("load knowledge from WPS failed, trying local cache: %v", err)
-		if _, cacheErr := knowledgeSync.LoadCache(); cacheErr != nil {
+		if cacheErr := knowledgeSync.LoadCache(); cacheErr != nil {
 			log.Fatalf("load knowledge: WPS error: %v; cache error: %v", err, cacheErr)
 		}
 		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
@@ -97,8 +97,8 @@ func main() {
 		Addr:           cfg.Server.Addr,
 		WSURL:          cfg.OneBot.WSURL,
 		Token:          cfg.OneBot.AccessToken,
-		RequestTimeout: cfg.OneBot.APITimeout,
-		ReconnectDelay: cfg.OneBot.ReconnectInterval,
+		RequestTimeout: time.Duration(cfg.OneBot.APITimeoutSec) * time.Second,
+		ReconnectDelay: time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second,
 		Handler:        pipeline,
 	}
 	if cfg.OneBot.WSURL != "" {

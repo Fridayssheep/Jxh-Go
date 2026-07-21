@@ -13,11 +13,12 @@ import (
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
+	"github.com/zjutjh/napcat-sdk/message"
 )
 
 type Sender interface {
 	SendGroupText(ctx context.Context, groupID int64, text string) error
-	SendGroupMessage(ctx context.Context, groupID int64, message any) error
+	SendGroupMessage(ctx context.Context, groupID int64, message message.Chain) error
 }
 
 type Reloader interface {
@@ -29,7 +30,7 @@ type AIAnswerer interface {
 }
 
 type LinkCleaner interface {
-	CleanMessage(ctx context.Context, text string, segments []MessageSegment) ([]string, error)
+	CleanMessage(ctx context.Context, text string, segments message.Chain) ([]string, error)
 }
 
 const trackedLinkReplyPrefix = "精小弘觉得这个链接十分甚至九分不对劲，帮你移除了里面的TrackID："
@@ -47,7 +48,7 @@ type QuotedMessage struct {
 	UserID     int64
 	Nickname   string
 	RawMessage string
-	Message    any
+	Message    message.Chain
 }
 
 type Moderator interface {
@@ -57,7 +58,6 @@ type Moderator interface {
 
 type Options struct {
 	Knowledge     *knowledge.IndexRef
-	Sender        Sender
 	AI            AIAnswerer
 	Reloader      Reloader
 	Admin         *commands.AdminHandler
@@ -92,20 +92,13 @@ type GroupMessage struct {
 	MessageID      int64
 	ReplyMessageID int64
 	IsSelf         bool
-	IsOwner        bool
 	AtUsers        []int64
-	Segments       []MessageSegment
-}
-
-type MessageSegment struct {
-	Type string
-	Data any
+	Segments       message.Chain
 }
 
 func NewPipeline(opts Options) *Pipeline {
 	return &Pipeline{
 		knowledge:     opts.Knowledge,
-		sender:        opts.Sender,
 		groupRequests: opts.GroupRequests,
 		stats:         opts.TriggerStats,
 		linkCleaner:   opts.LinkCleaner,
@@ -156,11 +149,10 @@ func (p *Pipeline) HandleGroupIncrease(ctx context.Context, groupID int64, userI
 	if sender == nil {
 		return nil
 	}
-	message := []any{
-		map[string]any{"type": "at", "data": map[string]any{"qq": userID}},
-		map[string]any{"type": "text", "data": map[string]any{"text": "欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"}},
-	}
-	return sender.SendGroupMessage(ctx, groupID, message)
+	return sender.SendGroupMessage(ctx, groupID, message.ChainOf(
+		message.At(userID),
+		message.Text("欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"),
+	))
 }
 
 func (p *Pipeline) HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {

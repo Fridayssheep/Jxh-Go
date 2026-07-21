@@ -151,7 +151,7 @@ go run ./cmd/bot -config config.yaml
 | `@bot /test` | 连通性测试 |
 | `@bot /reload` | 从 WPS 同步知识库，并刷新缓存 |
 | `@bot /ai <问题>` | 让 Agent 自主搜索当前知识库并回答；同时最多处理 2 个请求 |
-| `@bot /q [数量]` | 从被回复消息开始生成 1–10 条消息的引用图；默认 1 条 |
+| `@bot /q [数量]` | 生成被回复消息及其之前的 1–10 条消息引用图；默认 1 条 |
 | `@bot /admin restart` | 请求 NapCat 重启 |
 | `@bot /admin ban <时长> @用户` | 禁言被 @ 的用户；时长支持 `10m`、`1h` 或秒数 |
 
@@ -212,7 +212,7 @@ quote:
   base_url: "http://quote:5000"
 ```
 
-## 数据库和代码生成
+## 数据库
 
 项目采用 schema-first，运行时不使用 `AutoMigrate`。表结构以 `deploy/mysql/init/001_schema.sql` 为准。
 
@@ -224,14 +224,6 @@ MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trig
 docker compose down
 rm -rf ./data/mysql
 docker compose up -d mysql
-```
-
-重新生成 GORM query/model：
-
-```bash
-make gormgen-install
-export JXH_GORMGEN_DSN="jxh:jxh_password@tcp(127.0.0.1:3306)/jxh_bot?charset=utf8mb4&parseTime=True&loc=Local"
-make gormgen
 ```
 
 ## 开发命令
@@ -256,13 +248,12 @@ make compose-logs  # 查看 compose 日志
 | `internal/commands` | 群管理和定时任务命令 |
 | `internal/knowledge` | WPS 解析、原子内存索引和 Agent 搜索 |
 | `internal/ai` | `/ai` ReAct Agent、知识搜索工具和 Eino 模型适配 |
-| `internal/storage` | GORM repository、业务存储模型和 generated query/model |
+| `internal/storage` | GORM 数据访问和数据库模型；表结构以初始化 SQL 为准 |
 | `internal/triggerstats` | MySQL-backed 词条触发统计 |
 | `internal/napcat` | NapCat SDK 适配层 |
 | `internal/quote` | 引用图请求和消息内容转换 |
 | `internal/scheduler` | 定时任务运行时 |
 | `deploy/mysql/init` | MySQL 初始化 SQL |
-| `scripts` | 代码生成和工具安装脚本 |
 | `data/` | MySQL、NapCat、bot 和 WPS 缓存的持久化根目录 |
 | `Dockerfile` | bot 容器镜像构建文件 |
 | `docker-compose.yaml` | MySQL、NapCat、quote 和 bot 的完整 compose |

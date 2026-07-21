@@ -13,6 +13,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
+	"github.com/zjutjh/napcat-sdk/message"
 )
 
 type GroupCommandRouter struct {
@@ -31,7 +32,7 @@ const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
 /test - 检查精小弘是否存活！
 /reload - 重新加载知识库（刷新精小弘的记忆？！）
 /ai <问题> - 用大模型查找一些知识库中的答案（让精小弘更聪明？！）
-/q [数量] - 回复一条消息后生成最多 10 条消息的引用图（表情包生成器ww）
+/q [数量] - 生成被回复消息及其之前最多 10 条消息的引用图（表情包生成器ww）
 /admin - 查看管理员命令和权限说明`
 
 const adminHelpText = `管理员命令（当前群群主或群管理员可使用）：
@@ -162,7 +163,7 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败："+err.Error())
 	}
-	return sender.SendGroupMessage(ctx, msg.GroupID, map[string]any{"type": "image", "data": map[string]any{"file": "base64://" + image}})
+	return sender.SendGroupMessage(ctx, msg.GroupID, message.ChainOf(message.Image("base64://"+image)))
 }
 
 func parseQuoteCount(text string) (int, error) {
@@ -263,7 +264,7 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
 	}
-	resp, err := r.admin.Execute(ctx, commands.AdminInput{Text: adminText})
+	resp, err := r.admin.Execute(ctx, adminText)
 	if err != nil {
 		return err
 	}

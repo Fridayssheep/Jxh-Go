@@ -1,8 +1,8 @@
 package knowledge
 
 import (
-	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -17,7 +17,6 @@ var (
 type rawRow struct {
 	keyword  string
 	answer   string
-	note     string
 	aliases  []string
 	category string
 	usage    string
@@ -25,16 +24,11 @@ type rawRow struct {
 	sourceID string
 }
 
-func ParseRows(rows [][]string) ([]Entry, ImportReport) {
-	report := ImportReport{TotalRows: len(rows)}
+func ParseRows(rows [][]string) []Entry {
 	raws := make([]rawRow, 0, len(rows))
 	for _, row := range rows {
 		r := rowToRaw(row)
-		if r.note != "" {
-			report.IgnoredNoteRows++
-		}
 		if r.keyword == "" || r.answer == "" {
-			report.SkippedRows++
 			continue
 		}
 		raws = append(raws, r)
@@ -50,11 +44,8 @@ func ParseRows(rows [][]string) ([]Entry, ImportReport) {
 		entry := enrich(raw, titleByCode, children, pathByCode)
 		if existing, ok := seen[entry.SourceKey]; ok {
 			if normalizeText(existing.Answer) == normalizeText(entry.Answer) {
-				report.DuplicateRows++
 				continue
 			}
-			report.ConflictingRows++
-			report.ConflictMessages = append(report.ConflictMessages, fmt.Sprintf("source_key %s has conflicting answers", entry.SourceKey))
 			existing.AIEnabled = false
 			seen[entry.SourceKey] = existing
 			continue
@@ -67,8 +58,7 @@ func ParseRows(rows [][]string) ([]Entry, ImportReport) {
 	for _, key := range order {
 		out = append(out, seen[key])
 	}
-	report.ImportedRows = len(out)
-	return out, report
+	return out
 }
 
 func rowToRaw(row []string) rawRow {
@@ -81,7 +71,6 @@ func rowToRaw(row []string) rawRow {
 	return rawRow{
 		keyword:  get(0),
 		answer:   get(1),
-		note:     get(2),
 		aliases:  splitList(get(3)),
 		category: get(4),
 		usage:    strings.ToLower(get(5)),
@@ -142,13 +131,14 @@ func buildPaths(titles map[string]string, children map[string][]string) map[stri
 			}
 			seen[cur] = struct{}{}
 			if title := titles[cur]; title != "" {
-				parts = append([]string{title}, parts...)
+				parts = append(parts, title)
 			}
 			if _, ok := parent[cur]; !ok {
 				break
 			}
 		}
 		if len(parts) > 0 {
+			slices.Reverse(parts)
 			paths[code] = strings.Join(parts, " / ")
 		}
 	}
@@ -172,7 +162,7 @@ func enrich(raw rawRow, titles map[string]string, children map[string][]string, 
 			usage = "both"
 		}
 	}
-	aliases := uniqueStrings(append([]string{}, raw.aliases...))
+	aliases := uniqueStrings(raw.aliases)
 	if title := titles[raw.keyword]; title != "" {
 		aliases = uniqueStrings(append(aliases, title))
 	}

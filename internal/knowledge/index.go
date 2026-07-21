@@ -19,9 +19,9 @@ func NewIndex(entries []Entry) *Index {
 		if !entry.Enabled || !entry.ExactReply {
 			continue
 		}
-		idx.exact[normalizeLookup(entry.Keyword)] = entryIndex
+		idx.exact[strings.TrimSpace(entry.Keyword)] = entryIndex
 		for _, alias := range entry.Aliases {
-			idx.exact[normalizeLookup(alias)] = entryIndex
+			idx.exact[strings.TrimSpace(alias)] = entryIndex
 		}
 	}
 	return idx
@@ -31,18 +31,11 @@ func (i *Index) Lookup(message string) (Entry, bool) {
 	if i == nil {
 		return Entry{}, false
 	}
-	entryIndex, ok := i.exact[normalizeLookup(message)]
+	entryIndex, ok := i.exact[strings.TrimSpace(message)]
 	if !ok {
 		return Entry{}, false
 	}
 	return cloneEntry(i.entries[entryIndex]), true
-}
-
-func (i *Index) Entries() []Entry {
-	if i == nil {
-		return nil
-	}
-	return cloneEntries(i.entries)
 }
 
 func (i *Index) Keyword(sourceKey string) string {
@@ -85,17 +78,6 @@ func (r *IndexRef) Lookup(message string) (Entry, bool) {
 	return index.Lookup(message)
 }
 
-func (r *IndexRef) Entries() []Entry {
-	if r == nil {
-		return nil
-	}
-	index := r.value.Load()
-	if index == nil {
-		return nil
-	}
-	return index.Entries()
-}
-
 func (r *IndexRef) Keyword(sourceKey string) string {
 	if r == nil {
 		return ""
@@ -118,8 +100,4 @@ func cloneEntries(entries []Entry) []Entry {
 func cloneEntry(entry Entry) Entry {
 	entry.Aliases = append([]string(nil), entry.Aliases...)
 	return entry
-}
-
-func normalizeLookup(value string) string {
-	return strings.TrimSpace(value)
 }

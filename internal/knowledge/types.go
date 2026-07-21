@@ -19,13 +19,3 @@ type Entry struct {
 	ExactReply bool
 	AIEnabled  bool
 }
-
-type ImportReport struct {
-	TotalRows        int
-	ImportedRows     int
-	SkippedRows      int
-	IgnoredNoteRows  int
-	ConflictingRows  int
-	DuplicateRows    int
-	ConflictMessages []string
-}

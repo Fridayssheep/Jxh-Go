@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"strconv"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,12 +27,10 @@ type ServerConfig struct {
 }
 
 type OneBotConfig struct {
-	WSURL                string        `yaml:"ws_url"`
-	AccessToken          string        `yaml:"access_token"`
-	APITimeoutSec        int           `yaml:"api_timeout_sec"`
-	ReconnectIntervalSec int           `yaml:"reconnect_interval_sec"`
-	APITimeout           time.Duration `yaml:"-"`
-	ReconnectInterval    time.Duration `yaml:"-"`
+	WSURL                string `yaml:"ws_url"`
+	AccessToken          string `yaml:"access_token"`
+	APITimeoutSec        int    `yaml:"api_timeout_sec"`
+	ReconnectIntervalSec int    `yaml:"reconnect_interval_sec"`
 }
 
 type WPSConfig struct {
@@ -183,8 +180,6 @@ func normalize(cfg *Config) {
 	if cfg.OneBot.ReconnectIntervalSec <= 0 {
 		cfg.OneBot.ReconnectIntervalSec = 5
 	}
-	cfg.OneBot.APITimeout = time.Duration(cfg.OneBot.APITimeoutSec) * time.Second
-	cfg.OneBot.ReconnectInterval = time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second
 	if cfg.AI.TimeoutSec <= 0 {
 		cfg.AI.TimeoutSec = 30
 	}

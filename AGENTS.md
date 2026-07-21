@@ -6,10 +6,11 @@
 
 - 项目是 Go 1.25+ 编写的精弘 QQ 群助手，通过 NapCat SDK 接入 OneBot 11。入口是 `cmd/bot/main.go`。
 - WPS XLSX 是知识唯一真源。启动和 `/reload` 下载并解析表格，验证成功后写入 `data/cache/knowledge.xlsx`，再原子替换进程内 `knowledge.IndexRef`。MySQL 不保存知识正文。
-- 普通关键词回复使用 keyword/alias 精确匹配；`/ai` 使用 Eino ReAct Agent 调用内存 `search_knowledge` 工具，支持 AND、OR 和 Go 正则搜索。
-- MySQL 只保存 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests`。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。
-- 数据访问统一位于 `internal/storage`，使用直接 GORM 调用。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
+- 普通关键词回复使用 keyword/alias 精确匹配（大小写和首尾空格已归一化）；`/ai` 使用 Eino ReAct Agent 调用内存 `search_knowledge` 工具，支持 AND、OR 和 Go 正则搜索。
+- MySQL 只保存 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests`。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。schema 变更后需在 `deploy/mysql/migrations/` 追加迁移脚本供已有部署使用。
+- 数据访问统一位于 `internal/storage`，使用直接 GORM 调用与手写模型（`internal/storage/models.go`）。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
 - Compose 包含 MySQL、NapCat、quote 和 bot。quote 服务从 `zjutjh/qq-quote-generator` 构建，客户端先请求 `/gif/base64/`，失败后回退 `/png/base64/`。
+- bot 容器暴露 `/healthz` 端点供 Docker healthcheck 使用；容器通过 entrypoint 支持 `PUID/PGID` 环境变量以匹配 NAS（群晖/威联通）宿主用户权限，避免 `./data/` 挂载点写入失败。
 - 仓库当前不保留 `docs/` 内容，也不提交 `*_test.go`。不要自行恢复历史设计文档或测试文件，除非任务明确要求。
 
 ## 关键业务约束
@@ -22,9 +23,11 @@
 - WPS 导入为空或解析失败时不得替换现有索引或有效缓存。菜单 `%编号` 路径构建必须能终止循环父子关系。
 - WPS 基础列为 keyword、answer、维护备注；可选列为 aliases、category、usage、status、source_id。空 keyword/answer 跳过，冲突 source_key 不得静默覆盖不同答案。
 - 关键词 answer 中只执行 CQ image。远程图片仅允许合法 HTTP(S)；本地图片仅允许 `/` 分隔的安全相对路径，并映射到 NapCat 的 `/app/jxh-media/`。拒绝绝对路径、反斜杠、`.`、`..`、查询参数、`file://` 和 `base64://` 输入。
-- 定时任务只接受 `每天` 或 `单次`、严格 `HH:MM` 和正群号。只有消息实际发送成功后才能更新 `last_run_at` 或禁用单次任务；NapCat 未连接和发送错误必须保留任务等待重试。
+- 定时任务只接受 `每天` 或 `单次`，格式：每天 `HH:MM`；单次 `YYYY-MM-DD HH:MM`（存 `run_date` 列），群号必须为正。只有消息实际发送成功后才能更新 `last_run_at` 或禁用单次任务；NapCat 未连接和发送错误必须保留任务等待重试。新建每天任务时若当前时刻已过 `HH:MM`，需将 `LastRunAt` 设为当前时间避免当天立即触发。
+- WPS 冲突 source_key 不同答案时保留首条并禁用其 AI 检索（`AIEnabled=false`），不得静默覆盖。
 - 群申请以 `request_key` 去重；过长 flag 必须哈希，原始 flag 和 JSON 仍要保留。导出文件按来源群拆分，只写本地，不默认上传 QQ。
-- 词条统计失败不能阻断关键词回复或 `/ai` 回答，只记录成功发送的回复；导出按 source_key 合并关键词和 AI 次数。统计使用应用时区的自然日边界。
+- 词条统计失败不能阻断关键词回复或 `/ai` 回答，只记录成功发送的回复；导出按 source_key 合并关键词和 AI 次数。统计使用应用时区的自然日边界；导出时间戳必须显式 `t.In(location).Format(...)`，不能直接使用 `time.Format`（否则会显示 UTC 时刻）。
+- 词条日志按 `database.trigger_log_retention_days`（默认 180 天）定期清理；无限增长会拖慢查询和体积。
 - 链接净化只处理受支持的 Bilibili/小红书域名。短链跳转必须限制协议、端口、目标域名、跳转次数和超时，不能放宽成通用 URL 抓取器。
 
 ## 实现规范
@@ -32,11 +35,14 @@
 - 优先复用现有实现、Go 标准库和已安装依赖。不要添加单实现接口、无调用 wrapper、兼容层、未来配置或重复 helper。
 - 修 bug 前搜索所有调用者，尽量在共享根因位置修一次。保持改动文件和 diff 最少，不做任务外重构或格式化。
 - 错误必须保留上下文；附加能力失败可以记录并降级，但消息发送、缓存替换、数据库写入等关键操作不得伪装成功。
-- 外部输入边界必须验证：OneBot/NapCat 动态 JSON、WPS 内容、管理员命令、URL、文件路径、配置和数据库字段。
+- 外部输入边界必须验证：OneBot/NapCat 动态 JSON、WPS 内容、管理员命令、URL、文件路径、配置和数据库字段。管理员命令要兼容全角空格（`　`）。
 - 并发共享状态沿用现有策略：知识索引用 `atomic.Pointer`，Pipeline sender 用互斥锁，AI 来源收集和并发槽必须保持线程安全。
+- NapCat 事件循环必须异步分发：慢路径（`/reload`、`/q`、`/ai`、链接净化）会阻塞背压 SDK 缓冲区，因此 `napcat.Server.consume` 每个事件用 goroutine 处理。
+- 接口设计上避免 typed-nil 陷阱：如果服务未启用（`ai.Service == nil`），不要把它塞进接口字段；main.go 里必须条件赋值。
 - 不在日志、错误、提交内容或示例中泄露 access token、WPS sid、AI key、数据库密码和原始敏感申请信息。
 - 不手工编辑 `go.sum`；依赖变化使用 `go mod tidy`。
 - 当前生产镜像使用 `CGO_ENABLED=0`，新增依赖不得破坏纯 Go 构建，除非任务明确批准部署变更。
+- 进程必须响应 `SIGINT` 与 `SIGTERM`（`docker stop` 发送 SIGTERM）；不允许仅捕获 `os.Interrupt`。
 
 ## 验证要求
 

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
@@ -260,7 +262,9 @@ func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int6
 		return nil, err
 	}
 	if count <= 1 {
-		return []bot.QuotedMessage{target.quoted()}, nil
+		messages := []bot.QuotedMessage{target.quoted()}
+		s.enrichQuoteAtNames(ctx, groupID, messages)
+		return messages, nil
 	}
 	messageSeq := int64(target.MessageSeq)
 	if messageSeq <= 0 {
@@ -296,7 +300,49 @@ func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int6
 			messages = messages[len(messages)-count:]
 		}
 	}
+	s.enrichQuoteAtNames(ctx, groupID, messages)
 	return messages, nil
+}
+
+func (s SDKSender) enrichQuoteAtNames(ctx context.Context, groupID int64, messages []bot.QuotedMessage) {
+	names := map[string]string{"all": "全体成员"}
+	for messageIndex := range messages {
+		chain := message.ChainOf(messages[messageIndex].Message...)
+		for segmentIndex, segment := range chain {
+			if segment.Type != "at" || strings.TrimSpace(segment.String("name")) != "" ||
+				strings.TrimSpace(segment.String("card")) != "" || strings.TrimSpace(segment.String("nickname")) != "" {
+				continue
+			}
+			qq := strings.TrimSpace(segment.String("qq"))
+			name, known := names[qq]
+			if !known {
+				userID, err := strconv.ParseInt(qq, 10, 64)
+				if err != nil {
+					continue
+				}
+				resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
+					GroupID: strconv.FormatInt(groupID, 10),
+					UserID:  strconv.FormatInt(userID, 10),
+					NoCache: true,
+				})
+				if err == nil {
+					name = senderNickname(quoteSender{Card: strings.TrimSpace(resp.Card), Nickname: strings.TrimSpace(resp.Nickname)})
+				}
+				names[qq] = name
+			}
+			if name == "" {
+				continue
+			}
+			data, ok := segment.Data.(map[string]any)
+			if !ok {
+				continue
+			}
+			data = maps.Clone(data)
+			data["name"] = name
+			chain[segmentIndex].Data = data
+		}
+		messages[messageIndex].Message = chain
+	}
 }
 
 func (s SDKSender) getQuoteMessage(ctx context.Context, messageID int64) (quoteMessage, error) {

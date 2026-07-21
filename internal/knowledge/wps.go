@@ -61,6 +61,10 @@ func (c WPSClient) Download(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	if c.SID != "" {
+		req.AddCookie(&http.Cookie{Name: "wps_sid", Value: c.SID})
+	}
 	resp, err = client.Do(req)
 	if err != nil {
 		return nil, wrapWPSError("file download", client.Timeout, err)

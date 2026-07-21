@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
@@ -38,7 +39,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	db, err := openDB(cfg)
@@ -68,30 +69,72 @@ func main() {
 
 	aiSvc, err := newAIService(ctx, cfg, knowledgeIndex)
 	if err != nil {
-		log.Fatalf("create ai service: %v", err)
+		log.Printf("ai service not available: %v", err)
 	}
 	location := applicationLocation(cfg)
 	triggerStats := triggerstats.NewService(store, triggerstats.Options{
 		Now:            func() time.Time { return time.Now().In(location) },
 		ResolveKeyword: knowledgeIndex.Keyword,
+		Location:       location,
 	})
-	groupRequests := grouprequest.NewService(store, grouprequest.Options{ExportDir: "./data/exports/group_requests"})
-	pipeline := bot.NewPipeline(bot.Options{
+	groupRequests := grouprequest.NewService(store, grouprequest.Options{
+		ExportDir: "./data/exports/group_requests",
+		Location:  location,
+	})
+	pipelineOpts := bot.Options{
 		Knowledge:     knowledgeIndex,
-		AI:            aiSvc,
 		Reloader:      knowledgeSync,
 		Admin:         commands.NewAdminHandler(store),
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
 		LinkCleaner:   linkcleaner.NewService(linkcleaner.Options{}),
-	})
+	}
+	// Only set AI if service is actually initialized to avoid typed-nil interface trap
+	if aiSvc != nil {
+		pipelineOpts.AI = aiSvc
+	}
+	pipeline := bot.NewPipeline(pipelineOpts)
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,
 		Send:     pipeline.SendGroupText,
 		Location: schedulerLocation(cfg),
 		Logf:     log.Printf,
 	}).Run(ctx)
+
+	// Purge old trigger logs periodically (default 180 days retention)
+	if cfg.Database.TriggerLogRetentionDays > 0 {
+		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays, 24*time.Hour)
+	}
+
+	// Start health check server
+	healthAddr := ":8080"
+	if envAddr := os.Getenv("JXH_HEALTH_ADDR"); envAddr != "" {
+		healthAddr = envAddr
+	}
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok\n"))
+	})
+	healthServer := &http.Server{
+		Addr:    healthAddr,
+		Handler: healthMux,
+	}
+	go func() {
+		log.Printf("health check server listening on %s", healthAddr)
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("health check server error: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("health check server shutdown error: %v", err)
+		}
+	}()
 
 	server := napcat.Server{
 		Addr:           cfg.Server.Addr,

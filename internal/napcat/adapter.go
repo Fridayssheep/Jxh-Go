@@ -90,9 +90,12 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			if !ok {
 				return
 			}
-			if err := s.handleEvent(ctx, client, ev); err != nil {
-				log.Printf("handle napcat event failed: %v", err)
-			}
+			// Handle events asynchronously to prevent blocking the event loop
+			go func(evt event.Event) {
+				if err := s.handleEvent(ctx, client, evt); err != nil {
+					log.Printf("handle napcat event failed: %v", err)
+				}
+			}(ev)
 		}
 	}
 }
@@ -261,8 +264,9 @@ func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int6
 	if err != nil {
 		return nil, err
 	}
+	targetQuoted := target.quoted()
 	if count <= 1 {
-		messages := []bot.QuotedMessage{target.quoted()}
+		messages := []bot.QuotedMessage{targetQuoted}
 		s.enrichQuoteAtNames(ctx, groupID, messages)
 		return messages, nil
 	}
@@ -295,7 +299,7 @@ func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int6
 		}
 	}
 	if !targetFound {
-		messages = append(messages, target.quoted())
+		messages = append(messages, targetQuoted)
 		if len(messages) > count {
 			messages = messages[len(messages)-count:]
 		}

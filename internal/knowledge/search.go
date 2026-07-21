@@ -14,6 +14,7 @@ const (
 	maxSearchLimit       = 10
 	maxSearchQueryRunes  = 200
 	maxSearchResultRunes = 12000
+	maxRegexLength       = 100 // Limit regex complexity to prevent slow scanning
 )
 
 type SearchQuery struct {
@@ -113,6 +114,9 @@ func searchMatcher(mode, query string) (func(string) bool, error) {
 			return mode == "and"
 		}, nil
 	case "regex":
+		if utf8.RuneCountInString(query) > maxRegexLength {
+			return nil, fmt.Errorf("regex is longer than %d characters", maxRegexLength)
+		}
 		re, err := regexp.Compile("(?i)" + query)
 		if err != nil {
 			return nil, fmt.Errorf("invalid regular expression: %w", err)

@@ -56,6 +56,8 @@ type Moderator interface {
 	SetRestart(ctx context.Context) error
 }
 
+// Options configures a Pipeline. Sender is set at runtime via SetSender after
+// the NapCat WebSocket connection is established.
 type Options struct {
 	Knowledge     *knowledge.IndexRef
 	AI            AIAnswerer

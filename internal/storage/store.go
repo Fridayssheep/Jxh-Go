@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/commands"
@@ -53,6 +54,16 @@ MAX(triggered_at) AS last_triggered`, triggerstats.TriggerTypeKeywordReply, trig
 	return summaries, query.Scan(&summaries).Error
 }
 
+// PurgeOldTriggerLogs deletes trigger log entries older than the given time.
+// Returns the number of rows deleted.
+func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int64, error) {
+	result := s.db.WithContext(ctx).
+		Table((KnowledgeTriggerLog{}).TableName()).
+		Where("triggered_at < ?", before).
+		Delete(nil)
+	return result.RowsAffected, result.Error
+}
+
 func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobView, error) {
 	var jobs []ScheduledJob
 	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id").Find(&jobs).Error; err != nil {
@@ -60,19 +71,49 @@ func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobV
 	}
 	out := make([]commands.ScheduledJobView, 0, len(jobs))
 	for _, job := range jobs {
-		out = append(out, commands.ScheduledJobView{ID: job.ID, Type: job.Type, TimeHHMM: job.TimeHHMM, GroupID: job.GroupID, Message: job.Message})
+		out = append(out, commands.ScheduledJobView{
+			ID:       job.ID,
+			Type:     job.Type,
+			TimeHHMM: job.TimeHHMM,
+			RunDate:  job.RunDate,
+			GroupID:  job.GroupID,
+			Message:  job.Message,
+		})
 	}
 	return out, nil
 }
 
 func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJobInput) (uint64, error) {
-	job := ScheduledJob{Type: input.Type, TimeHHMM: input.TimeHHMM, GroupID: input.GroupID, Message: input.Message, Enabled: true}
-	err := s.db.WithContext(ctx).Create(&job).Error
+	job := &ScheduledJob{
+		Type:     input.Type,
+		TimeHHMM: input.TimeHHMM,
+		RunDate:  input.RunDate,
+		GroupID:  input.GroupID,
+		Message:  input.Message,
+		Enabled:  true,
+	}
+	// For daily jobs created after today's schedule time, mark as already run today
+	// to prevent immediate trigger
+	if input.Type == "每天" && input.RunDate == nil {
+		now := time.Now()
+		if now.Format("15:04") >= input.TimeHHMM {
+			nowTime := now
+			job.LastRunAt = &nowTime
+		}
+	}
+	err := s.db.WithContext(ctx).Create(job).Error
 	return job.ID, err
 }
 
 func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) error {
-	return s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false).Error
+	result := s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("任务不存在")
+	}
+	return nil
 }
 
 func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, error) {
@@ -88,6 +129,7 @@ func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, e
 			GroupID:   job.GroupID,
 			Message:   job.Message,
 			TimeHHMM:  job.TimeHHMM,
+			RunDate:   job.RunDate,
 			Enabled:   job.Enabled,
 			LastRunAt: job.LastRunAt,
 		})

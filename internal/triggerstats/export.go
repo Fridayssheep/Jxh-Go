@@ -37,7 +37,7 @@ func (s *Service) ExportForDays(ctx context.Context, days int) (ExportResult, er
 		_ = os.Remove(path)
 		return ExportResult{}, err
 	}
-	if err := writeSummariesXLSX(path, rangeDisplayLabel(days), summaries); err != nil {
+	if err := s.writeSummariesXLSX(path, rangeDisplayLabel(days), summaries); err != nil {
 		_ = os.Remove(path)
 		return ExportResult{}, err
 	}
@@ -48,7 +48,7 @@ func (s *Service) ExportForDays(ctx context.Context, days int) (ExportResult, er
 	return ExportResult{Path: path, Count: len(summaries)}, nil
 }
 
-func writeSummariesXLSX(path, rangeLabel string, summaries []Summary) error {
+func (s *Service) writeSummariesXLSX(path, rangeLabel string, summaries []Summary) error {
 	f := excelize.NewFile()
 	defer f.Close()
 	const sheet = "词条统计"
@@ -73,7 +73,7 @@ func writeSummariesXLSX(path, rangeLabel string, summaries []Summary) error {
 			summary.KeywordReplyCount,
 			summary.AIRetrievalCount,
 			summary.TotalCount,
-			formatTime(summary.LastTriggered),
+			s.formatTime(summary.LastTriggered),
 			rangeLabel,
 		}
 		for col, value := range values {

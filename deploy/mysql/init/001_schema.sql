@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_jobs` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `type` varchar(16) NOT NULL COMMENT '任务类型：每天/单次',
   `time_hhmm` varchar(5) NOT NULL COMMENT '触发时间，格式 HH:MM',
+  `run_date` date DEFAULT NULL COMMENT '单次任务执行日期，格式 YYYY-MM-DD；每天任务此字段为 NULL',
   `group_id` bigint NOT NULL COMMENT 'QQ群号',
   `message` text NOT NULL COMMENT '定时发送内容',
   `enabled` boolean NOT NULL COMMENT '是否启用',

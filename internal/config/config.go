@@ -51,6 +51,9 @@ type DatabaseConfig struct {
 	ParseTime bool   `yaml:"parse_time"`
 	Loc       string `yaml:"loc"`
 	DSN       string `yaml:"dsn"`
+	// TriggerLogRetentionDays controls how many days of trigger logs to keep.
+	// Zero or negative disables automatic purging.
+	TriggerLogRetentionDays int `yaml:"trigger_log_retention_days"`
 }
 
 type AIConfig struct {
@@ -105,13 +108,14 @@ func Default() Config {
 			TimeoutSec: 120,
 		},
 		Database: DatabaseConfig{
-			Host:      "127.0.0.1",
-			Port:      3306,
-			User:      "jxh",
-			Name:      "jxh_bot",
-			Charset:   "utf8mb4",
-			ParseTime: true,
-			Loc:       "Local",
+			Host:                    "127.0.0.1",
+			Port:                    3306,
+			User:                    "jxh",
+			Name:                    "jxh_bot",
+			Charset:                 "utf8mb4",
+			ParseTime:               true,
+			Loc:                     "Local",
+			TriggerLogRetentionDays: 180,
 		},
 		AI: AIConfig{
 			Enabled:          true,

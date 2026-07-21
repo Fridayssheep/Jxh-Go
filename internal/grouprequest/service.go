@@ -25,6 +25,7 @@ const (
 	SourceSystem = "system"
 
 	maxRequestKeyRunes = 191
+	maxFlagRunes       = 512 // Match DB varchar(512)
 )
 
 type Record struct {
@@ -53,12 +54,14 @@ type Store interface {
 type Options struct {
 	ExportDir string
 	Now       func() time.Time
+	Location  *time.Location
 }
 
 type Service struct {
 	store     Store
 	exportDir string
 	now       func() time.Time
+	location  *time.Location
 }
 
 type ExportResult struct {
@@ -82,7 +85,11 @@ func NewService(store Store, opts Options) *Service {
 	if exportDir == "" {
 		exportDir = filepath.Join("data", "exports", "group_requests")
 	}
-	return &Service{store: store, exportDir: exportDir, now: now}
+	location := opts.Location
+	if location == nil {
+		location = time.Local
+	}
+	return &Service{store: store, exportDir: exportDir, now: now, location: location}
 }
 
 func (s *Service) Record(ctx context.Context, record Record) error {
@@ -123,7 +130,7 @@ func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 	result := ExportResult{Dir: runDir, Count: len(records), Files: make([]ExportFile, 0, len(groupIDs))}
 	for _, groupID := range groupIDs {
 		path := filepath.Join(runDir, fmt.Sprintf("group_%d.xlsx", groupID))
-		if err := writeXLSX(path, groups[groupID]); err != nil {
+		if err := s.writeXLSX(path, groups[groupID]); err != nil {
 			_ = os.RemoveAll(runDir)
 			return ExportResult{}, err
 		}
@@ -181,6 +188,10 @@ func normalizeRecord(record Record, now time.Time) Record {
 	}
 	if record.LastSeenAt.IsZero() {
 		record.LastSeenAt = now
+	}
+	// Truncate Flag if too long
+	if utf8.RuneCountInString(record.Flag) > maxFlagRunes {
+		record.Flag = hashedKey("flag", record.Flag)
 	}
 	if record.RequestKey == "" {
 		record.RequestKey = stableKey(record)
@@ -304,7 +315,7 @@ func trimAtBoundary(value string) string {
 	return strings.TrimSpace(value[:stop])
 }
 
-func writeXLSX(path string, records []Record) error {
+func (s *Service) writeXLSX(path string, records []Record) error {
 	f := excelize.NewFile()
 	defer f.Close()
 	const sheet = "群申请"
@@ -330,9 +341,9 @@ func writeXLSX(path string, records []Record) error {
 			record.Comment,
 			record.Status,
 			record.Source,
-			formatTime(record.RequestedAt),
-			formatTime(record.FirstSeenAt),
-			formatTime(record.LastSeenAt),
+			s.formatTime(record.RequestedAt),
+			s.formatTime(record.FirstSeenAt),
+			s.formatTime(record.LastSeenAt),
 			record.Flag,
 		}
 		for col, value := range values {
@@ -346,6 +357,13 @@ func writeXLSX(path string, records []Record) error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
+}
+
+func (s *Service) formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(s.location).Format("2006-01-02 15:04:05")
 }
 
 func formatTime(t time.Time) string {

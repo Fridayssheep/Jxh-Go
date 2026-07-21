@@ -32,12 +32,14 @@ type Summary struct {
 type Store interface {
 	RecordKnowledgeTriggers(ctx context.Context, events []Event) error
 	ListKnowledgeTriggerSummaries(ctx context.Context, since *time.Time, limit int) ([]Summary, error)
+	PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int64, error)
 }
 
 type Options struct {
 	Now            func() time.Time
 	ExportDir      string
 	ResolveKeyword func(sourceKey string) string
+	Location       *time.Location
 }
 
 type Service struct {
@@ -45,6 +47,7 @@ type Service struct {
 	now            func() time.Time
 	exportDir      string
 	resolveKeyword func(string) string
+	location       *time.Location
 }
 
 func NewService(store Store, opts Options) *Service {
@@ -56,7 +59,11 @@ func NewService(store Store, opts Options) *Service {
 	if exportDir == "" {
 		exportDir = filepath.Join("data", "exports", "trigger_stats")
 	}
-	return &Service{store: store, now: now, exportDir: exportDir, resolveKeyword: opts.ResolveKeyword}
+	location := opts.Location
+	if location == nil {
+		location = time.Local
+	}
+	return &Service{store: store, now: now, exportDir: exportDir, resolveKeyword: opts.ResolveKeyword, location: location}
 }
 
 func (s *Service) RecordKeywordReply(ctx context.Context, sourceKey string, groupID int64) error {
@@ -100,6 +107,47 @@ func (s *Service) Summaries(ctx context.Context, since *time.Time, limit int) ([
 	return summaries, nil
 }
 
+// PurgeOldLogs deletes trigger log entries older than retentionDays.
+// If retentionDays <= 0, no purge is performed.
+func (s *Service) PurgeOldLogs(ctx context.Context, retentionDays int) (int64, error) {
+	if s == nil || s.store == nil || retentionDays <= 0 {
+		return 0, nil
+	}
+	cutoff := s.now().AddDate(0, 0, -retentionDays)
+	return s.store.PurgeOldTriggerLogs(ctx, cutoff)
+}
+
+// RunPurgeLoop periodically purges old trigger logs.
+// Blocks until ctx is done.
+func (s *Service) RunPurgeLoop(ctx context.Context, retentionDays int, interval time.Duration) {
+	if retentionDays <= 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	// Initial run
+	if deleted, err := s.PurgeOldLogs(ctx, retentionDays); err != nil {
+		fmt.Printf("purge trigger logs failed: %v\n", err)
+	} else if deleted > 0 {
+		fmt.Printf("purged %d old trigger log entries\n", deleted)
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if deleted, err := s.PurgeOldLogs(ctx, retentionDays); err != nil {
+				fmt.Printf("purge trigger logs failed: %v\n", err)
+			} else if deleted > 0 {
+				fmt.Printf("purged %d old trigger log entries\n", deleted)
+			}
+		}
+	}
+}
+
 func (s *Service) SummariesForDays(ctx context.Context, days, limit int) ([]Summary, error) {
 	if days < 0 {
 		return nil, fmt.Errorf("days must not be negative")
@@ -130,9 +178,9 @@ func uniqueSourceKeys(sourceKeys []string) []string {
 	return out
 }
 
-func formatTime(t time.Time) string {
+func (s *Service) formatTime(t time.Time) string {
 	if t.IsZero() {
 		return "无"
 	}
-	return t.Format("2006-01-02 15:04:05")
+	return t.In(s.location).Format("2006-01-02 15:04:05")
 }

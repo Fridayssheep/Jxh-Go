@@ -11,13 +11,15 @@ FROM debian:trixie-slim
 
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata curl gosu \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --home-dir /app --shell /usr/sbin/nologin appuser
+    && groupadd --gid 10001 appuser \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /app --shell /usr/sbin/nologin appuser
 COPY --from=build /out/jxh-bot /usr/local/bin/jxh-bot
 COPY config.example.yaml /app/config.yaml
-RUN mkdir -p /app/data/cache && chown -R appuser:appuser /app
-USER appuser
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN mkdir -p /app/data/cache && chown -R appuser:appuser /app && chmod +x /usr/local/bin/entrypoint.sh
 
+ENV TZ=Asia/Shanghai
 EXPOSE 8080
-ENTRYPOINT ["jxh-bot", "-config", "/app/config.yaml"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "jxh-bot", "-config", "/app/config.yaml"]

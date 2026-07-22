@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	drivermysql "github.com/go-sql-driver/mysql"
@@ -38,7 +39,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	db, err := openDB(cfg)
@@ -68,19 +69,26 @@ func main() {
 
 	aiSvc, err := newAIService(ctx, cfg, knowledgeIndex)
 	if err != nil {
-		log.Fatalf("create ai service: %v", err)
+		log.Printf("ai service not available: %v", err)
 	}
 	location := applicationLocation(cfg)
+	now := func() time.Time { return time.Now().In(location) }
+	scheduleLocation := schedulerLocation(cfg)
 	triggerStats := triggerstats.NewService(store, triggerstats.Options{
-		Now:            func() time.Time { return time.Now().In(location) },
+		Now:            now,
 		ResolveKeyword: knowledgeIndex.Keyword,
+		Location:       location,
 	})
-	groupRequests := grouprequest.NewService(store, grouprequest.Options{ExportDir: "./data/exports/group_requests"})
+	groupRequests := grouprequest.NewService(store, grouprequest.Options{
+		ExportDir: "./data/exports/group_requests",
+		Now:       now,
+		Location:  location,
+	})
 	pipeline := bot.NewPipeline(bot.Options{
 		Knowledge:     knowledgeIndex,
 		AI:            aiSvc,
 		Reloader:      knowledgeSync,
-		Admin:         commands.NewAdminHandler(store),
+		Admin:         commands.NewAdminHandler(store, scheduleLocation),
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
@@ -89,23 +97,50 @@ func main() {
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,
 		Send:     pipeline.SendGroupText,
-		Location: schedulerLocation(cfg),
+		Location: scheduleLocation,
 		Logf:     log.Printf,
 	}).Run(ctx)
 
+	if cfg.Database.TriggerLogRetentionDays > 0 {
+		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
+	}
+
+	healthAddr := strings.TrimSpace(os.Getenv("JXH_HEALTH_ADDR"))
+	if healthAddr == "" {
+		healthAddr = ":8080"
+	}
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	healthServer := &http.Server{
+		Addr:    healthAddr,
+		Handler: healthMux,
+	}
+	go func() {
+		log.Printf("health check server listening on %s", healthAddr)
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("health check server error: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("health check server shutdown error: %v", err)
+		}
+	}()
+
 	server := napcat.Server{
-		Addr:           cfg.Server.Addr,
 		WSURL:          cfg.OneBot.WSURL,
 		Token:          cfg.OneBot.AccessToken,
 		RequestTimeout: time.Duration(cfg.OneBot.APITimeoutSec) * time.Second,
 		ReconnectDelay: time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second,
 		Handler:        pipeline,
 	}
-	if cfg.OneBot.WSURL != "" {
-		log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
-	} else {
-		log.Printf("starting reverse websocket server on %s", cfg.Server.Addr)
-	}
+	log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
 	if err := server.Serve(ctx); err != nil {
 		log.Fatalf("serve napcat websocket: %v", err)
 	}

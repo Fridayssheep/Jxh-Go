@@ -18,6 +18,7 @@ type ScheduledJob struct {
 	ID        uint64 `gorm:"primaryKey"`
 	Type      string `gorm:"size:16;not null"`
 	TimeHHMM  string `gorm:"column:time_hhmm;size:5;not null"`
+	RunDate   *time.Time
 	GroupID   int64  `gorm:"not null"`
 	Message   string `gorm:"type:text;not null"`
 	Enabled   bool   `gorm:"not null"`
@@ -32,8 +33,7 @@ func (ScheduledJob) TableName() string {
 
 type GroupJoinRequest struct {
 	ID          uint64 `gorm:"primaryKey"`
-	RequestKey  string `gorm:"size:191;not null;uniqueIndex"`
-	Flag        string `gorm:"size:512"`
+	Flag        string `gorm:"size:512;not null;uniqueIndex"`
 	GroupID     int64  `gorm:"index"`
 	UserID      int64  `gorm:"index"`
 	StudentID   string `gorm:"size:64"`

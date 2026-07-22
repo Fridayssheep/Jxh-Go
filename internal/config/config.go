@@ -9,7 +9,6 @@ import (
 
 type Config struct {
 	App       AppConfig       `yaml:"app"`
-	Server    ServerConfig    `yaml:"server"`
 	OneBot    OneBotConfig    `yaml:"onebot"`
 	WPS       WPSConfig       `yaml:"wps"`
 	Database  DatabaseConfig  `yaml:"database"`
@@ -20,10 +19,6 @@ type Config struct {
 
 type AppConfig struct {
 	Timezone string `yaml:"timezone"`
-}
-
-type ServerConfig struct {
-	Addr string `yaml:"addr"`
 }
 
 type OneBotConfig struct {
@@ -51,6 +46,9 @@ type DatabaseConfig struct {
 	ParseTime bool   `yaml:"parse_time"`
 	Loc       string `yaml:"loc"`
 	DSN       string `yaml:"dsn"`
+	// TriggerLogRetentionDays controls how many days of trigger logs to keep.
+	// Zero or negative disables automatic purging.
+	TriggerLogRetentionDays int `yaml:"trigger_log_retention_days"`
 }
 
 type AIConfig struct {
@@ -91,9 +89,6 @@ func Load(path string) (Config, error) {
 func Default() Config {
 	return Config{
 		App: AppConfig{Timezone: "Asia/Shanghai"},
-		Server: ServerConfig{
-			Addr: ":8080",
-		},
 		OneBot: OneBotConfig{
 			WSURL:                "ws://127.0.0.1:3001",
 			APITimeoutSec:        30,
@@ -105,13 +100,14 @@ func Default() Config {
 			TimeoutSec: 120,
 		},
 		Database: DatabaseConfig{
-			Host:      "127.0.0.1",
-			Port:      3306,
-			User:      "jxh",
-			Name:      "jxh_bot",
-			Charset:   "utf8mb4",
-			ParseTime: true,
-			Loc:       "Local",
+			Host:                    "127.0.0.1",
+			Port:                    3306,
+			User:                    "jxh",
+			Name:                    "jxh_bot",
+			Charset:                 "utf8mb4",
+			ParseTime:               true,
+			Loc:                     "Local",
+			TriggerLogRetentionDays: 180,
 		},
 		AI: AIConfig{
 			Enabled:          true,
@@ -132,7 +128,6 @@ func applyEnv(cfg *Config) {
 	}
 	override("JXH_ONEBOT_TOKEN", func(v string) { cfg.OneBot.AccessToken = v })
 	override("JXH_ONEBOT_WS_URL", func(v string) { cfg.OneBot.WSURL = v })
-	override("JXH_SERVER_ADDR", func(v string) { cfg.Server.Addr = v })
 	override("JXH_DATABASE_HOST", func(v string) { cfg.Database.Host = v })
 	override("JXH_DATABASE_PORT", func(v string) {
 		if parsed, err := strconv.Atoi(v); err == nil {
@@ -165,9 +160,6 @@ func applyEnv(cfg *Config) {
 }
 
 func normalize(cfg *Config) {
-	if cfg.Server.Addr == "" {
-		cfg.Server.Addr = ":8080"
-	}
 	if cfg.WPS.Sheet == "" {
 		cfg.WPS.Sheet = "release"
 	}

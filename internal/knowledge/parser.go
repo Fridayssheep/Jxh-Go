@@ -172,7 +172,7 @@ func enrich(raw rawRow, titles map[string]string, children map[string][]string, 
 	}
 	sourceKey := raw.sourceID
 	if sourceKey == "" {
-		sourceKey = normalizeKey(raw.keyword)
+		sourceKey = normalizeLookup(raw.keyword)
 	}
 	category := raw.category
 	if category == "" {
@@ -262,10 +262,6 @@ func uniqueStrings(values []string) []string {
 		out = append(out, trimmed)
 	}
 	return out
-}
-
-func normalizeKey(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func normalizeText(value string) string {

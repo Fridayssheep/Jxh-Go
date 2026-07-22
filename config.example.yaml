@@ -55,6 +55,8 @@ database:
   loc: "Local"
   # 可选完整 DSN。非空时优先使用该字段，忽略上面的 host/port/user/password/name 等拆分字段。
   dsn: ""
+  # 词条触发日志保留天数；默认 180，设为 0 或负数关闭自动清理。
+  trigger_log_retention_days: 180
 
 ai:
   # 是否启用 /ai 入口。关闭或模型配置不完整时 /ai 会直接返回未启用。

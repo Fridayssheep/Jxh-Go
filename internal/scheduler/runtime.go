@@ -29,7 +29,7 @@ type Runtime struct {
 func NewRuntime(opts RuntimeOptions) *Runtime {
 	interval := opts.Interval
 	if interval <= 0 {
-		interval = 10 * time.Second
+		interval = 30 * time.Second
 	}
 	location := opts.Location
 	if location == nil {

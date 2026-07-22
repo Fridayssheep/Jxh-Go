@@ -21,5 +21,6 @@ COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN mkdir -p /app/data/cache && chown -R appuser:appuser /app && chmod +x /usr/local/bin/entrypoint.sh
 
 ENV TZ=Asia/Shanghai
-EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh", "jxh-bot", "-config", "/app/config.yaml"]
+EXPOSE 8080 8081
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["jxh-bot", "-config", "/app/config.yaml"]

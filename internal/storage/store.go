@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/commands"
@@ -57,10 +56,7 @@ MAX(triggered_at) AS last_triggered`, triggerstats.TriggerTypeKeywordReply, trig
 // PurgeOldTriggerLogs deletes trigger log entries older than the given time.
 // Returns the number of rows deleted.
 func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int64, error) {
-	result := s.db.WithContext(ctx).
-		Table((KnowledgeTriggerLog{}).TableName()).
-		Where("triggered_at < ?", before).
-		Delete(nil)
+	result := s.db.WithContext(ctx).Where("triggered_at < ?", before).Delete(&KnowledgeTriggerLog{})
 	return result.RowsAffected, result.Error
 }
 
@@ -92,28 +88,17 @@ func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJob
 		Message:  input.Message,
 		Enabled:  true,
 	}
-	// For daily jobs created after today's schedule time, mark as already run today
-	// to prevent immediate trigger
-	if input.Type == "每天" && input.RunDate == nil {
-		now := time.Now()
-		if now.Format("15:04") >= input.TimeHHMM {
-			nowTime := now
-			job.LastRunAt = &nowTime
-		}
+	if input.Type == scheduler.JobTypeDaily && input.CreatedAt.Format("15:04") >= input.TimeHHMM {
+		createdAt := input.CreatedAt
+		job.LastRunAt = &createdAt
 	}
 	err := s.db.WithContext(ctx).Create(job).Error
 	return job.ID, err
 }
 
-func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) error {
+func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) (bool, error) {
 	result := s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("任务不存在")
-	}
-	return nil
+	return result.RowsAffected > 0, result.Error
 }
 
 func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, error) {

@@ -34,7 +34,7 @@ func (ScheduledJob) TableName() string {
 type GroupJoinRequest struct {
 	ID          uint64 `gorm:"primaryKey"`
 	RequestKey  string `gorm:"size:191;not null;uniqueIndex"`
-	Flag        string `gorm:"size:512"`
+	Flag        string `gorm:"type:mediumtext"`
 	GroupID     int64  `gorm:"index"`
 	UserID      int64  `gorm:"index"`
 	StudentID   string `gorm:"size:64"`

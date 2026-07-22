@@ -72,50 +72,46 @@ func main() {
 		log.Printf("ai service not available: %v", err)
 	}
 	location := applicationLocation(cfg)
+	now := func() time.Time { return time.Now().In(location) }
+	scheduleLocation := schedulerLocation(cfg)
 	triggerStats := triggerstats.NewService(store, triggerstats.Options{
-		Now:            func() time.Time { return time.Now().In(location) },
+		Now:            now,
 		ResolveKeyword: knowledgeIndex.Keyword,
 		Location:       location,
 	})
 	groupRequests := grouprequest.NewService(store, grouprequest.Options{
 		ExportDir: "./data/exports/group_requests",
+		Now:       now,
 		Location:  location,
 	})
-	pipelineOpts := bot.Options{
-		Knowledge:     knowledgeIndex,
-		Reloader:      knowledgeSync,
-		Admin:         commands.NewAdminHandler(store),
+	pipeline := bot.NewPipeline(bot.Options{
+		Knowledge: knowledgeIndex,
+		AI:        aiSvc,
+		Reloader:  knowledgeSync,
+		Admin: commands.NewAdminHandler(store, func() time.Time {
+			return time.Now().In(scheduleLocation)
+		}),
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
-		LinkCleaner:   linkcleaner.NewService(linkcleaner.Options{}),
-	}
-	// Only set AI if service is actually initialized to avoid typed-nil interface trap
-	if aiSvc != nil {
-		pipelineOpts.AI = aiSvc
-	}
-	pipeline := bot.NewPipeline(pipelineOpts)
+		LinkCleaner:   linkcleaner.NewService(),
+	})
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,
 		Send:     pipeline.SendGroupText,
-		Location: schedulerLocation(cfg),
+		Location: scheduleLocation,
 		Logf:     log.Printf,
 	}).Run(ctx)
 
-	// Purge old trigger logs periodically (default 180 days retention)
 	if cfg.Database.TriggerLogRetentionDays > 0 {
-		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays, 24*time.Hour)
+		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
 	}
 
-	// Start health check server
-	healthAddr := ":8080"
-	if envAddr := os.Getenv("JXH_HEALTH_ADDR"); envAddr != "" {
-		healthAddr = envAddr
-	}
+	const healthAddr = "127.0.0.1:8081"
 	healthMux := http.NewServeMux()
-	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok\n"))
+		_, _ = w.Write([]byte("ok\n"))
 	})
 	healthServer := &http.Server{
 		Addr:    healthAddr,

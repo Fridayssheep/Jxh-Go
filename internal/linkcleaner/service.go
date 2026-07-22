@@ -27,36 +27,21 @@ const (
 
 var httpURLPattern = regexp.MustCompile(`(?i)https?://[^\s<>"']+`)
 
-type Options struct {
-	Client       *http.Client
-	Timeout      time.Duration
-	MaxRedirects int
-}
-
 type Service struct {
 	client       *http.Client
 	maxRedirects int
 }
 
-func NewService(opts Options) *Service {
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
+func NewService() *Service {
+	return &Service{
+		client: &http.Client{
+			Timeout: defaultTimeout,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		maxRedirects: defaultMaxRedirects,
 	}
-	client := opts.Client
-	if client == nil {
-		client = &http.Client{}
-	}
-	clientCopy := *client
-	clientCopy.Timeout = timeout
-	clientCopy.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	maxRedirects := opts.MaxRedirects
-	if maxRedirects <= 0 {
-		maxRedirects = defaultMaxRedirects
-	}
-	return &Service{client: &clientCopy, maxRedirects: maxRedirects}
 }
 
 func (s *Service) CleanMessage(ctx context.Context, text string, segments message.Chain) ([]string, error) {

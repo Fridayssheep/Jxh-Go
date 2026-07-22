@@ -11,17 +11,18 @@ import (
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
+	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
 )
 
 type GroupCommandRouter struct {
-	ai            AIAnswerer
+	ai            *ai.Service
 	aiSlots       chan struct{}
-	reloader      Reloader
+	reloader      *knowledge.Syncer
 	admin         *commands.AdminHandler
-	quote         QuoteGenerator
+	quote         *quote.Client
 	groupRequests *grouprequest.Service
 	triggerStats  *triggerstats.Service
 }
@@ -60,19 +61,7 @@ func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 	}
 }
 
-type GroupRequestFetcher interface {
-	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
-}
-
-type GroupMemberRoleResolver interface {
-	GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error)
-}
-
 func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
-	if r == nil {
-		return false, nil
-	}
-	// Normalize full-width spaces to half-width so admin subcommands work with either
 	text := strings.ReplaceAll(strings.TrimSpace(msg.Text), "　", " ")
 	if text == "" {
 		if mentionsSelf(msg) {
@@ -120,18 +109,13 @@ func (r *GroupCommandRouter) handleReload(ctx context.Context, msg GroupMessage,
 	if err != nil || !authorized {
 		return err
 	}
-	if r.reloader != nil {
-		if err := r.reloader.Reload(ctx); err != nil {
-			return sender.SendGroupText(ctx, msg.GroupID, "重载失败："+err.Error())
-		}
+	if err := r.reloader.Sync(ctx); err != nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "重载失败："+err.Error())
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, "重载成功")
 }
 
 func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
-	if r.quote == nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "引用图服务未初始化")
-	}
 	count, err := parseQuoteCount(text)
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "用法：回复一条消息后发送 /q [1-10]")
@@ -139,30 +123,19 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	if msg.ReplyMessageID == 0 {
 		return sender.SendGroupText(ctx, msg.GroupID, "请回复一条消息后使用 /q")
 	}
-	getter, ok := sender.(QuoteMessageGetter)
-	if !ok {
-		return sender.SendGroupText(ctx, msg.GroupID, "NapCat 消息接口未初始化")
-	}
-	quoted, err := getter.GetQuoteMessages(ctx, msg.GroupID, msg.ReplyMessageID, count)
+	quoted, err := sender.GetQuoteMessages(ctx, msg.GroupID, msg.ReplyMessageID, count)
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败："+err.Error())
 	}
-	resolver, _ := sender.(quote.ImageResolver)
 	inputs := make([]quote.MessageInput, 0, len(quoted))
 	for _, message := range quoted {
-		if message.MessageID == msg.MessageID {
-			continue
-		}
 		inputs = append(inputs, quote.MessageInput{
 			UserID: message.UserID, Nickname: message.Nickname,
 			RawMessage: message.RawMessage, Message: message.Message,
 		})
 	}
-	payload := quote.BuildPayload(ctx, inputs, resolver)
+	payload := quote.BuildPayload(ctx, inputs, sender.ResolveImage)
 	if len(payload) == 0 {
-		if len(quoted) == 1 && quoted[0].MessageID == msg.MessageID {
-			return sender.SendGroupText(ctx, msg.GroupID, "你引用的是 /q 命令本身，请引用目标消息")
-		}
 		return sender.SendGroupText(ctx, msg.GroupID, "被引用消息内容为空")
 	}
 	image, err := r.quote.Generate(ctx, payload)
@@ -212,12 +185,6 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
 	answer, sourceKeys, err := r.ai.AnswerWithSources(ctx, question)
 	if err != nil {
-		// Record stats even on error
-		if r.triggerStats != nil && len(sourceKeys) > 0 {
-			if statErr := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); statErr != nil {
-				log.Printf("record ai retrieval trigger failed: %v", statErr)
-			}
-		}
 		return err
 	}
 	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
@@ -241,9 +208,6 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 	if adminText == "" {
 		return sender.SendGroupText(ctx, msg.GroupID, adminHelpText)
 	}
-	if r.admin == nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "管理命令未初始化")
-	}
 	if strings.HasPrefix(adminText, "群申请 ") {
 		return r.handleGroupRequestAdmin(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "群申请 ")))
 	}
@@ -251,20 +215,12 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		return r.handleTriggerStats(ctx, msg, sender, strings.TrimSpace(strings.TrimPrefix(adminText, "词条统计")))
 	}
 	if adminText == "restart" {
-		moderator, ok := sender.(Moderator)
-		if !ok {
-			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 管理接口未初始化")
-		}
-		if err := moderator.SetRestart(ctx); err != nil {
+		if err := sender.SetRestart(ctx); err != nil {
 			return err
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, "已请求重启 NapCat")
 	}
 	if strings.HasPrefix(adminText, "ban ") {
-		moderator, ok := sender.(Moderator)
-		if !ok {
-			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 管理接口未初始化")
-		}
 		atUsers := targetAtUsers(msg)
 		if len(atUsers) == 0 {
 			return sender.SendGroupText(ctx, msg.GroupID, "请 @ 要禁言的用户")
@@ -273,16 +229,15 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "禁言时间格式不正确")
 		}
-		// Ban all mentioned users
-		var failed []int64
+		failed := 0
 		for _, userID := range atUsers {
-			if err := moderator.SetGroupBan(ctx, msg.GroupID, userID, duration); err != nil {
+			if err := sender.SetGroupBan(ctx, msg.GroupID, userID, duration); err != nil {
 				log.Printf("ban group user failed: group=%d user=%d: %v", msg.GroupID, userID, err)
-				failed = append(failed, userID)
+				failed++
 			}
 		}
-		if len(failed) > 0 {
-			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已禁言 %d 人，%d 人失败\n提示：精小弘不能禁言群主、群管理员或机器人自己！", len(atUsers)-len(failed), len(failed)))
+		if failed > 0 {
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已禁言 %d 人，%d 人失败\n提示：精小弘不能禁言群主、群管理员或机器人自己！", len(atUsers)-failed, failed))
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已禁言 %d 人", len(atUsers)))
 	}
@@ -294,31 +249,23 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 }
 
 func authorizeNativeAdmin(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
-	resolver, ok := sender.(GroupMemberRoleResolver)
-	if !ok {
-		log.Printf("admin role lookup unavailable: sender %T does not implement GroupMemberRoleResolver", sender)
-		return false, sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
-	}
-	role, err := resolver.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
+	role, err := sender.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
 	if err != nil {
 		log.Printf("query admin actor role failed: group=%d user=%d: %v", msg.GroupID, msg.UserID, err)
 		return false, sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
 	}
-	role, ok = commands.NormalizeGroupRole(role)
+	normalizedRole, ok := commands.NormalizeGroupRole(role)
 	if !ok {
 		log.Printf("query admin actor role returned invalid role: group=%d user=%d role=%q", msg.GroupID, msg.UserID, role)
 		return false, sender.SendGroupText(ctx, msg.GroupID, "暂时无法确认群身份，请稍后重试")
 	}
-	if !commands.IsNativeGroupAdmin(role) {
+	if !commands.IsNativeGroupAdmin(normalizedRole) {
 		return false, sender.SendGroupText(ctx, msg.GroupID, "~你好像没有权限执行该项操作耶~")
 	}
 	return true, nil
 }
 
 func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
-	if r.groupRequests == nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "群申请登记未初始化")
-	}
 	switch {
 	case strings.HasPrefix(text, "导出"):
 		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "导出")))
@@ -334,10 +281,6 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群申请 %d 条，按 %d 个群分别保存到：%s", result.Count, len(result.Files), result.Dir))
 	case strings.HasPrefix(text, "同步"):
-		fetcher, ok := sender.(GroupRequestFetcher)
-		if !ok {
-			return sender.SendGroupText(ctx, msg.GroupID, "NapCat 群申请接口未初始化")
-		}
 		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "同步")))
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 同步 [数量]")
@@ -345,7 +288,7 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 		if limit <= 0 {
 			limit = 20
 		}
-		records, err := fetcher.FetchGroupJoinRequests(ctx, limit)
+		records, err := sender.FetchGroupJoinRequests(ctx, limit)
 		if err != nil {
 			return err
 		}
@@ -361,9 +304,6 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 }
 
 func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
-	if r.triggerStats == nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "词条统计未初始化")
-	}
 	days, err := parseStatsDays(text)
 	if err != nil {
 		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 词条统计 [7d|30d|全部]")
@@ -394,17 +334,20 @@ func targetAtUsers(msg GroupMessage) []int64 {
 
 func parseBanDuration(raw string) (time.Duration, error) {
 	fields := strings.Fields(raw)
-	if len(fields) == 0 {
-		return 0, fmt.Errorf("empty duration")
+	if len(fields) != 1 {
+		return 0, fmt.Errorf("invalid duration")
 	}
-	if d, err := time.ParseDuration(fields[0]); err == nil {
-		return d, nil
+	duration, err := time.ParseDuration(fields[0])
+	if err != nil {
+		duration, err = time.ParseDuration(fields[0] + "s")
 	}
-	seconds, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil {
 		return 0, err
 	}
-	return time.Duration(seconds) * time.Second, nil
+	if duration <= 0 {
+		return 0, fmt.Errorf("duration must be positive")
+	}
+	return duration, nil
 }
 
 func parseOptionalLimit(raw string) (int, error) {
@@ -414,26 +357,21 @@ func parseOptionalLimit(raw string) (int, error) {
 	}
 	raw = strings.TrimPrefix(raw, "最近")
 	limit, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || limit < 0 {
+	if err != nil || limit <= 0 {
 		return 0, fmt.Errorf("invalid limit")
 	}
 	return limit, nil
 }
 
 func parseStatsDays(raw string) (int, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		raw = "7d"
-	}
-	if raw == "全部" {
+	switch strings.TrimSpace(raw) {
+	case "", "7d":
+		return 7, nil
+	case "30d":
+		return 30, nil
+	case "全部":
 		return 0, nil
-	}
-	if !strings.HasSuffix(raw, "d") {
+	default:
 		return 0, fmt.Errorf("invalid range")
 	}
-	days, err := strconv.Atoi(strings.TrimSuffix(raw, "d"))
-	if err != nil || days <= 0 {
-		return 0, fmt.Errorf("invalid range")
-	}
-	return days, nil
 }

@@ -3,6 +3,7 @@ package triggerstats
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -113,37 +114,26 @@ func (s *Service) PurgeOldLogs(ctx context.Context, retentionDays int) (int64, e
 	if s == nil || s.store == nil || retentionDays <= 0 {
 		return 0, nil
 	}
-	cutoff := s.now().AddDate(0, 0, -retentionDays)
+	cutoff := s.now().In(s.location).AddDate(0, 0, -retentionDays)
 	return s.store.PurgeOldTriggerLogs(ctx, cutoff)
 }
 
-// RunPurgeLoop periodically purges old trigger logs.
-// Blocks until ctx is done.
-func (s *Service) RunPurgeLoop(ctx context.Context, retentionDays int, interval time.Duration) {
+func (s *Service) RunPurgeLoop(ctx context.Context, retentionDays int) {
 	if retentionDays <= 0 {
 		return
 	}
-	if interval <= 0 {
-		interval = 24 * time.Hour
-	}
-	// Initial run
-	if deleted, err := s.PurgeOldLogs(ctx, retentionDays); err != nil {
-		fmt.Printf("purge trigger logs failed: %v\n", err)
-	} else if deleted > 0 {
-		fmt.Printf("purged %d old trigger log entries\n", deleted)
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 	for {
+		if deleted, err := s.PurgeOldLogs(ctx, retentionDays); err != nil {
+			log.Printf("purge trigger logs failed: %v", err)
+		} else if deleted > 0 {
+			log.Printf("purged %d old trigger log entries", deleted)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if deleted, err := s.PurgeOldLogs(ctx, retentionDays); err != nil {
-				fmt.Printf("purge trigger logs failed: %v\n", err)
-			} else if deleted > 0 {
-				fmt.Printf("purged %d old trigger log entries\n", deleted)
-			}
 		}
 	}
 }
@@ -155,7 +145,7 @@ func (s *Service) SummariesForDays(ctx context.Context, days, limit int) ([]Summ
 	if days == 0 {
 		return s.Summaries(ctx, nil, limit)
 	}
-	now := s.now()
+	now := s.now().In(s.location)
 	year, month, day := now.Date()
 	since := time.Date(year, month, day, 0, 0, 0, 0, now.Location()).AddDate(0, 0, -days+1)
 	return s.Summaries(ctx, &since, limit)

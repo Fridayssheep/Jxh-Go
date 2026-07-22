@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_jobs` (
 CREATE TABLE IF NOT EXISTS `group_join_requests` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
   `request_key` varchar(191) NOT NULL COMMENT '群申请业务去重键',
-  `flag` varchar(512) DEFAULT NULL COMMENT '处理群申请时需要的 flag',
+  `flag` mediumtext DEFAULT NULL COMMENT '处理群申请时需要的原始 flag',
   `group_id` bigint DEFAULT NULL COMMENT 'QQ群号',
   `user_id` bigint DEFAULT NULL COMMENT '申请人 QQ',
   `student_id` varchar(64) DEFAULT NULL COMMENT '申请信息中显式填写的学号',

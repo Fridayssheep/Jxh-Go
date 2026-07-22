@@ -28,7 +28,7 @@ func (s *Service) ExportForDays(ctx context.Context, days int) (ExportResult, er
 	if err := os.MkdirAll(s.exportDir, 0o755); err != nil {
 		return ExportResult{}, err
 	}
-	temp, err := os.CreateTemp(s.exportDir, "trigger_stats_"+rangeFileLabel(days)+"_"+s.now().Format("20060102_150405")+"_*.xlsx")
+	temp, err := os.CreateTemp(s.exportDir, "trigger_stats_"+rangeFileLabel(days)+"_"+s.now().In(s.location).Format("20060102_150405")+"_*.xlsx")
 	if err != nil {
 		return ExportResult{}, err
 	}

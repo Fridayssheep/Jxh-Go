@@ -29,8 +29,7 @@ func IsDue(job Job, now time.Time) bool {
 	}
 	switch job.Type {
 	case JobTypeOnce:
-		// Single-run tasks require a run_date and must match that date
-		if job.RunDate == nil {
+		if job.RunDate == nil || job.TimeHHMM == "" {
 			return false
 		}
 		runDateOnly := job.RunDate.Format("2006-01-02")
@@ -41,25 +40,9 @@ func IsDue(job Job, now time.Time) bool {
 		if alreadyRanToday(job, now) {
 			return false
 		}
-		return job.TimeHHMM != "" && now.Format("15:04") >= job.TimeHHMM
-	case JobTypeDaily:
-		if job.TimeHHMM == "" {
-			return false
-		}
-		// For newly created daily jobs, skip first trigger if created after schedule time today
-		if job.LastRunAt == nil {
-			// Never run before - only trigger if we're past the scheduled time
-			if now.Format("15:04") >= job.TimeHHMM {
-				// Check if this is the first poll after creation and still within the same day
-				// We want to skip same-day execution on creation, so mark as "already ran today"
-				return false
-			}
-			return false
-		}
-		if alreadyRanToday(job, now) {
-			return false
-		}
 		return now.Format("15:04") >= job.TimeHHMM
+	case JobTypeDaily:
+		return job.TimeHHMM != "" && !alreadyRanToday(job, now) && now.Format("15:04") >= job.TimeHHMM
 	default:
 		return false
 	}

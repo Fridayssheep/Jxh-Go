@@ -8,9 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
+	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
@@ -19,29 +21,15 @@ import (
 type Sender interface {
 	SendGroupText(ctx context.Context, groupID int64, text string) error
 	SendGroupMessage(ctx context.Context, groupID int64, message message.Chain) error
-}
-
-type Reloader interface {
-	Reload(ctx context.Context) error
-}
-
-type AIAnswerer interface {
-	AnswerWithSources(ctx context.Context, question string) (string, []string, error)
-}
-
-type LinkCleaner interface {
-	CleanMessage(ctx context.Context, text string, segments message.Chain) ([]string, error)
+	GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]QuotedMessage, error)
+	ResolveImage(ctx context.Context, file string) (string, error)
+	SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error
+	SetRestart(ctx context.Context) error
+	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
+	GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error)
 }
 
 const trackedLinkReplyPrefix = "精小弘觉得这个链接十分甚至九分不对劲，帮你移除了里面的TrackID："
-
-type QuoteGenerator interface {
-	Generate(ctx context.Context, payload quote.Payload) (string, error)
-}
-
-type QuoteMessageGetter interface {
-	GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]QuotedMessage, error)
-}
 
 type QuotedMessage struct {
 	MessageID  int64
@@ -51,20 +39,15 @@ type QuotedMessage struct {
 	Message    message.Chain
 }
 
-type Moderator interface {
-	SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error
-	SetRestart(ctx context.Context) error
-}
-
 type Options struct {
 	Knowledge     *knowledge.IndexRef
-	AI            AIAnswerer
-	Reloader      Reloader
+	AI            *ai.Service
+	Reloader      *knowledge.Syncer
 	Admin         *commands.AdminHandler
-	Quote         QuoteGenerator
+	Quote         *quote.Client
 	GroupRequests *grouprequest.Service
 	TriggerStats  *triggerstats.Service
-	LinkCleaner   LinkCleaner
+	LinkCleaner   *linkcleaner.Service
 }
 
 type Pipeline struct {
@@ -73,7 +56,7 @@ type Pipeline struct {
 	sender        Sender
 	groupRequests *grouprequest.Service
 	stats         *triggerstats.Service
-	linkCleaner   LinkCleaner
+	linkCleaner   *linkcleaner.Service
 	commandRouter *GroupCommandRouter
 }
 
@@ -111,6 +94,11 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	if sender == nil || msg.IsSelf {
 		return nil
 	}
+	text := strings.TrimSpace(msg.Text)
+	handled, err := p.commandRouter.Handle(ctx, msg, sender)
+	if handled || err != nil {
+		return err
+	}
 	if p.linkCleaner != nil {
 		cleaned, err := p.linkCleaner.CleanMessage(ctx, msg.Text, msg.Segments)
 		if err != nil {
@@ -118,13 +106,6 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 		if len(cleaned) > 0 {
 			return sender.SendGroupText(ctx, msg.GroupID, trackedLinkReplyPrefix+"\n"+strings.Join(cleaned, "\n"))
-		}
-	}
-	text := strings.TrimSpace(msg.Text)
-	if p.commandRouter != nil {
-		handled, err := p.commandRouter.Handle(ctx, msg, sender)
-		if handled || err != nil {
-			return err
 		}
 	}
 	if text == "" {
@@ -160,7 +141,7 @@ func (p *Pipeline) HandleGroupIncrease(ctx context.Context, groupID int64, userI
 
 func (p *Pipeline) HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
 	if p.groupRequests == nil {
-		return nil
+		return fmt.Errorf("group request service is not initialized")
 	}
 	return p.groupRequests.Record(ctx, record)
 }

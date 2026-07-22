@@ -19,7 +19,7 @@ const (
 type SchedulerStore interface {
 	ListScheduledJobs(ctx context.Context) ([]ScheduledJobView, error)
 	AddScheduledJob(ctx context.Context, job ScheduledJobInput) (uint64, error)
-	RemoveScheduledJob(ctx context.Context, id uint64) error
+	RemoveScheduledJob(ctx context.Context, id uint64) (bool, error)
 }
 
 type ScheduledJobInput struct {
@@ -89,7 +89,14 @@ func (h *AdminHandler) Execute(ctx context.Context, input string) (string, error
 		if err != nil {
 			return "任务编号格式不正确", nil
 		}
-		return "已移除定时任务", h.store.RemoveScheduledJob(ctx, id)
+		removed, err := h.store.RemoveScheduledJob(ctx, id)
+		if err != nil {
+			return "", err
+		}
+		if !removed {
+			return "未找到该定时任务", nil
+		}
+		return "已移除定时任务", nil
 	default:
 		return "未知管理命令", nil
 	}

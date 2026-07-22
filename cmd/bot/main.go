@@ -84,7 +84,7 @@ func main() {
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
-		LinkCleaner:   linkcleaner.NewService(linkcleaner.Options{}),
+		LinkCleaner:   linkcleaner.NewService(),
 	})
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,

@@ -71,8 +71,9 @@ func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJob
 	return job.ID, err
 }
 
-func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) error {
-	return s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false).Error
+func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) (bool, error) {
+	result := s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false)
+	return result.RowsAffected > 0, result.Error
 }
 
 func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, error) {

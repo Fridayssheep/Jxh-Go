@@ -31,10 +31,6 @@ func NewSyncer(opts SyncerOptions) *Syncer {
 	}
 }
 
-func (s *Syncer) Reload(ctx context.Context) error {
-	return s.Sync(ctx)
-}
-
 func (s *Syncer) Sync(ctx context.Context) error {
 	if s == nil {
 		return fmt.Errorf("knowledge syncer is nil")

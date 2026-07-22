@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -19,22 +20,13 @@ import (
 	"github.com/zjutjh/napcat-sdk/message"
 )
 
-type Handler interface {
-	HandleGroupMessage(ctx context.Context, msg bot.GroupMessage) error
-	HandleGroupIncrease(ctx context.Context, groupID int64, userID int64) error
-}
-
-type groupJoinRequestHandler interface {
-	HandleGroupJoinRequest(ctx context.Context, record grouprequest.Record) error
-}
-
 type Server struct {
 	Addr           string
 	WSURL          string
 	Token          string
 	RequestTimeout time.Duration
 	ReconnectDelay time.Duration
-	Handler        Handler
+	Handler        *bot.Pipeline
 }
 
 func (s Server) Serve(ctx context.Context) error {
@@ -78,9 +70,10 @@ func (s Server) serveForwardWebSocket(ctx context.Context) error {
 
 func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 	sender := SDKSender{client: client}
-	if setter, ok := s.Handler.(interface{ SetSender(bot.Sender) }); ok {
-		setter.SetSender(sender)
+	if s.Handler == nil {
+		return
 	}
+	s.Handler.SetSender(sender)
 	events := client.Events()
 	for {
 		select {
@@ -122,10 +115,7 @@ func (s Server) handleEvent(ctx context.Context, client *napcatsdk.Client, ev ev
 		if record, ok, err := grouprequest.RecordFromEvent(e.Raw()); err != nil {
 			return err
 		} else if ok {
-			if handler, ok := s.Handler.(groupJoinRequestHandler); ok {
-				return handler.HandleGroupJoinRequest(ctx, record)
-			}
-			return nil
+			return s.Handler.HandleGroupJoinRequest(ctx, record)
 		}
 		var notice struct {
 			PostType   string `json:"post_type"`
@@ -159,12 +149,9 @@ func toGroupMessage(e *event.GroupMessage) bot.GroupMessage {
 }
 
 func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *event.GroupMessage) error {
-	if client == nil || e == nil || e.MessageID == 0 {
-		return nil
-	}
+	groupID := strconv.FormatInt(e.GroupID, 10)
 	_, err := client.API().MarkGroupMsgAsRead(ctx, api.MarkGroupMsgAsReadRequest{
-		GroupID:   strconv.FormatInt(e.GroupID, 10),
-		MessageID: strconv.FormatInt(e.MessageID, 10),
+		GroupID: &groupID,
 	})
 	return err
 }
@@ -189,9 +176,14 @@ func (s SDKSender) SendGroupText(ctx context.Context, groupID int64, text string
 }
 
 func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg message.Chain) error {
-	_, err := s.client.API().SendGroupMsg(ctx, api.SendGroupMsgRequest{
-		GroupID: strconv.FormatInt(groupID, 10),
-		Message: msg,
+	encoded, err := api.NewOB11Message(msg)
+	if err != nil {
+		return fmt.Errorf("encode group message: %w", err)
+	}
+	groupIDText := strconv.FormatInt(groupID, 10)
+	_, err = s.client.API().SendGroupMsg(ctx, api.SendGroupMsgRequest{
+		GroupID: &groupIDText,
+		Message: encoded,
 	})
 	return err
 }
@@ -237,7 +229,6 @@ func (m *oneBotMessage) UnmarshalJSON(data []byte) error {
 
 type quoteMessage struct {
 	MessageID  oneBotInt64   `json:"message_id"`
-	MessageSeq oneBotInt64   `json:"message_seq"`
 	UserID     oneBotInt64   `json:"user_id"`
 	RawMessage string        `json:"raw_message"`
 	Sender     quoteSender   `json:"sender"`
@@ -248,57 +239,41 @@ func (s SDKSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64
 	resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
 		GroupID: strconv.FormatInt(groupID, 10),
 		UserID:  strconv.FormatInt(userID, 10),
-		NoCache: true,
+		NoCache: &api.GetGroupMemberInfoRequestNoCacheUnion{Raw: []byte("true")},
 	})
 	if err != nil {
 		return "", err
 	}
-	return resp.Role, nil
+	if resp.Role == nil {
+		return "", fmt.Errorf("NapCat 群成员信息缺少 role")
+	}
+	return *resp.Role, nil
 }
 
 func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {
-	target, err := s.getQuoteMessage(ctx, messageID)
-	if err != nil {
-		return nil, err
-	}
-	if count <= 1 {
-		messages := []bot.QuotedMessage{target.quoted()}
-		s.enrichQuoteAtNames(ctx, groupID, messages)
-		return messages, nil
-	}
-	messageSeq := int64(target.MessageSeq)
-	if messageSeq <= 0 {
-		return nil, fmt.Errorf("被引用消息缺少 message_seq")
-	}
 	var history struct {
 		Messages []quoteMessage `json:"messages"`
 	}
-	err = s.client.API().Call(ctx, string(api.ActionGetGroupMsgHistory), api.GetGroupMsgHistoryRequest{
-		GroupID:    strconv.FormatInt(groupID, 10),
-		MessageSeq: strconv.FormatInt(max(1, messageSeq-int64(count-1)), 10),
-		Count:      int64(count),
+	messageSeq := strconv.FormatInt(messageID, 10)
+	err := s.client.API().Call(ctx, string(api.ActionGetGroupMsgHistory), api.GetGroupMsgHistoryRequest{
+		GroupID:      strconv.FormatInt(groupID, 10),
+		MessageSeq:   &messageSeq,
+		Count:        float64(count),
+		ReverseOrder: true,
 	}, &history)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("按引用消息获取群历史失败: %w", err)
 	}
-	messages := make([]bot.QuotedMessage, 0, count)
-	targetFound := false
-	for _, message := range history.Messages {
-		quoted := message.quoted()
-		messages = append(messages, quoted)
-		if quoted.MessageID == messageID {
-			targetFound = true
-			break
-		}
-		if len(messages) == count {
-			break
-		}
+	targetIndex := slices.IndexFunc(history.Messages, func(message quoteMessage) bool {
+		return int64(message.MessageID) == messageID
+	})
+	if targetIndex < 0 {
+		return nil, fmt.Errorf("NapCat 返回的群历史中未找到被引用消息 %d", messageID)
 	}
-	if !targetFound {
-		messages = append(messages, target.quoted())
-		if len(messages) > count {
-			messages = messages[len(messages)-count:]
-		}
+	start := max(0, targetIndex-count+1)
+	messages := make([]bot.QuotedMessage, 0, targetIndex-start+1)
+	for _, message := range history.Messages[start : targetIndex+1] {
+		messages = append(messages, message.quoted())
 	}
 	s.enrichQuoteAtNames(ctx, groupID, messages)
 	return messages, nil
@@ -323,10 +298,14 @@ func (s SDKSender) enrichQuoteAtNames(ctx context.Context, groupID int64, messag
 				resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
 					GroupID: strconv.FormatInt(groupID, 10),
 					UserID:  strconv.FormatInt(userID, 10),
-					NoCache: true,
+					NoCache: &api.GetGroupMemberInfoRequestNoCacheUnion{Raw: []byte("true")},
 				})
 				if err == nil {
-					name = senderNickname(quoteSender{Card: strings.TrimSpace(resp.Card), Nickname: strings.TrimSpace(resp.Nickname)})
+					card := ""
+					if resp.Card != nil {
+						card = strings.TrimSpace(*resp.Card)
+					}
+					name = senderNickname(quoteSender{Card: card, Nickname: strings.TrimSpace(resp.Nickname)})
 				}
 				names[qq] = name
 			}
@@ -345,12 +324,6 @@ func (s SDKSender) enrichQuoteAtNames(ctx context.Context, groupID int64, messag
 	}
 }
 
-func (s SDKSender) getQuoteMessage(ctx context.Context, messageID int64) (quoteMessage, error) {
-	var message quoteMessage
-	err := s.client.API().Call(ctx, string(api.ActionGetMsg), api.GetMsgRequest{MessageID: messageID}, &message)
-	return message, err
-}
-
 func (m quoteMessage) quoted() bot.QuotedMessage {
 	userID := int64(m.UserID)
 	if userID == 0 {
@@ -363,24 +336,24 @@ func (m quoteMessage) quoted() bot.QuotedMessage {
 }
 
 func (s SDKSender) ResolveImage(ctx context.Context, file string) (string, error) {
-	var data struct {
-		URL  string `json:"url"`
-		File string `json:"file"`
-	}
-	if err := s.client.API().Call(ctx, "get_image", map[string]any{"file": file}, &data); err != nil {
+	data, err := s.client.API().GetImage(ctx, api.GetImageRequest{File: &file})
+	if err != nil {
 		return "", err
 	}
-	if data.URL != "" {
-		return data.URL, nil
+	if data.URL != nil && *data.URL != "" {
+		return *data.URL, nil
 	}
-	return data.File, nil
+	if data.File != nil {
+		return *data.File, nil
+	}
+	return "", nil
 }
 
 func (s SDKSender) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
 	_, err := s.client.API().SetGroupBan(ctx, api.SetGroupBanRequest{
 		GroupID:  strconv.FormatInt(groupID, 10),
 		UserID:   strconv.FormatInt(userID, 10),
-		Duration: int64(duration.Seconds()),
+		Duration: api.SetGroupBanRequestDurationUnion{Raw: []byte(strconv.FormatInt(int64(duration.Seconds()), 10))},
 	})
 	return err
 }
@@ -391,16 +364,13 @@ func (s SDKSender) SetRestart(ctx context.Context) error {
 }
 
 func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
-	if count <= 0 {
-		count = 20
-	}
-	resp, err := s.client.API().GetGroupSystemMsg(ctx, api.GetGroupSystemMsgRequest{Count: count})
+	resp, err := s.client.API().GetGroupSystemMsg(ctx, api.GetGroupSystemMsgRequest{
+		Count: api.GetGroupSystemMsgRequestCountUnion{Raw: []byte(strconv.Itoa(count))},
+	})
 	if err != nil {
 		return nil, err
 	}
-	invited := append([]map[string]any{}, resp.InvitedRequest...)
-	invited = append(invited, resp.InvitedRequests...)
-	return grouprequest.RecordsFromSystemMessages(resp.JoinRequests, invited, time.Now()), nil
+	return grouprequest.RecordsFromSystemMessages(resp.JoinRequests, resp.InvitedRequests, time.Now()), nil
 }
 
 func extractAtUsers(chain message.Chain) []int64 {

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
+	"github.com/zjutjh/napcat-sdk/api"
 )
 
 const (
@@ -87,7 +88,7 @@ func NewService(store Store, opts Options) *Service {
 
 func (s *Service) Record(ctx context.Context, record Record) error {
 	if s == nil || s.store == nil {
-		return nil
+		return fmt.Errorf("群申请存储未初始化")
 	}
 	record = normalizeRecord(record, s.now())
 	return s.store.UpsertGroupJoinRequest(ctx, record)
@@ -134,36 +135,78 @@ func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 
 // RecordFromEvent parses OneBot group request events that NapCat SDK exposes as UnknownEvent.
 func RecordFromEvent(raw []byte) (Record, bool, error) {
-	var event map[string]any
+	var event struct {
+		Time        int64  `json:"time"`
+		PostType    string `json:"post_type"`
+		RequestType string `json:"request_type"`
+		SubType     string `json:"sub_type"`
+		GroupID     int64  `json:"group_id"`
+		UserID      int64  `json:"user_id"`
+		Comment     string `json:"comment"`
+		Flag        string `json:"flag"`
+	}
 	if err := json.Unmarshal(raw, &event); err != nil {
 		return Record{}, false, err
 	}
-	if anyString(event["post_type"]) != "request" || anyString(event["request_type"]) != "group" {
+	if event.PostType != "request" || event.RequestType != "group" {
 		return Record{}, false, nil
 	}
-	record := recordFromMap(event, SourceEvent, time.Unix(anyInt64(event["time"]), 0))
-	record.RawJSON = string(raw)
-	return record, true, nil
+	var requestedAt time.Time
+	if event.Time > 0 {
+		requestedAt = time.Unix(event.Time, 0)
+	}
+	return Record{
+		RequestKey:  event.Flag,
+		Flag:        event.Flag,
+		GroupID:     event.GroupID,
+		UserID:      event.UserID,
+		StudentID:   extractStudentID(event.Comment),
+		StudentName: extractStudentName(event.Comment),
+		SubType:     event.SubType,
+		Comment:     event.Comment,
+		Status:      StatusPending,
+		Source:      SourceEvent,
+		RawJSON:     string(raw),
+		RequestedAt: requestedAt,
+	}, true, nil
 }
 
 // RecordsFromSystemMessages normalizes get_group_system_msg join and invite rows.
-func RecordsFromSystemMessages(joinRequests, invitedRequests []map[string]any, now time.Time) []Record {
+func RecordsFromSystemMessages(joinRequests, invitedRequests []api.OB11Notify, now time.Time) []Record {
 	records := make([]Record, 0, len(joinRequests)+len(invitedRequests))
 	for _, raw := range joinRequests {
-		record := recordFromMap(raw, SourceSystem, now)
-		if record.SubType == "" {
-			record.SubType = "add"
-		}
-		records = append(records, record)
+		records = append(records, recordFromSystemMessage(raw, "add", now))
 	}
 	for _, raw := range invitedRequests {
-		record := recordFromMap(raw, SourceSystem, now)
-		if record.SubType == "" {
-			record.SubType = "invite"
-		}
-		records = append(records, record)
+		records = append(records, recordFromSystemMessage(raw, "invite", now))
 	}
 	return records
+}
+
+func recordFromSystemMessage(raw api.OB11Notify, subType string, now time.Time) Record {
+	flag := ""
+	if raw.RequestID > 0 {
+		flag = strconv.FormatInt(int64(raw.RequestID), 10)
+	}
+	status := StatusPending
+	if raw.Checked {
+		status = StatusSeen
+	}
+	rawJSON, _ := json.Marshal(raw)
+	return Record{
+		RequestKey:  flag,
+		Flag:        flag,
+		GroupID:     int64(raw.GroupID),
+		UserID:      int64(raw.InvitorUin),
+		StudentID:   extractStudentID(raw.Message),
+		StudentName: extractStudentName(raw.Message),
+		SubType:     subType,
+		Comment:     raw.Message,
+		Status:      status,
+		Source:      SourceSystem,
+		RawJSON:     string(rawJSON),
+		RequestedAt: now,
+	}
 }
 
 func normalizeRecord(record Record, now time.Time) Record {
@@ -192,35 +235,6 @@ func normalizeRecord(record Record, now time.Time) Record {
 		}
 	}
 	return record
-}
-
-func recordFromMap(raw map[string]any, source string, fallbackTime time.Time) Record {
-	requestedAt := timeFromMap(raw, fallbackTime, "time", "request_time", "timestamp", "create_time")
-	groupID := firstInt64(raw, "group_id", "groupId")
-	userID := firstInt64(raw, "user_id", "requester_uin", "requester_id", "uin", "qq")
-	flag := firstString(raw, "flag", "request_id", "seq")
-	comment := firstString(raw, "comment", "message", "request_content", "answer", "reason")
-	rawJSON, _ := json.Marshal(raw)
-	status := StatusPending
-	if firstBool(raw, "checked") {
-		status = StatusSeen
-	}
-	return normalizeRecord(Record{
-		RequestKey:  flag,
-		Flag:        flag,
-		GroupID:     groupID,
-		UserID:      userID,
-		StudentID:   extractStudentID(comment),
-		StudentName: extractStudentName(comment),
-		SubType:     firstString(raw, "sub_type", "type"),
-		Comment:     comment,
-		Status:      status,
-		Source:      source,
-		RawJSON:     string(rawJSON),
-		RequestedAt: requestedAt,
-		FirstSeenAt: fallbackTime,
-		LastSeenAt:  fallbackTime,
-	}, fallbackTime)
 }
 
 func stableKey(record Record) string {
@@ -353,96 +367,4 @@ func formatTime(t time.Time) string {
 		return ""
 	}
 	return t.Format("2006-01-02 15:04:05")
-}
-
-func timeFromMap(raw map[string]any, fallback time.Time, keys ...string) time.Time {
-	for _, key := range keys {
-		if ts := anyInt64(raw[key]); ts > 0 {
-			return time.Unix(ts, 0)
-		}
-	}
-	return fallback
-}
-
-func firstString(raw map[string]any, keys ...string) string {
-	for _, key := range keys {
-		if value := anyString(raw[key]); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func firstInt64(raw map[string]any, keys ...string) int64 {
-	for _, key := range keys {
-		if value := anyInt64(raw[key]); value != 0 {
-			return value
-		}
-	}
-	return 0
-}
-
-func firstBool(raw map[string]any, keys ...string) bool {
-	for _, key := range keys {
-		switch value := raw[key].(type) {
-		case bool:
-			if value {
-				return true
-			}
-		case float64:
-			if value != 0 {
-				return true
-			}
-		case int:
-			if value != 0 {
-				return true
-			}
-		case int64:
-			if value != 0 {
-				return true
-			}
-		case string:
-			parsed, err := strconv.ParseBool(strings.TrimSpace(value))
-			if err == nil && parsed {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func anyString(v any) string {
-	switch value := v.(type) {
-	case string:
-		return strings.TrimSpace(value)
-	case float64:
-		return strconv.FormatInt(int64(value), 10)
-	case int:
-		return strconv.Itoa(value)
-	case int64:
-		return strconv.FormatInt(value, 10)
-	case json.Number:
-		return value.String()
-	default:
-		return ""
-	}
-}
-
-func anyInt64(v any) int64 {
-	switch value := v.(type) {
-	case int64:
-		return value
-	case int:
-		return int64(value)
-	case float64:
-		return int64(value)
-	case json.Number:
-		parsed, _ := value.Int64()
-		return parsed
-	case string:
-		parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		return parsed
-	default:
-		return 0
-	}
 }

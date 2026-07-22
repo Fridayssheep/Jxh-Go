@@ -183,6 +183,7 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
 		return err
 	}
+	// Only record retrieval stats after the answer was actually delivered.
 	if r.triggerStats != nil {
 		if err := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); err != nil {
 			// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。

@@ -39,7 +39,7 @@ services:
   quote:
     build:
       context: "https://github.com/zjutjh/qq-quote-generator.git#${QQ_QUOTE_REF:-main}"
-    image: jxh-quote:local
+    image: jxh-quote:latest
     container_name: jxh-quote
     restart: unless-stopped
     ports:
@@ -71,10 +71,11 @@ services:
       JXH_AI_BASE_URL: ${JXH_AI_BASE_URL:-}
       JXH_AI_API_KEY: ${JXH_AI_API_KEY:-}
       JXH_AI_MODEL: ${JXH_AI_MODEL:-}
+      JXH_HEALTH_ADDR: ":${HEALTH_PORT:-8080}"
     volumes:
       - ./data:/app/data
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8081/healthz >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:${HEALTH_PORT:-8080}/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

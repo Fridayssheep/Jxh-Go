@@ -33,7 +33,9 @@ func IsDue(job Job, now time.Time) bool {
 		if job.RunDate == nil {
 			return false
 		}
-		runDateOnly := job.RunDate.Format("2006-01-02")
+		// Compare in now's location: RunDate may carry the DB DSN loc after a
+		// round-trip, which need not equal the scheduler timezone.
+		runDateOnly := job.RunDate.In(now.Location()).Format("2006-01-02")
 		nowDateOnly := now.Format("2006-01-02")
 		if runDateOnly != nowDateOnly {
 			return false
@@ -46,16 +48,10 @@ func IsDue(job Job, now time.Time) bool {
 		if job.TimeHHMM == "" {
 			return false
 		}
-		// For newly created daily jobs, skip first trigger if created after schedule time today
-		if job.LastRunAt == nil {
-			// Never run before - only trigger if we're past the scheduled time
-			if now.Format("15:04") >= job.TimeHHMM {
-				// Check if this is the first poll after creation and still within the same day
-				// We want to skip same-day execution on creation, so mark as "already ran today"
-				return false
-			}
-			return false
-		}
+		// alreadyRanToday guards same-day repeats. Same-day suppression for a job
+		// created after its scheduled time is handled at creation by seeding
+		// LastRunAt (see storage.AddScheduledJob), so here a nil LastRunAt simply
+		// means "never fired" and should trigger once the time is reached.
 		if alreadyRanToday(job, now) {
 			return false
 		}

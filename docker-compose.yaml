@@ -59,7 +59,6 @@ services:
       quote:
         condition: service_started
     environment:
-      # PUID/PGID for NAS deployments (Synology/QNAP) to match host user permissions
       PUID: ${PUID:-10001}
       PGID: ${PGID:-10001}
       JXH_ONEBOT_WS_URL: ws://napcat:3001

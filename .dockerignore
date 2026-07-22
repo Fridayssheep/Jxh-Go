@@ -7,4 +7,6 @@
 !internal/
 !internal/**
 !config.example.yaml
+!scripts/
+!scripts/**
 

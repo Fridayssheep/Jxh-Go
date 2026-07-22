@@ -133,9 +133,8 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
 	model := groupJoinRequestToModel(record)
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "request_key"}},
+		Columns: []clause.Column{{Name: "flag"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"flag":         model.Flag,
 			"group_id":     model.GroupID,
 			"user_id":      model.UserID,
 			"student_id":   model.StudentID,
@@ -170,7 +169,6 @@ func (s *Store) ListGroupJoinRequests(ctx context.Context, limit int) ([]groupre
 func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 	return GroupJoinRequest{
 		ID:          record.ID,
-		RequestKey:  record.RequestKey,
 		Flag:        record.Flag,
 		GroupID:     record.GroupID,
 		UserID:      record.UserID,
@@ -190,7 +188,6 @@ func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 func groupJoinRequestFromModel(model GroupJoinRequest) grouprequest.Record {
 	return grouprequest.Record{
 		ID:          model.ID,
-		RequestKey:  model.RequestKey,
 		Flag:        model.Flag,
 		GroupID:     model.GroupID,
 		UserID:      model.UserID,

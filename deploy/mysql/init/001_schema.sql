@@ -27,8 +27,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_jobs` (
 
 CREATE TABLE IF NOT EXISTS `group_join_requests` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `request_key` varchar(191) NOT NULL COMMENT '群申请业务去重键',
-  `flag` mediumtext DEFAULT NULL COMMENT '处理群申请时需要的原始 flag',
+  `flag` varchar(512) NOT NULL COMMENT 'NapCat 群通知标识；实时事件取 flag，补同步取 request_id 字符串',
   `group_id` bigint DEFAULT NULL COMMENT 'QQ群号',
   `user_id` bigint DEFAULT NULL COMMENT '申请人 QQ',
   `student_id` varchar(64) DEFAULT NULL COMMENT '申请信息中显式填写的学号',
@@ -42,7 +41,7 @@ CREATE TABLE IF NOT EXISTS `group_join_requests` (
   `first_seen_at` datetime(3) DEFAULT NULL COMMENT '首次登记时间',
   `last_seen_at` datetime(3) DEFAULT NULL COMMENT '最近出现时间',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `idx_group_join_requests_request_key` (`request_key`),
+  UNIQUE KEY `idx_group_join_requests_flag` (`flag`),
   KEY `idx_group_join_requests_group_id` (`group_id`),
   KEY `idx_group_join_requests_user_id` (`user_id`),
   KEY `idx_group_join_requests_status` (`status`),

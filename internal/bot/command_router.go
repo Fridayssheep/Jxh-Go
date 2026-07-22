@@ -29,7 +29,7 @@ type GroupCommandRouter struct {
 
 const maxQuoteMessages = 10
 
-const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
+const botHelpText = `精小弘命令菜单：
 /test - 检查精小弘是否存活！
 /reload - 重新加载知识库（刷新精小弘的记忆？！）
 /ai <问题> - 用大模型查找一些知识库中的答案（让精小弘更聪明？！）
@@ -69,9 +69,6 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		}
 		return false, nil
 	}
-	if isSlashCommand(text) && !mentionsSelf(msg) {
-		return true, nil
-	}
 	switch {
 	case text == "/test":
 		return true, sender.SendGroupText(ctx, msg.GroupID, "精小弘正常\n访问：https://status.fridayssheep.top/status/jxh 以确定各项服务概况")
@@ -86,10 +83,6 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	default:
 		return false, nil
 	}
-}
-
-func isSlashCommand(text string) bool {
-	return strings.HasPrefix(text, "/")
 }
 
 func mentionsSelf(msg GroupMessage) bool {

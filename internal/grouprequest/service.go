@@ -2,8 +2,6 @@ package grouprequest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,12 +23,11 @@ const (
 	SourceEvent  = "event"
 	SourceSystem = "system"
 
-	maxRequestKeyRunes = 191
+	maxFlagRunes = 512
 )
 
 type Record struct {
 	ID          uint64
-	RequestKey  string
 	Flag        string
 	GroupID     int64
 	UserID      int64
@@ -95,6 +92,12 @@ func NewService(store Store, opts Options) *Service {
 func (s *Service) Record(ctx context.Context, record Record) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("群申请存储未初始化")
+	}
+	if record.Flag == "" {
+		return fmt.Errorf("群申请 flag 为空")
+	}
+	if utf8.RuneCountInString(record.Flag) > maxFlagRunes {
+		return fmt.Errorf("群申请 flag 超过 %d 个字符", maxFlagRunes)
 	}
 	record = normalizeRecord(record, s.now())
 	return s.store.UpsertGroupJoinRequest(ctx, record)
@@ -162,7 +165,6 @@ func RecordFromEvent(raw []byte) (Record, bool, error) {
 		requestedAt = time.Unix(event.Time, 0)
 	}
 	return Record{
-		RequestKey:  event.Flag,
 		Flag:        event.Flag,
 		GroupID:     event.GroupID,
 		UserID:      event.UserID,
@@ -192,7 +194,7 @@ func RecordsFromSystemMessages(joinRequests, invitedRequests []api.OB11Notify, n
 func recordFromSystemMessage(raw api.OB11Notify, subType string, now time.Time) Record {
 	flag := ""
 	if raw.RequestID > 0 {
-		flag = strconv.FormatInt(int64(raw.RequestID), 10)
+		flag = strconv.FormatFloat(raw.RequestID, 'f', -1, 64)
 	}
 	status := StatusPending
 	if raw.Checked {
@@ -200,7 +202,6 @@ func recordFromSystemMessage(raw api.OB11Notify, subType string, now time.Time) 
 	}
 	rawJSON, _ := json.Marshal(raw)
 	return Record{
-		RequestKey:  flag,
 		Flag:        flag,
 		GroupID:     int64(raw.GroupID),
 		UserID:      int64(raw.InvitorUin),
@@ -231,31 +232,7 @@ func normalizeRecord(record Record, now time.Time) Record {
 	if record.LastSeenAt.IsZero() {
 		record.LastSeenAt = now
 	}
-	if record.RequestKey == "" {
-		record.RequestKey = stableKey(record)
-	} else if utf8.RuneCountInString(record.RequestKey) > maxRequestKeyRunes {
-		if record.Flag != "" {
-			record.RequestKey = stableKey(record)
-		} else {
-			record.RequestKey = hashedKey("key", record.RequestKey)
-		}
-	}
 	return record
-}
-
-func stableKey(record Record) string {
-	if record.Flag != "" {
-		if utf8.RuneCountInString(record.Flag) <= maxRequestKeyRunes {
-			return record.Flag
-		}
-		return hashedKey("flag", record.Flag)
-	}
-	return hashedKey("derived", fmt.Sprintf("%d\x00%d\x00%s\x00%s", record.GroupID, record.UserID, record.Comment, record.RequestedAt.Format(time.RFC3339Nano)))
-}
-
-func hashedKey(prefix string, value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return prefix + ":" + hex.EncodeToString(sum[:])
 }
 
 func extractStudentID(comment string) string {

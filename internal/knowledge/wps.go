@@ -90,16 +90,12 @@ func wrapWPSError(stage string, timeout time.Duration, err error) error {
 		}
 		return fmt.Errorf("wps %s timed out; WPS may be slow or temporarily unavailable: %w", stage, err)
 	}
-	return err
+	return fmt.Errorf("wps %s: %w", stage, err)
 }
 
 func ensureXLSX(data []byte) error {
 	if len(data) >= 4 && bytes.Equal(data[:4], []byte{'P', 'K', 0x03, 0x04}) {
 		return nil
 	}
-	preview := string(bytes.TrimSpace(data))
-	if len(preview) > 120 {
-		preview = preview[:120]
-	}
-	return fmt.Errorf("wps download is not an xlsx file; share_url must be a WPS 导出文档链接 or direct xlsx URL, and protected documents need a valid wps_sid; normal 365.kdocs.cn/l share pages return HTML, response preview: %q", preview)
+	return fmt.Errorf("wps download is not an xlsx file; share_url must be a WPS 导出文档链接 or direct xlsx URL, and protected documents need a valid wps_sid; normal 365.kdocs.cn/l share pages return HTML")
 }

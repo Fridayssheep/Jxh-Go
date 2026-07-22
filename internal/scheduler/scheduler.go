@@ -18,6 +18,7 @@ type Job struct {
 	GroupID   int64
 	Message   string
 	TimeHHMM  string
+	RunDate   *time.Time
 	Enabled   bool
 	LastRunAt *time.Time
 }
@@ -28,10 +29,20 @@ func IsDue(job Job, now time.Time) bool {
 	}
 	switch job.Type {
 	case JobTypeOnce:
+		if job.RunDate == nil || job.TimeHHMM == "" {
+			return false
+		}
+		// Compare in now's location: RunDate may carry the DB DSN loc after a
+		// round-trip, which need not equal the scheduler timezone.
+		runDateOnly := job.RunDate.In(now.Location()).Format("2006-01-02")
+		nowDateOnly := now.Format("2006-01-02")
+		if runDateOnly != nowDateOnly {
+			return false
+		}
 		if alreadyRanToday(job, now) {
 			return false
 		}
-		return job.TimeHHMM != "" && now.Format("15:04") >= job.TimeHHMM
+		return now.Format("15:04") >= job.TimeHHMM
 	case JobTypeDaily:
 		if job.TimeHHMM == "" || alreadyRanToday(job, now) {
 			return false

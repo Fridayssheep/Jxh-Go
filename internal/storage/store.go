@@ -53,6 +53,15 @@ MAX(triggered_at) AS last_triggered`, triggerstats.TriggerTypeKeywordReply, trig
 	return summaries, query.Scan(&summaries).Error
 }
 
+// PurgeOldTriggerLogs deletes trigger log entries older than the given time.
+// Returns the number of rows deleted.
+func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int64, error) {
+	result := s.db.WithContext(ctx).
+		Where("triggered_at < ?", before).
+		Delete(&KnowledgeTriggerLog{})
+	return result.RowsAffected, result.Error
+}
+
 func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobView, error) {
 	var jobs []ScheduledJob
 	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id").Find(&jobs).Error; err != nil {
@@ -60,14 +69,32 @@ func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobV
 	}
 	out := make([]commands.ScheduledJobView, 0, len(jobs))
 	for _, job := range jobs {
-		out = append(out, commands.ScheduledJobView{ID: job.ID, Type: job.Type, TimeHHMM: job.TimeHHMM, GroupID: job.GroupID, Message: job.Message})
+		out = append(out, commands.ScheduledJobView{
+			ID:       job.ID,
+			Type:     job.Type,
+			TimeHHMM: job.TimeHHMM,
+			RunDate:  job.RunDate,
+			GroupID:  job.GroupID,
+			Message:  job.Message,
+		})
 	}
 	return out, nil
 }
 
 func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJobInput) (uint64, error) {
-	job := ScheduledJob{Type: input.Type, TimeHHMM: input.TimeHHMM, GroupID: input.GroupID, Message: input.Message, Enabled: true}
-	err := s.db.WithContext(ctx).Create(&job).Error
+	job := &ScheduledJob{
+		Type:     input.Type,
+		TimeHHMM: input.TimeHHMM,
+		RunDate:  input.RunDate,
+		GroupID:  input.GroupID,
+		Message:  input.Message,
+		Enabled:  true,
+	}
+	if input.Type == scheduler.JobTypeDaily && input.CreatedAt.Format("15:04") >= input.TimeHHMM {
+		createdAt := input.CreatedAt
+		job.LastRunAt = &createdAt
+	}
+	err := s.db.WithContext(ctx).Create(job).Error
 	return job.ID, err
 }
 
@@ -89,6 +116,7 @@ func (s *Store) ListActiveSchedulerJobs(ctx context.Context) ([]scheduler.Job, e
 			GroupID:   job.GroupID,
 			Message:   job.Message,
 			TimeHHMM:  job.TimeHHMM,
+			RunDate:   job.RunDate,
 			Enabled:   job.Enabled,
 			LastRunAt: job.LastRunAt,
 		})
@@ -107,9 +135,8 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
 	model := groupJoinRequestToModel(record)
 	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "request_key"}},
+		Columns: []clause.Column{{Name: "flag"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"flag":         model.Flag,
 			"group_id":     model.GroupID,
 			"user_id":      model.UserID,
 			"student_id":   model.StudentID,
@@ -144,7 +171,6 @@ func (s *Store) ListGroupJoinRequests(ctx context.Context, limit int) ([]groupre
 func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 	return GroupJoinRequest{
 		ID:          record.ID,
-		RequestKey:  record.RequestKey,
 		Flag:        record.Flag,
 		GroupID:     record.GroupID,
 		UserID:      record.UserID,
@@ -164,7 +190,6 @@ func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 func groupJoinRequestFromModel(model GroupJoinRequest) grouprequest.Record {
 	return grouprequest.Record{
 		ID:          model.ID,
-		RequestKey:  model.RequestKey,
 		Flag:        model.Flag,
 		GroupID:     model.GroupID,
 		UserID:      model.UserID,

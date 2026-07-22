@@ -21,7 +21,6 @@ import (
 )
 
 type Server struct {
-	Addr           string
 	WSURL          string
 	Token          string
 	RequestTimeout time.Duration
@@ -30,15 +29,9 @@ type Server struct {
 }
 
 func (s Server) Serve(ctx context.Context) error {
-	if s.WSURL != "" {
-		return s.serveForwardWebSocket(ctx)
+	if strings.TrimSpace(s.WSURL) == "" {
+		return fmt.Errorf("napcat websocket URL is required")
 	}
-	return napcatsdk.ServeReverseWebSocket(ctx, s.Addr, func(client *napcatsdk.Client) {
-		s.consume(ctx, client)
-	}, napcatsdk.WithToken(s.Token), napcatsdk.WithRequestTimeout(s.RequestTimeout))
-}
-
-func (s Server) serveForwardWebSocket(ctx context.Context) error {
 	delay := s.ReconnectDelay
 	if delay <= 0 {
 		delay = 5 * time.Second
@@ -68,12 +61,18 @@ func (s Server) serveForwardWebSocket(ctx context.Context) error {
 	}
 }
 
+// maxConcurrentEvents bounds how many events are handled in parallel so a burst
+// of group messages/notices cannot spawn unbounded goroutines. Handling stays
+// off the read loop so a slow path (e.g. /reload) never blocks event intake.
+const maxConcurrentEvents = 32
+
 func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 	sender := SDKSender{client: client}
 	if s.Handler == nil {
 		return
 	}
 	s.Handler.SetSender(sender)
+	slots := make(chan struct{}, maxConcurrentEvents)
 	events := client.Events()
 	for {
 		select {
@@ -83,9 +82,20 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			if !ok {
 				return
 			}
-			if err := s.handleEvent(ctx, client, ev); err != nil {
-				log.Printf("handle napcat event failed: %v", err)
+			// Bounded concurrency: acquire a slot before dispatching. If all slots
+			// are busy this blocks briefly, applying backpressure instead of
+			// spawning unbounded goroutines.
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				return
 			}
+			go func(evt event.Event) {
+				defer func() { <-slots }()
+				if err := s.handleEvent(ctx, client, evt); err != nil {
+					log.Printf("handle napcat event failed: %v", err)
+				}
+			}(ev)
 		}
 	}
 }

@@ -2,8 +2,6 @@ package grouprequest
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,12 +23,11 @@ const (
 	SourceEvent  = "event"
 	SourceSystem = "system"
 
-	maxRequestKeyRunes = 191
+	maxFlagRunes = 512
 )
 
 type Record struct {
 	ID          uint64
-	RequestKey  string
 	Flag        string
 	GroupID     int64
 	UserID      int64
@@ -54,12 +51,14 @@ type Store interface {
 type Options struct {
 	ExportDir string
 	Now       func() time.Time
+	Location  *time.Location
 }
 
 type Service struct {
 	store     Store
 	exportDir string
 	now       func() time.Time
+	location  *time.Location
 }
 
 type ExportResult struct {
@@ -83,12 +82,22 @@ func NewService(store Store, opts Options) *Service {
 	if exportDir == "" {
 		exportDir = filepath.Join("data", "exports", "group_requests")
 	}
-	return &Service{store: store, exportDir: exportDir, now: now}
+	location := opts.Location
+	if location == nil {
+		location = time.Local
+	}
+	return &Service{store: store, exportDir: exportDir, now: now, location: location}
 }
 
 func (s *Service) Record(ctx context.Context, record Record) error {
 	if s == nil || s.store == nil {
 		return fmt.Errorf("群申请存储未初始化")
+	}
+	if record.Flag == "" {
+		return fmt.Errorf("群申请 flag 为空")
+	}
+	if utf8.RuneCountInString(record.Flag) > maxFlagRunes {
+		return fmt.Errorf("群申请 flag 超过 %d 个字符", maxFlagRunes)
 	}
 	record = normalizeRecord(record, s.now())
 	return s.store.UpsertGroupJoinRequest(ctx, record)
@@ -108,7 +117,7 @@ func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 	if err := os.MkdirAll(s.exportDir, 0o755); err != nil {
 		return ExportResult{}, err
 	}
-	runDir, err := os.MkdirTemp(s.exportDir, "group_requests_"+s.now().Format("20060102_150405")+"_")
+	runDir, err := os.MkdirTemp(s.exportDir, "group_requests_"+s.now().In(s.location).Format("20060102_150405")+"_")
 	if err != nil {
 		return ExportResult{}, err
 	}
@@ -124,7 +133,7 @@ func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 	result := ExportResult{Dir: runDir, Count: len(records), Files: make([]ExportFile, 0, len(groupIDs))}
 	for _, groupID := range groupIDs {
 		path := filepath.Join(runDir, fmt.Sprintf("group_%d.xlsx", groupID))
-		if err := writeXLSX(path, groups[groupID]); err != nil {
+		if err := s.writeXLSX(path, groups[groupID]); err != nil {
 			_ = os.RemoveAll(runDir)
 			return ExportResult{}, err
 		}
@@ -156,7 +165,6 @@ func RecordFromEvent(raw []byte) (Record, bool, error) {
 		requestedAt = time.Unix(event.Time, 0)
 	}
 	return Record{
-		RequestKey:  event.Flag,
 		Flag:        event.Flag,
 		GroupID:     event.GroupID,
 		UserID:      event.UserID,
@@ -186,7 +194,7 @@ func RecordsFromSystemMessages(joinRequests, invitedRequests []api.OB11Notify, n
 func recordFromSystemMessage(raw api.OB11Notify, subType string, now time.Time) Record {
 	flag := ""
 	if raw.RequestID > 0 {
-		flag = strconv.FormatInt(int64(raw.RequestID), 10)
+		flag = strconv.FormatFloat(raw.RequestID, 'f', -1, 64)
 	}
 	status := StatusPending
 	if raw.Checked {
@@ -194,7 +202,6 @@ func recordFromSystemMessage(raw api.OB11Notify, subType string, now time.Time) 
 	}
 	rawJSON, _ := json.Marshal(raw)
 	return Record{
-		RequestKey:  flag,
 		Flag:        flag,
 		GroupID:     int64(raw.GroupID),
 		UserID:      int64(raw.InvitorUin),
@@ -225,31 +232,7 @@ func normalizeRecord(record Record, now time.Time) Record {
 	if record.LastSeenAt.IsZero() {
 		record.LastSeenAt = now
 	}
-	if record.RequestKey == "" {
-		record.RequestKey = stableKey(record)
-	} else if utf8.RuneCountInString(record.RequestKey) > maxRequestKeyRunes {
-		if record.Flag != "" {
-			record.RequestKey = stableKey(record)
-		} else {
-			record.RequestKey = hashedKey("key", record.RequestKey)
-		}
-	}
 	return record
-}
-
-func stableKey(record Record) string {
-	if record.Flag != "" {
-		if utf8.RuneCountInString(record.Flag) <= maxRequestKeyRunes {
-			return record.Flag
-		}
-		return hashedKey("flag", record.Flag)
-	}
-	return hashedKey("derived", fmt.Sprintf("%d\x00%d\x00%s\x00%s", record.GroupID, record.UserID, record.Comment, record.RequestedAt.Format(time.RFC3339Nano)))
-}
-
-func hashedKey(prefix string, value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return prefix + ":" + hex.EncodeToString(sum[:])
 }
 
 func extractStudentID(comment string) string {
@@ -318,7 +301,7 @@ func trimAtBoundary(value string) string {
 	return strings.TrimSpace(value[:stop])
 }
 
-func writeXLSX(path string, records []Record) error {
+func (s *Service) writeXLSX(path string, records []Record) error {
 	f := excelize.NewFile()
 	defer f.Close()
 	const sheet = "群申请"
@@ -344,9 +327,9 @@ func writeXLSX(path string, records []Record) error {
 			record.Comment,
 			record.Status,
 			record.Source,
-			formatTime(record.RequestedAt),
-			formatTime(record.FirstSeenAt),
-			formatTime(record.LastSeenAt),
+			s.formatTime(record.RequestedAt),
+			s.formatTime(record.FirstSeenAt),
+			s.formatTime(record.LastSeenAt),
 			record.Flag,
 		}
 		for col, value := range values {
@@ -362,9 +345,9 @@ func writeXLSX(path string, records []Record) error {
 	return os.Chmod(path, 0o600)
 }
 
-func formatTime(t time.Time) string {
+func (s *Service) formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.Format("2006-01-02 15:04:05")
+	return t.In(s.location).Format("2006-01-02 15:04:05")
 }

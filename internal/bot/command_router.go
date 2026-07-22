@@ -29,18 +29,20 @@ type GroupCommandRouter struct {
 
 const maxQuoteMessages = 10
 
-const botHelpText = `精小弘命令菜单（使用命令时请先 @我！）：
+const botHelpText = `精小弘命令菜单：
 /test - 检查精小弘是否存活！
 /reload - 重新加载知识库（刷新精小弘的记忆？！）
 /ai <问题> - 用大模型查找一些知识库中的答案（让精小弘更聪明？！）
 /q [数量] - 生成被回复消息及其之前最多 10 条消息的引用图（表情包生成器ww）
-/admin - 查看管理员命令和权限说明`
+/admin - 查看管理员命令和权限说明
+访问 https://status.fridayssheep.top/status/jxh 来确定精小弘是否正常！`
 
 const adminHelpText = `管理员命令（当前群群主或群管理员可使用）：
-/admin ban <时长> @用户 - 禁言不听话的小朋友
+/admin ban <时长> @用户1 @用户2 ... - 禁言不听话的小朋友（可批量）
 /admin restart - 重启 NapCat 框架
 /admin 定时任务 查看
-/admin 定时任务 添加 <每天|单次> <HH:MM> <群号> <消息>
+/admin 定时任务 添加 每天 <HH:MM> <群号> <消息>
+/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <群号> <消息>
 /admin 定时任务 移除 <任务ID>
 /admin 群申请 同步 [数量]
 /admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
@@ -60,19 +62,16 @@ func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 }
 
 func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sender Sender) (bool, error) {
-	text := strings.TrimSpace(msg.Text)
+	text := strings.ReplaceAll(strings.TrimSpace(msg.Text), "　", " ")
 	if text == "" {
 		if mentionsSelf(msg) {
 			return true, sender.SendGroupText(ctx, msg.GroupID, botHelpText)
 		}
 		return false, nil
 	}
-	if isSlashCommand(text) && !mentionsSelf(msg) {
-		return true, nil
-	}
 	switch {
 	case text == "/test":
-		return true, sender.SendGroupText(ctx, msg.GroupID, "精小弘正常")
+		return true, sender.SendGroupText(ctx, msg.GroupID, "精小弘正常\n访问：https://status.fridayssheep.top/status/jxh 以确定各项服务概况")
 	case text == "/reload":
 		return true, r.handleReload(ctx, msg, sender)
 	case text == "/q" || strings.HasPrefix(text, "/q "):
@@ -84,10 +83,6 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	default:
 		return false, nil
 	}
-}
-
-func isSlashCommand(text string) bool {
-	return strings.HasPrefix(text, "/")
 }
 
 func mentionsSelf(msg GroupMessage) bool {
@@ -188,6 +183,7 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
 		return err
 	}
+	// Only record retrieval stats after the answer was actually delivered.
 	if r.triggerStats != nil {
 		if err := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); err != nil {
 			// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。
@@ -227,11 +223,17 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		if err != nil {
 			return sender.SendGroupText(ctx, msg.GroupID, "禁言时间格式不正确")
 		}
-		if err := sender.SetGroupBan(ctx, msg.GroupID, atUsers[0], duration); err != nil {
-			log.Printf("ban group user failed: group=%d user=%d: %v", msg.GroupID, atUsers[0], err)
-			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("禁言失败：%v\n提示：精小弘不能禁言群主、群管理员或机器人自己！", err))
+		failed := 0
+		for _, userID := range atUsers {
+			if err := sender.SetGroupBan(ctx, msg.GroupID, userID, duration); err != nil {
+				log.Printf("ban group user failed: group=%d user=%d: %v", msg.GroupID, userID, err)
+				failed++
+			}
 		}
-		return sender.SendGroupText(ctx, msg.GroupID, "已禁言")
+		if failed > 0 {
+			return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已禁言 %d 人，%d 人失败\n提示：精小弘不能禁言群主、群管理员或机器人自己！", len(atUsers)-failed, failed))
+		}
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已禁言 %d 人", len(atUsers)))
 	}
 	resp, err := r.admin.Execute(ctx, adminText)
 	if err != nil {

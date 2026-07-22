@@ -105,12 +105,13 @@ func main() {
 		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
 	}
 
-	// Start health check server. Defaults to :8080; override with JXH_HEALTH_ADDR.
-	// Note: in reverse WebSocket mode the napcat server also listens on cfg.Server.Addr
-	// (default :8080), so set JXH_HEALTH_ADDR to a free port to avoid a listen conflict.
-	healthAddr := ":8080"
-	if envAddr := os.Getenv("JXH_HEALTH_ADDR"); envAddr != "" {
-		healthAddr = envAddr
+	// Avoid colliding with the reverse WebSocket listener when both use defaults.
+	healthAddr := strings.TrimSpace(os.Getenv("JXH_HEALTH_ADDR"))
+	if healthAddr == "" {
+		healthAddr = ":8080"
+		if cfg.OneBot.WSURL == "" && cfg.Server.Addr == healthAddr {
+			healthAddr = ":8081"
+		}
 	}
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

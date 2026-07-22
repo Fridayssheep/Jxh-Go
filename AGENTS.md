@@ -10,7 +10,7 @@
 - MySQL 只保存 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests`。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。schema 变更后需在 `deploy/mysql/migrations/` 追加迁移脚本供已有部署使用。
 - 数据访问统一位于 `internal/storage`，使用直接 GORM 调用与手写模型（`internal/storage/models.go`）。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
 - Compose 包含 MySQL、NapCat、quote 和 bot。quote 服务从 `zjutjh/qq-quote-generator` 构建，客户端先请求 `/gif/base64/`，失败后回退 `/png/base64/`。
-- bot 容器默认在 `:8080/healthz` 暴露端点供 Docker healthcheck 使用，可通过 `HEALTH_PORT` 调整；容器通过 entrypoint 支持 `PUID/PGID` 环境变量以匹配 NAS（群晖/威联通）宿主用户权限，避免 `./data/` 挂载点写入失败。
+- bot 容器默认在 `:8080/healthz` 暴露端点供 Docker healthcheck 使用，可通过 `HEALTH_PORT` 调整；未显式配置健康地址且反向 WebSocket 同样使用默认 `:8080` 时，健康端点自动改用 `:8081`；容器通过 entrypoint 支持 `PUID/PGID` 环境变量以匹配 NAS（群晖/威联通）宿主用户权限，避免 `./data/` 挂载点写入失败。
 - 仓库当前不保留 `docs/` 内容，也不提交 `*_test.go`。不要自行恢复历史设计文档或测试文件，除非任务明确要求。
 
 ## 关键业务约束

@@ -84,7 +84,7 @@ func main() {
 	pipelineOpts := bot.Options{
 		Knowledge:     knowledgeIndex,
 		Reloader:      knowledgeSync,
-		Admin:         commands.NewAdminHandler(store),
+		Admin:         commands.NewAdminHandler(store, schedulerLocation(cfg)),
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
@@ -107,7 +107,9 @@ func main() {
 		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays, 24*time.Hour)
 	}
 
-	// Start health check server
+	// Start health check server. Defaults to :8080; override with JXH_HEALTH_ADDR.
+	// Note: in reverse WebSocket mode the napcat server also listens on cfg.Server.Addr
+	// (default :8080), so set JXH_HEALTH_ADDR to a free port to avoid a listen conflict.
 	healthAddr := ":8080"
 	if envAddr := os.Getenv("JXH_HEALTH_ADDR"); envAddr != "" {
 		healthAddr = envAddr

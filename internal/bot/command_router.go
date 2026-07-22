@@ -212,17 +212,12 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
 	answer, sourceKeys, err := r.ai.AnswerWithSources(ctx, question)
 	if err != nil {
-		// Record stats even on error
-		if r.triggerStats != nil && len(sourceKeys) > 0 {
-			if statErr := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); statErr != nil {
-				log.Printf("record ai retrieval trigger failed: %v", statErr)
-			}
-		}
 		return err
 	}
 	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
 		return err
 	}
+	// Only record retrieval stats after the answer was actually delivered.
 	if r.triggerStats != nil {
 		if err := r.triggerStats.RecordAIRetrievals(ctx, sourceKeys, msg.GroupID); err != nil {
 			// 统计失败不影响 /ai 的正常回答，避免新增表异常扩大成问答故障。

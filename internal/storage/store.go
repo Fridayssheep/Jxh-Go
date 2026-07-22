@@ -58,9 +58,8 @@ MAX(triggered_at) AS last_triggered`, triggerstats.TriggerTypeKeywordReply, trig
 // Returns the number of rows deleted.
 func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int64, error) {
 	result := s.db.WithContext(ctx).
-		Table((KnowledgeTriggerLog{}).TableName()).
 		Where("triggered_at < ?", before).
-		Delete(nil)
+		Delete(&KnowledgeTriggerLog{})
 	return result.RowsAffected, result.Error
 }
 

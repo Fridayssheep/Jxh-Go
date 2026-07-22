@@ -42,11 +42,15 @@ type ScheduledJobView struct {
 }
 
 type AdminHandler struct {
-	store SchedulerStore
+	store    SchedulerStore
+	location *time.Location
 }
 
-func NewAdminHandler(store SchedulerStore) *AdminHandler {
-	return &AdminHandler{store: store}
+func NewAdminHandler(store SchedulerStore, location *time.Location) *AdminHandler {
+	if location == nil {
+		location = time.Local
+	}
+	return &AdminHandler{store: store, location: location}
 }
 
 func (h *AdminHandler) Execute(ctx context.Context, input string) (string, error) {
@@ -93,7 +97,9 @@ func (h *AdminHandler) Execute(ctx context.Context, input string) (string, error
 			if len(dateTimeSplit) < 3 {
 				return "单次任务格式：/admin 定时任务 添加 单次 YYYY-MM-DD HH:MM <群聊ID> <消息内容>", nil
 			}
-			parsedDate, err := time.Parse("2006-01-02", dateTimeSplit[0])
+			// Parse in the application timezone so run_date's "natural day"
+			// matches how the scheduler compares dates (avoids UTC drift).
+			parsedDate, err := time.ParseInLocation("2006-01-02", dateTimeSplit[0], h.location)
 			if err != nil {
 				return "日期格式不正确，请使用 YYYY-MM-DD", nil
 			}

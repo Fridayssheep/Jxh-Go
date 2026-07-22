@@ -56,7 +56,9 @@ MAX(triggered_at) AS last_triggered`, triggerstats.TriggerTypeKeywordReply, trig
 // PurgeOldTriggerLogs deletes trigger log entries older than the given time.
 // Returns the number of rows deleted.
 func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int64, error) {
-	result := s.db.WithContext(ctx).Where("triggered_at < ?", before).Delete(&KnowledgeTriggerLog{})
+	result := s.db.WithContext(ctx).
+		Where("triggered_at < ?", before).
+		Delete(&KnowledgeTriggerLog{})
 	return result.RowsAffected, result.Error
 }
 

@@ -32,7 +32,9 @@ func IsDue(job Job, now time.Time) bool {
 		if job.RunDate == nil || job.TimeHHMM == "" {
 			return false
 		}
-		runDateOnly := job.RunDate.Format("2006-01-02")
+		// Compare in now's location: RunDate may carry the DB DSN loc after a
+		// round-trip, which need not equal the scheduler timezone.
+		runDateOnly := job.RunDate.In(now.Location()).Format("2006-01-02")
 		nowDateOnly := now.Format("2006-01-02")
 		if runDateOnly != nowDateOnly {
 			return false
@@ -42,7 +44,10 @@ func IsDue(job Job, now time.Time) bool {
 		}
 		return now.Format("15:04") >= job.TimeHHMM
 	case JobTypeDaily:
-		return job.TimeHHMM != "" && !alreadyRanToday(job, now) && now.Format("15:04") >= job.TimeHHMM
+		if job.TimeHHMM == "" || alreadyRanToday(job, now) {
+			return false
+		}
+		return now.Format("15:04") >= job.TimeHHMM
 	default:
 		return false
 	}

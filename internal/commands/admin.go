@@ -43,15 +43,15 @@ type ScheduledJobView struct {
 }
 
 type AdminHandler struct {
-	store SchedulerStore
-	now   func() time.Time
+	store    SchedulerStore
+	location *time.Location
 }
 
-func NewAdminHandler(store SchedulerStore, now func() time.Time) *AdminHandler {
-	if now == nil {
-		now = time.Now
+func NewAdminHandler(store SchedulerStore, location *time.Location) *AdminHandler {
+	if location == nil {
+		location = time.Local
 	}
-	return &AdminHandler{store: store, now: now}
+	return &AdminHandler{store: store, location: location}
 }
 
 func (h *AdminHandler) Execute(ctx context.Context, input string) (string, error) {
@@ -92,20 +92,25 @@ func (h *AdminHandler) Execute(ctx context.Context, input string) (string, error
 		var runDate *time.Time
 		var timeHHMM string
 		var afterTime string
-		now := h.now()
+		now := time.Now().In(h.location)
 		if jobType == scheduler.JobTypeOnce {
 			dateTimeSplit := strings.SplitN(typeAndRest[1], " ", 3)
 			if len(dateTimeSplit) < 3 {
 				return "单次任务格式：/admin 定时任务 添加 单次 YYYY-MM-DD HH:MM <群聊ID> <消息内容>", nil
 			}
-			runAt, err := time.ParseInLocation("2006-01-02 15:04", dateTimeSplit[0]+" "+dateTimeSplit[1], now.Location())
+			parsedDate, err := time.ParseInLocation("2006-01-02", dateTimeSplit[0], h.location)
 			if err != nil {
 				return "日期时间格式不正确，请使用 YYYY-MM-DD HH:MM", nil
 			}
+			parsedTime, err := time.ParseInLocation("15:04", dateTimeSplit[1], h.location)
+			if err != nil {
+				return "日期时间格式不正确，请使用 YYYY-MM-DD HH:MM", nil
+			}
+			runAt := time.Date(parsedDate.Year(), parsedDate.Month(), parsedDate.Day(), parsedTime.Hour(), parsedTime.Minute(), 0, 0, h.location)
 			if runAt.Before(now.Truncate(time.Minute)) {
 				return "单次任务时间不能早于当前时间", nil
 			}
-			runDate = &runAt
+			runDate = &parsedDate
 			timeHHMM = dateTimeSplit[1]
 			afterTime = dateTimeSplit[2]
 		} else {

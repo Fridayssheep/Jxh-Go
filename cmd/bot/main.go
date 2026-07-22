@@ -105,13 +105,9 @@ func main() {
 		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
 	}
 
-	// Avoid colliding with the reverse WebSocket listener when both use defaults.
 	healthAddr := strings.TrimSpace(os.Getenv("JXH_HEALTH_ADDR"))
 	if healthAddr == "" {
 		healthAddr = ":8080"
-		if cfg.OneBot.WSURL == "" && cfg.Server.Addr == healthAddr {
-			healthAddr = ":8081"
-		}
 	}
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -138,18 +134,13 @@ func main() {
 	}()
 
 	server := napcat.Server{
-		Addr:           cfg.Server.Addr,
 		WSURL:          cfg.OneBot.WSURL,
 		Token:          cfg.OneBot.AccessToken,
 		RequestTimeout: time.Duration(cfg.OneBot.APITimeoutSec) * time.Second,
 		ReconnectDelay: time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second,
 		Handler:        pipeline,
 	}
-	if cfg.OneBot.WSURL != "" {
-		log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
-	} else {
-		log.Printf("starting reverse websocket server on %s", cfg.Server.Addr)
-	}
+	log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
 	if err := server.Serve(ctx); err != nil {
 		log.Fatalf("serve napcat websocket: %v", err)
 	}

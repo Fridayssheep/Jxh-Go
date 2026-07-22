@@ -3,11 +3,6 @@ app:
   # 应用默认时区。定时任务、日志和时间计算建议统一使用 Asia/Shanghai。
   timezone: "Asia/Shanghai"
 
-server:
-  # 反向 WebSocket fallback 的监听地址。
-  # 默认情况下 bot 使用 onebot.ws_url 主动连接 NapCat；只有 onebot.ws_url 为空时才会监听该地址。
-  addr: ":8080"
-
 onebot:
   # NapCat OneBot 11 正向 WebSocket 地址。
   # compose 中 NapCat 默认把 3001 暴露到宿主机，因此本地单独运行 bot 时使用 127.0.0.1。

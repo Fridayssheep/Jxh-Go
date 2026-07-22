@@ -9,7 +9,6 @@ import (
 
 type Config struct {
 	App       AppConfig       `yaml:"app"`
-	Server    ServerConfig    `yaml:"server"`
 	OneBot    OneBotConfig    `yaml:"onebot"`
 	WPS       WPSConfig       `yaml:"wps"`
 	Database  DatabaseConfig  `yaml:"database"`
@@ -20,10 +19,6 @@ type Config struct {
 
 type AppConfig struct {
 	Timezone string `yaml:"timezone"`
-}
-
-type ServerConfig struct {
-	Addr string `yaml:"addr"`
 }
 
 type OneBotConfig struct {
@@ -94,9 +89,6 @@ func Load(path string) (Config, error) {
 func Default() Config {
 	return Config{
 		App: AppConfig{Timezone: "Asia/Shanghai"},
-		Server: ServerConfig{
-			Addr: ":8080",
-		},
 		OneBot: OneBotConfig{
 			WSURL:                "ws://127.0.0.1:3001",
 			APITimeoutSec:        30,
@@ -136,7 +128,6 @@ func applyEnv(cfg *Config) {
 	}
 	override("JXH_ONEBOT_TOKEN", func(v string) { cfg.OneBot.AccessToken = v })
 	override("JXH_ONEBOT_WS_URL", func(v string) { cfg.OneBot.WSURL = v })
-	override("JXH_SERVER_ADDR", func(v string) { cfg.Server.Addr = v })
 	override("JXH_DATABASE_HOST", func(v string) { cfg.Database.Host = v })
 	override("JXH_DATABASE_PORT", func(v string) {
 		if parsed, err := strconv.Atoi(v); err == nil {
@@ -169,9 +160,6 @@ func applyEnv(cfg *Config) {
 }
 
 func normalize(cfg *Config) {
-	if cfg.Server.Addr == "" {
-		cfg.Server.Addr = ":8080"
-	}
 	if cfg.WPS.Sheet == "" {
 		cfg.WPS.Sheet = "release"
 	}

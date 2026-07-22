@@ -21,7 +21,6 @@ import (
 )
 
 type Server struct {
-	Addr           string
 	WSURL          string
 	Token          string
 	RequestTimeout time.Duration
@@ -30,15 +29,9 @@ type Server struct {
 }
 
 func (s Server) Serve(ctx context.Context) error {
-	if s.WSURL != "" {
-		return s.serveForwardWebSocket(ctx)
+	if strings.TrimSpace(s.WSURL) == "" {
+		return fmt.Errorf("napcat websocket URL is required")
 	}
-	return napcatsdk.ServeReverseWebSocket(ctx, s.Addr, func(client *napcatsdk.Client) {
-		s.consume(ctx, client)
-	}, napcatsdk.WithToken(s.Token), napcatsdk.WithRequestTimeout(s.RequestTimeout))
-}
-
-func (s Server) serveForwardWebSocket(ctx context.Context) error {
 	delay := s.ReconnectDelay
 	if delay <= 0 {
 		delay = 5 * time.Second

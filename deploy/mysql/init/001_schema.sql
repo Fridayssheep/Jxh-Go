@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS `knowledge_trigger_logs` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `source_key` varchar(255) NOT NULL COMMENT 'WPS 词条稳定键',
+  `source_key` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'WPS 词条稳定键',
   `trigger_type` varchar(32) NOT NULL COMMENT 'keyword_reply 或 ai_retrieval',
   `group_id` bigint NOT NULL COMMENT '触发所在 QQ 群',
   `triggered_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS `scheduled_jobs` (
 
 CREATE TABLE IF NOT EXISTS `group_join_requests` (
   `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `flag` varchar(512) NOT NULL COMMENT 'NapCat 群通知标识；实时事件取 flag，补同步取 request_id 字符串',
+  `flag` varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'NapCat 群通知标识；实时事件取 flag，补同步取 request_id 字符串',
   `group_id` bigint DEFAULT NULL COMMENT 'QQ群号',
   `user_id` bigint DEFAULT NULL COMMENT '申请人 QQ',
   `student_id` varchar(64) DEFAULT NULL COMMENT '申请信息中显式填写的学号',

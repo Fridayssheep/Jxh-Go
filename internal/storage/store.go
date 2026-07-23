@@ -62,9 +62,9 @@ func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int6
 	return result.RowsAffected, result.Error
 }
 
-func (s *Store) ListScheduledJobs(ctx context.Context) ([]commands.ScheduledJobView, error) {
+func (s *Store) ListScheduledJobs(ctx context.Context, groupID int64) ([]commands.ScheduledJobView, error) {
 	var jobs []ScheduledJob
-	if err := s.db.WithContext(ctx).Where("enabled = ?", true).Order("id").Find(&jobs).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("group_id = ? AND enabled = ?", groupID, true).Order("id").Find(&jobs).Error; err != nil {
 		return nil, err
 	}
 	out := make([]commands.ScheduledJobView, 0, len(jobs))
@@ -98,8 +98,8 @@ func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJob
 	return job.ID, err
 }
 
-func (s *Store) RemoveScheduledJob(ctx context.Context, id uint64) (bool, error) {
-	result := s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ?", id).Update("enabled", false)
+func (s *Store) RemoveScheduledJob(ctx context.Context, groupID int64, id uint64) (bool, error) {
+	result := s.db.WithContext(ctx).Model(&ScheduledJob{}).Where("id = ? AND group_id = ?", id, groupID).Update("enabled", false)
 	return result.RowsAffected > 0, result.Error
 }
 

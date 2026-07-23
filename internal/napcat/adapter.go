@@ -374,13 +374,140 @@ func (s SDKSender) SetRestart(ctx context.Context) error {
 }
 
 func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
-	resp, err := s.client.API().GetGroupSystemMsg(ctx, api.GetGroupSystemMsgRequest{
-		Count: api.GetGroupSystemMsgRequestCountUnion{Raw: []byte(strconv.Itoa(count))},
-	})
-	if err != nil {
-		return nil, err
+	var resp struct {
+		InvitedRequests []json.RawMessage `json:"invited_requests"`
+		InvitedRequest  []json.RawMessage `json:"InvitedRequest"`
+		JoinRequests    []json.RawMessage `json:"join_requests"`
 	}
-	return grouprequest.RecordsFromSystemMessages(resp.JoinRequests, resp.InvitedRequests, time.Now()), nil
+	err := s.client.API().Call(ctx, string(api.ActionGetGroupSystemMsg), api.GetGroupSystemMsgRequest{
+		Count: api.GetGroupSystemMsgRequestCountUnion{Raw: []byte(strconv.Itoa(count))},
+	}, &resp)
+	if err != nil {
+		return nil, fmt.Errorf("fetch group system messages: %w", err)
+	}
+	joinRequests, err := decodeGroupSystemMessages(resp.JoinRequests, false)
+	if err != nil {
+		return nil, fmt.Errorf("decode join requests: %w", err)
+	}
+	invitedRaw := resp.InvitedRequests
+	if len(invitedRaw) == 0 {
+		invitedRaw = resp.InvitedRequest
+	}
+	invitedRequests, err := decodeGroupSystemMessages(invitedRaw, true)
+	if err != nil {
+		return nil, fmt.Errorf("decode invited requests: %w", err)
+	}
+	return grouprequest.RecordsFromSystemMessages(joinRequests, invitedRequests), nil
+}
+
+type groupSystemMessageWire struct {
+	RequestID    json.RawMessage `json:"request_id"`
+	RequesterUin json.RawMessage `json:"requester_uin"`
+	RequesterID  json.RawMessage `json:"requester_id"`
+	UserID       json.RawMessage `json:"user_id"`
+	Uin          json.RawMessage `json:"uin"`
+	InvitorUin   json.RawMessage `json:"invitor_uin"`
+	GroupID      json.RawMessage `json:"group_id"`
+	Message      string          `json:"message"`
+	Checked      bool            `json:"checked"`
+}
+
+func decodeGroupSystemMessages(rawMessages []json.RawMessage, invited bool) ([]grouprequest.SystemMessage, error) {
+	messages := make([]grouprequest.SystemMessage, 0, len(rawMessages))
+	for i, raw := range rawMessages {
+		message, err := decodeGroupSystemMessage(raw, invited)
+		if err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		messages = append(messages, message)
+	}
+	return messages, nil
+}
+
+func decodeGroupSystemMessage(raw json.RawMessage, invited bool) (grouprequest.SystemMessage, error) {
+	var wire groupSystemMessageWire
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return grouprequest.SystemMessage{}, fmt.Errorf("decode group system message: %w", err)
+	}
+	requestID, err := decimalJSONValue(wire.RequestID, "request_id", true)
+	if err != nil {
+		return grouprequest.SystemMessage{}, err
+	}
+	if strings.TrimLeft(requestID, "0") == "" {
+		return grouprequest.SystemMessage{}, fmt.Errorf("group system message request_id must be positive")
+	}
+	groupID, err := firstInt64JSONValue("group_id", wire.GroupID)
+	if err != nil {
+		return grouprequest.SystemMessage{}, err
+	}
+	var userID int64
+	if invited {
+		userID, err = firstInt64JSONValue("invitor_uin", wire.InvitorUin)
+	} else {
+		// Current NapCat versions expose the join applicant as invitor_uin.
+		// Prefer explicit requester fields if a future response provides them.
+		userID, err = firstInt64JSONValue("requester", wire.RequesterUin, wire.RequesterID, wire.UserID, wire.Uin, wire.InvitorUin)
+	}
+	if err != nil {
+		return grouprequest.SystemMessage{}, err
+	}
+	return grouprequest.SystemMessage{
+		RequestID: requestID,
+		GroupID:   groupID,
+		UserID:    userID,
+		Message:   wire.Message,
+		Checked:   wire.Checked,
+		RawJSON:   string(raw),
+	}, nil
+}
+
+func firstInt64JSONValue(field string, values ...json.RawMessage) (int64, error) {
+	for _, raw := range values {
+		value, err := decimalJSONValue(raw, field, false)
+		if err != nil {
+			return 0, err
+		}
+		if value == "" || value == "0" {
+			continue
+		}
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("decode %s %q: %w", field, value, err)
+		}
+		if parsed == 0 {
+			continue
+		}
+		return parsed, nil
+	}
+	return 0, fmt.Errorf("group system message %s is missing or zero", field)
+}
+
+func decimalJSONValue(raw json.RawMessage, field string, required bool) (string, error) {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		if required {
+			return "", fmt.Errorf("group system message %s is missing", field)
+		}
+		return "", nil
+	}
+	if value[0] == '"' {
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return "", fmt.Errorf("decode group system message %s: %w", field, err)
+		}
+		value = strings.TrimSpace(value)
+	}
+	if value == "" {
+		if required {
+			return "", fmt.Errorf("group system message %s is empty", field)
+		}
+		return "", nil
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return "", fmt.Errorf("group system message %s %q is not a decimal integer", field, value)
+		}
+	}
+	return value, nil
 }
 
 func extractAtUsers(chain message.Chain) []int64 {

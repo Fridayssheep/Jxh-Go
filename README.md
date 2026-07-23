@@ -160,14 +160,14 @@ go run ./cmd/bot -config config.yaml
 | 命令 | 说明 |
 | --- | --- |
 | `/admin 定时任务 查看` | 查看定时任务 |
-| `/admin 定时任务 添加 每天 <HH:MM> <群聊ID> <消息内容>` | 添加每日任务 |
-| `/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <群聊ID> <消息内容>` | 添加指定日期执行的单次任务 |
-| `/admin 定时任务 移除 <任务ID>` | 移除定时任务 |
+| `/admin 定时任务 添加 每天 <HH:MM> <当前群ID> <消息内容>` | 为当前群添加每日任务 |
+| `/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <当前群ID> <消息内容>` | 为当前群添加指定日期执行的单次任务 |
+| `/admin 定时任务 移除 <任务ID>` | 移除当前群的定时任务 |
 | `/admin 群申请 同步 [数量]` | 从 NapCat 群系统消息补同步近期加群申请，默认 20 条 |
 | `/admin 群申请 导出 [全部|最近N]` | 将所有群申请按来源群分别导出到本地 `data/exports/group_requests/` |
 | `/admin 词条统计 [7d|30d|全部]` | 将所有群的关键词回复和 `/ai` 检索统计导出到本地 Excel |
 
-bot 会在每次执行 `/admin` 或 `/reload` 时通过 NapCat 查询执行者的实时群角色，只允许当前群群主和群管理员。角色不缓存也不写入 MySQL。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
+bot 会在每次执行 `/admin` 或 `/reload` 时通过 NapCat 查询执行者的实时群角色，只允许当前群群主和群管理员。角色不缓存也不写入 MySQL。定时任务按群隔离，只能在当前群查看、添加和移除。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
 
 群申请和词条统计面向后台维护人员，导出文件只保存在 bot 本地，不上传到 QQ 群文件。群申请一次查询所有群的数据，并在单次批次目录中按来源群号生成独立 Excel；词条统计跨群汇总为一个 Excel。系统消息中尚未处理的申请状态为 `pending`，已处理但无法判断批准或拒绝的状态为 `observed`。
 
@@ -218,7 +218,7 @@ quote:
 
 项目采用 schema-first，运行时不使用 `AutoMigrate`。表结构以 `deploy/mysql/init/001_schema.sql` 为准。
 
-MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests` 三张表，统一使用 `utf8mb4_0900_ai_ci`。已有部署按版本顺序手工执行 `deploy/mysql/migrations/` 中尚未应用的 SQL；初始化脚本只会在空数据目录首次启动时执行。
+MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests` 三张表；表默认使用 `utf8mb4_0900_ai_ci`，不透明标识符 `source_key` 和 `flag` 单独使用 `utf8mb4_bin`，避免不同大小写或重音的值被合并。已有部署按版本顺序手工执行 `deploy/mysql/migrations/` 中尚未应用的 SQL；初始化脚本只会在空数据目录首次启动时执行。
 
 需要重建空库时：
 

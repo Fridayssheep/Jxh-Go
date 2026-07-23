@@ -7,13 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
-	"github.com/zjutjh/napcat-sdk/api"
 )
 
 const (
@@ -41,6 +39,15 @@ type Record struct {
 	RequestedAt time.Time
 	FirstSeenAt time.Time
 	LastSeenAt  time.Time
+}
+
+type SystemMessage struct {
+	RequestID string
+	GroupID   int64
+	UserID    int64
+	Message   string
+	Checked   bool
+	RawJSON   string
 }
 
 type Store interface {
@@ -180,39 +187,33 @@ func RecordFromEvent(raw []byte) (Record, bool, error) {
 }
 
 // RecordsFromSystemMessages normalizes get_group_system_msg join and invite rows.
-func RecordsFromSystemMessages(joinRequests, invitedRequests []api.OB11Notify, now time.Time) []Record {
+func RecordsFromSystemMessages(joinRequests, invitedRequests []SystemMessage) []Record {
 	records := make([]Record, 0, len(joinRequests)+len(invitedRequests))
 	for _, raw := range joinRequests {
-		records = append(records, recordFromSystemMessage(raw, "add", now))
+		records = append(records, recordFromSystemMessage(raw, "add"))
 	}
 	for _, raw := range invitedRequests {
-		records = append(records, recordFromSystemMessage(raw, "invite", now))
+		records = append(records, recordFromSystemMessage(raw, "invite"))
 	}
 	return records
 }
 
-func recordFromSystemMessage(raw api.OB11Notify, subType string, now time.Time) Record {
-	flag := ""
-	if raw.RequestID > 0 {
-		flag = strconv.FormatFloat(raw.RequestID, 'f', -1, 64)
-	}
+func recordFromSystemMessage(raw SystemMessage, subType string) Record {
 	status := StatusPending
 	if raw.Checked {
 		status = StatusSeen
 	}
-	rawJSON, _ := json.Marshal(raw)
 	return Record{
-		Flag:        flag,
-		GroupID:     int64(raw.GroupID),
-		UserID:      int64(raw.InvitorUin),
+		Flag:        raw.RequestID,
+		GroupID:     raw.GroupID,
+		UserID:      raw.UserID,
 		StudentID:   extractStudentID(raw.Message),
 		StudentName: extractStudentName(raw.Message),
 		SubType:     subType,
 		Comment:     raw.Message,
 		Status:      status,
 		Source:      SourceSystem,
-		RawJSON:     string(rawJSON),
-		RequestedAt: now,
+		RawJSON:     raw.RawJSON,
 	}
 }
 

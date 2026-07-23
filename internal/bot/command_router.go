@@ -41,8 +41,8 @@ const adminHelpText = `管理员命令（当前群群主或群管理员可使用
 /admin ban <时长> @用户1 @用户2 ... - 禁言不听话的小朋友（可批量）
 /admin restart - 重启 NapCat 框架
 /admin 定时任务 查看
-/admin 定时任务 添加 每天 <HH:MM> <群号> <消息>
-/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <群号> <消息>
+/admin 定时任务 添加 每天 <HH:MM> <当前群号> <消息>
+/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <当前群号> <消息>
 /admin 定时任务 移除 <任务ID>
 /admin 群申请 同步 [数量]
 /admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
@@ -235,7 +235,7 @@ func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, 
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已禁言 %d 人", len(atUsers)))
 	}
-	resp, err := r.admin.Execute(ctx, adminText)
+	resp, err := r.admin.Execute(ctx, msg.GroupID, adminText)
 	if err != nil {
 		return err
 	}

@@ -26,8 +26,8 @@ if [ "$(id -u)" = "0" ]; then
 		usermod -o -u "${TARGET_UID}" -g "${TARGET_GID}" appuser
 	fi
 
-	mkdir -p /app/data/cache
-	chown -R appuser:appuser /app/data
+	mkdir -p /app/data/cache /app/data/exports
+	chown -R appuser:appuser /app/data/cache /app/data/exports
 	exec gosu appuser "$@"
 fi
 

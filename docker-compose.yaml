@@ -73,7 +73,8 @@ services:
       JXH_AI_MODEL: ${JXH_AI_MODEL:-}
       JXH_HEALTH_ADDR: ":${HEALTH_PORT:-8080}"
     volumes:
-      - ./data:/app/data
+      - ./data/cache:/app/data/cache
+      - ./data/exports:/app/data/exports
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:${HEALTH_PORT:-8080}/healthz || exit 1"]
       interval: 30s

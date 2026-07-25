@@ -25,7 +25,6 @@ type Sender interface {
 	ResolveImage(ctx context.Context, file string) (string, error)
 	SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error
 	SetRestart(ctx context.Context) error
-	FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error)
 	GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error)
 }
 
@@ -144,6 +143,13 @@ func (p *Pipeline) HandleGroupJoinRequest(ctx context.Context, record groupreque
 		return fmt.Errorf("group request service is not initialized")
 	}
 	return p.groupRequests.Record(ctx, record)
+}
+
+func (p *Pipeline) ReconcileGroupJoinRequests(ctx context.Context, records []grouprequest.Record) error {
+	if p.groupRequests == nil {
+		return fmt.Errorf("group request service is not initialized")
+	}
+	return p.groupRequests.Reconcile(ctx, records)
 }
 
 func (p *Pipeline) SendGroupText(ctx context.Context, groupID int64, text string) error {

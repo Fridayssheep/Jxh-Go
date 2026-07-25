@@ -24,7 +24,7 @@ Jxh-Go 是精弘 QQ 群助手的 Go 重构版本，面向浙江工业大学相�
 - **群管理**：当前群群主和群管理员可执行禁言、NapCat 重启和定时任务命令。
 - **引用图**：回复消息后发送 `/q [数量]`，生成最多 10 条消息的动态 GIF 引用图，失败时回退 PNG。
 - **分享链接净化**：自动展开 Bilibili、小红书短链，清除分享跟踪参数；支持纯文本和 QQ 小程序卡片。
-- **群申请登记**：登记 NapCat 群申请信息，支持管理员同步并在本地按来源群分别导出 Excel。
+- **群申请登记**：实时登记 NapCat 群申请，每 10 秒自动同步处理状态，并用 AI 提取学号、姓名和专业。
 - **词条统计**：用 MySQL 日志记录成功发送的关键词回复和 `/ai` 实际搜索命中的知识条目，导出时按词条合并两类次数。
 
 ## 快速开始
@@ -163,13 +163,12 @@ go run ./cmd/bot -config config.yaml
 | `/admin 定时任务 添加 每天 <HH:MM> <当前群ID> <消息内容>` | 为当前群添加每日任务 |
 | `/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <当前群ID> <消息内容>` | 为当前群添加指定日期执行的单次任务 |
 | `/admin 定时任务 移除 <任务ID>` | 移除当前群的定时任务 |
-| `/admin 群申请 同步 [数量]` | 从 NapCat 群系统消息补同步近期加群申请，默认 20 条 |
-| `/admin 群申请 导出 [全部|最近N]` | 将所有群申请按来源群分别导出到本地 `data/exports/group_requests/` |
+| `/admin 群申请 导出 [数量]` | 不填数量时导出全部；填写正整数时导出最新 N 条，并按来源群分别保存到本地 `data/exports/group_requests/` |
 | `/admin 词条统计 [7d|30d|全部]` | 将所有群的关键词回复和 `/ai` 检索统计导出到本地 Excel |
 
 bot 会在每次执行 `/admin` 或 `/reload` 时通过 NapCat 查询执行者的实时群角色，只允许当前群群主和群管理员。角色不缓存也不写入 MySQL。定时任务按群隔离，只能在当前群查看、添加和移除。NapCat 不能禁言群主、群管理员或机器人自己；禁言失败时 bot 会在群内返回错误原因和该限制提示。
 
-群申请和词条统计面向后台维护人员，导出文件只保存在 bot 本地，不上传到 QQ 群文件。群申请一次查询所有群的数据，并在单次批次目录中按来源群号生成独立 Excel；词条统计跨群汇总为一个 Excel。系统消息中尚未处理的申请状态为 `pending`，已处理但无法判断批准或拒绝的状态为 `observed`。
+群申请和词条统计面向后台维护人员，导出文件只保存在 bot 本地，不上传到 QQ 群文件。群申请事件会实时入库；每次连接 NapCat 后立即读取最近 100 条群系统消息，之后每 10 秒自动同步一次。系统消息中尚未处理的申请状态为 `pending`，已处理但无法判断批准或拒绝的状态为 `processed`，记录不会因处理完成而删除。启用 AI 时，新加入申请会异步提取学号、姓名和专业；原始验证信息先入库，解析失败不会丢失申请，也不会回填功能上线前的历史记录。验证信息会发送给 `ai` 中配置的模型服务，部署时应确认对应服务的数据处理政策。导出一次查询所有群的数据，并在单次批次目录中按来源群号生成独立 Excel；词条统计跨群汇总为一个 Excel。
 
 ## 配置和环境变量
 
@@ -198,8 +197,8 @@ bot 会在每次执行 `/admin` 或 `/reload` 时通过 NapCat 查询执行者�
 
 AI 行为：
 
-- `ai.enabled: false`：`/ai` 返回未启用。
-- 未配置 `ai.api_key` 或 `ai.model`：`/ai` 返回未启用。
+- `ai.enabled: false`：`/ai` 返回未启用，新群申请跳过 AI 字段提取。
+- 未配置 `ai.api_key` 或 `ai.model`：`/ai` 返回未启用，新群申请跳过 AI 字段提取。
 - `ai.provider: ark` 时，`ai.model` 填方舟推理接入点 ID，例如 `ep-xxxxxxxx`。
 - Agent 必须先搜索知识库，优先使用 AND 精确查询核心词，结果不足时再逐步删减条件、替换同义词或使用 OR/正则放宽。回答只能依据搜索结果；无命中或依据不足时由模型如实说明，不使用自身知识猜测。`7d` 和 `30d` 分别表示应用时区内含今天的最近 7 个和 30 个自然日。
 
@@ -218,7 +217,7 @@ quote:
 
 项目采用 schema-first，运行时不使用 `AutoMigrate`。表结构以 `deploy/mysql/init/001_schema.sql` 为准。
 
-MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests` 三张表；表默认使用 `utf8mb4_0900_ai_ci`，不透明标识符 `source_key` 和 `flag` 单独使用 `utf8mb4_bin`，避免不同大小写或重音的值被合并。已有部署按版本顺序手工执行 `deploy/mysql/migrations/` 中尚未应用的 SQL；初始化脚本只会在空数据目录首次启动时执行。
+MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests` 三张表；表默认使用 `utf8mb4_0900_ai_ci`，不透明标识符 `source_key`、`flag` 和 `system_request_id` 单独使用 `utf8mb4_bin`，避免不同大小写或重音的值被合并。已有部署按版本顺序手工执行 `deploy/mysql/migrations/` 中尚未应用的 SQL；本次群申请自动同步需要执行 `005_automate_group_request_processing.sql`。初始化脚本只会在空数据目录首次启动时执行。
 
 需要重建空库时：
 
@@ -249,7 +248,7 @@ make compose-logs  # 查看 compose 日志
 | `internal/bot` | 群消息处理管线和命令路由 |
 | `internal/commands` | 群管理和定时任务命令 |
 | `internal/knowledge` | WPS 解析、原子内存索引和 Agent 搜索 |
-| `internal/ai` | `/ai` ReAct Agent、知识搜索工具和 Eino 模型适配 |
+| `internal/ai` | `/ai` ReAct Agent、知识搜索工具和群申请字段提取 |
 | `internal/storage` | GORM 数据访问和数据库模型；表结构以初始化 SQL 为准 |
 | `internal/triggerstats` | MySQL-backed 词条触发统计 |
 | `internal/napcat` | NapCat SDK 适配层 |

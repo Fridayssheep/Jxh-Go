@@ -44,8 +44,7 @@ const adminHelpText = `管理员命令（当前群群主或群管理员可使用
 /admin 定时任务 添加 每天 <HH:MM> <当前群号> <消息>
 /admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <当前群号> <消息>
 /admin 定时任务 移除 <任务ID>
-/admin 群申请 同步 [数量]
-/admin 群申请 导出 [全部|最近N] - 本地按来源群分文件
+/admin 群申请 导出 [数量] - 不填数量时导出全部，本地按来源群分文件
 /admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
 精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
 
@@ -264,7 +263,7 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 	case strings.HasPrefix(text, "导出"):
 		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "导出")))
 		if err != nil {
-			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [全部|最近N]")
+			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [正整数]")
 		}
 		result, err := r.groupRequests.Export(ctx, limit)
 		if err != nil {
@@ -273,27 +272,9 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 		if result.Count == 0 {
 			return sender.SendGroupText(ctx, msg.GroupID, "暂无群申请记录可导出")
 		}
-		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出全部群申请 %d 条，按 %d 个群分别保存到：%s", result.Count, len(result.Files), result.Dir))
-	case strings.HasPrefix(text, "同步"):
-		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "同步")))
-		if err != nil {
-			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 同步 [数量]")
-		}
-		if limit <= 0 {
-			limit = 20
-		}
-		records, err := sender.FetchGroupJoinRequests(ctx, limit)
-		if err != nil {
-			return err
-		}
-		for _, record := range records {
-			if err := r.groupRequests.Record(ctx, record); err != nil {
-				return err
-			}
-		}
-		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已同步群申请 %d 条", len(records)))
+		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出群申请 %d 条，按 %d 个群分别保存到：%s", result.Count, len(result.Files), result.Dir))
 	default:
-		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 <同步|导出>")
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [正整数]")
 	}
 }
 
@@ -346,11 +327,10 @@ func parseBanDuration(raw string) (time.Duration, error) {
 
 func parseOptionalLimit(raw string) (int, error) {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "全部" {
+	if raw == "" {
 		return 0, nil
 	}
-	raw = strings.TrimPrefix(raw, "最近")
-	limit, err := strconv.Atoi(strings.TrimSpace(raw))
+	limit, err := strconv.Atoi(raw)
 	if err != nil || limit <= 0 {
 		return 0, fmt.Errorf("invalid limit")
 	}

@@ -54,7 +54,7 @@ database:
   trigger_log_retention_days: 180
 
 ai:
-  # 是否启用 /ai 入口和新群申请的学号、姓名、专业提取。关闭或模型配置不完整时两项能力均禁用。
+  # 是否启用 /ai 入口和待解析群申请的学号、姓名、专业提取。关闭或模型配置不完整时两项能力均禁用。
   enabled: true
   # ChatModel 提供方。支持 openai 和 ark；空值按 openai 处理。
   provider: "openai"

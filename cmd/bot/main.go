@@ -185,8 +185,19 @@ func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.Inde
 	if err != nil {
 		return nil, nil, err
 	}
+	reviewModel, err := ai.NewEinoModel(ctx, ai.EinoModelConfig{
+		Provider: cfg.AI.Provider,
+		BaseURL:  cfg.AI.BaseURL,
+		APIKey:   cfg.AI.APIKey,
+		Model:    cfg.AI.Model,
+		JSONOnly: true,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
 	service, err := ai.NewService(ctx, ai.Options{
 		Model:            chatModel,
+		Reviewer:         reviewModel,
 		Knowledge:        index,
 		Timeout:          time.Duration(cfg.AI.TimeoutSec) * time.Second,
 		MaxQuestionChars: cfg.AI.MaxQuestionChars,

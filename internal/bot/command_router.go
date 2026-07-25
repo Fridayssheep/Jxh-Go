@@ -34,18 +34,19 @@ const botHelpText = `精小弘命令菜单：
 /reload - 重新加载知识库（刷新精小弘的记忆？！）
 /ai <问题> - 用大模型查找一些知识库中的答案（让精小弘更聪明？！）
 /q [数量] - 生成被回复消息及其之前最多 10 条消息的引用图（表情包生成器ww）
-/admin - 查看管理员命令和权限说明
+@bot /admin - 查看管理员命令和权限说明（必须 @精小弘）
 访问 https://status.fridayssheep.top/status/jxh 来确定精小弘是否正常！`
 
 const adminHelpText = `管理员命令（当前群群主或群管理员可使用）：
-/admin ban <时长> @用户1 @用户2 ... - 禁言不听话的小朋友（可批量）
-/admin restart - 重启 NapCat 框架
-/admin 定时任务 查看
-/admin 定时任务 添加 每天 <HH:MM> <当前群号> <消息>
-/admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <当前群号> <消息>
-/admin 定时任务 移除 <任务ID>
-/admin 群申请 导出 [数量] - 不填数量时导出全部，本地按来源群分文件
-/admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
+以下命令必须先 @精小弘：
+@bot /admin ban <时长> @用户1 @用户2 ... - 禁言不听话的小朋友（可批量）
+@bot /admin restart - 重启 NapCat 框架
+@bot /admin 定时任务 查看
+@bot /admin 定时任务 添加 每天 <HH:MM> <当前群号> <消息>
+@bot /admin 定时任务 添加 单次 <YYYY-MM-DD HH:MM> <当前群号> <消息>
+@bot /admin 定时任务 移除 <任务ID>
+@bot /admin 群申请 导出 [数量] - 不填数量时导出全部，本地按来源群分文件
+@bot /admin 词条统计 [7d|30d|全部] - 本地导出全部群统计
 精小弘不能禁言群主、群管理员或机器人自己ε=( o｀ω′)ノ`
 
 func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
@@ -78,6 +79,9 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	case text == "/ai" || strings.HasPrefix(text, "/ai "):
 		return true, r.startAI(ctx, msg, sender, text)
 	case text == "/admin" || strings.HasPrefix(text, "/admin "):
+		if !mentionsSelf(msg) {
+			return false, nil
+		}
 		return true, r.handleAdmin(ctx, msg, sender, text)
 	default:
 		return false, nil
@@ -263,7 +267,7 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 	case strings.HasPrefix(text, "导出"):
 		limit, err := parseOptionalLimit(strings.TrimSpace(strings.TrimPrefix(text, "导出")))
 		if err != nil {
-			return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [正整数]")
+			return sender.SendGroupText(ctx, msg.GroupID, "格式：@bot /admin 群申请 导出 [正整数]")
 		}
 		result, err := r.groupRequests.Export(ctx, limit)
 		if err != nil {
@@ -274,14 +278,14 @@ func (r *GroupCommandRouter) handleGroupRequestAdmin(ctx context.Context, msg Gr
 		}
 		return sender.SendGroupText(ctx, msg.GroupID, fmt.Sprintf("已在本地导出群申请 %d 条，按 %d 个群分别保存到：%s", result.Count, len(result.Files), result.Dir))
 	default:
-		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 群申请 导出 [正整数]")
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：@bot /admin 群申请 导出 [正整数]")
 	}
 }
 
 func (r *GroupCommandRouter) handleTriggerStats(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
 	days, err := parseStatsDays(text)
 	if err != nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "格式：/admin 词条统计 [7d|30d|全部]")
+		return sender.SendGroupText(ctx, msg.GroupID, "格式：@bot /admin 词条统计 [7d|30d|全部]")
 	}
 	result, err := r.triggerStats.ExportForDays(ctx, days)
 	if err != nil {

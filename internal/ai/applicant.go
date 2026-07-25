@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 )
 
-const applicantPrompt = `你负责从 QQ 群申请验证信息中提取学生资料的姓名、学号和专业等信息。
+const applicantPrompt = `你负责从 QQ 群申请验证答案中提取学生资料的姓名、学号和专业等信息。
 只输出一个 JSON 对象，字段固定为 student_id、student_name、major。
 字段值必须逐字来自原文；无法确认时使用空字符串。不得推断、补全或改写专业名称。
 不要输出 Markdown、解释或额外字段。`
@@ -78,42 +79,46 @@ func parseApplicantResponse(comment, content string) (ApplicantFields, error) {
 	fields.StudentID = strings.TrimSpace(fields.StudentID)
 	fields.StudentName = strings.TrimSpace(fields.StudentName)
 	fields.Major = strings.TrimSpace(fields.Major)
-	if err := validateApplicantField(comment, "student_id", fields.StudentID, 32); err != nil {
-		return ApplicantFields{}, err
-	}
+	fields.StudentID = sanitizeApplicantField(comment, fields.StudentID, 32)
 	if fields.StudentID != "" {
 		for _, char := range fields.StudentID {
 			if char < '0' || char > '9' {
-				return ApplicantFields{}, fmt.Errorf("extract applicant fields: student_id is not numeric")
+				fields.StudentID = ""
+				break
 			}
 		}
 	}
-	if err := validateApplicantField(comment, "student_name", fields.StudentName, 64); err != nil {
-		return ApplicantFields{}, err
-	}
+	fields.StudentName = sanitizeApplicantField(comment, fields.StudentName, 64)
 	for _, char := range fields.StudentName {
-		if char >= '0' && char <= '9' {
-			return ApplicantFields{}, fmt.Errorf("extract applicant fields: student_name contains digits")
+		if unicode.IsNumber(char) {
+			fields.StudentName = ""
+			break
 		}
 	}
-	if err := validateApplicantField(comment, "major", fields.Major, 128); err != nil {
-		return ApplicantFields{}, err
+	if fields.StudentName != "" && strings.IndexFunc(fields.StudentName, unicode.IsLetter) < 0 {
+		fields.StudentName = ""
+	}
+	fields.Major = sanitizeApplicantField(comment, fields.Major, 128)
+	if fields.Major != "" && strings.IndexFunc(fields.Major, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	}) < 0 {
+		fields.Major = ""
 	}
 	return fields, nil
 }
 
-func validateApplicantField(comment, name, value string, maxRunes int) error {
+func sanitizeApplicantField(comment, value string, maxRunes int) string {
 	if value == "" {
-		return nil
+		return ""
 	}
 	if utf8.RuneCountInString(value) > maxRunes {
-		return fmt.Errorf("extract applicant fields: %s is too long", name)
+		return ""
 	}
 	if strings.ContainsAny(value, "\r\n\t") {
-		return fmt.Errorf("extract applicant fields: %s contains control characters", name)
+		return ""
 	}
 	if !strings.Contains(comment, value) {
-		return fmt.Errorf("extract applicant fields: %s is not present in source text", name)
+		return ""
 	}
-	return nil
+	return value
 }

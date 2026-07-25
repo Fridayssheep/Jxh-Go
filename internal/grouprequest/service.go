@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
@@ -200,7 +201,7 @@ func (s *Service) processPendingAI(ctx context.Context) {
 		return
 	}
 	for _, record := range records {
-		fields, err := s.extractApplicant(ctx, record.Comment)
+		fields, err := s.extractApplicant(ctx, applicantAnswerText(record.Comment))
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -383,12 +384,12 @@ func extractStudentID(comment string) string {
 
 func extractStudentName(comment string) string {
 	candidate := extractLabeledValue(comment, []string{"姓名", "名字"})
-	candidate = strings.Trim(candidate, " \t\r\n:：=，,；;。、/|")
-	if candidate == "" || utf8.RuneCountInString(candidate) > 16 {
+	candidate = strings.Trim(candidate, " \t\r\n:：=+＋，,；;。、/|")
+	if candidate == "" || utf8.RuneCountInString(candidate) > 16 || strings.IndexFunc(candidate, unicode.IsLetter) < 0 {
 		return ""
 	}
 	for _, r := range candidate {
-		if r >= '0' && r <= '9' {
+		if unicode.IsNumber(r) {
 			return ""
 		}
 	}
@@ -397,14 +398,17 @@ func extractStudentName(comment string) string {
 
 func extractMajor(comment string) string {
 	candidate := extractLabeledValue(comment, []string{"专业", "大类"})
-	candidate = strings.Trim(candidate, " \t\r\n:：=，,；;。、/|")
-	if candidate == "" || utf8.RuneCountInString(candidate) > 128 {
+	candidate = strings.Trim(candidate, " \t\r\n:：=+＋，,；;。、/|")
+	if candidate == "" || utf8.RuneCountInString(candidate) > 128 || strings.IndexFunc(candidate, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsNumber(r)
+	}) < 0 {
 		return ""
 	}
 	return candidate
 }
 
 func extractLabeledValue(comment string, labels []string) string {
+	comment = applicantAnswerText(comment)
 	for _, label := range labels {
 		idx := strings.Index(comment, label)
 		if idx < 0 {
@@ -424,7 +428,7 @@ func extractLabeledValue(comment string, labels []string) string {
 
 func trimAtBoundary(value string) string {
 	stop := len(value)
-	for _, boundary := range []string{"\r\n", "\n", "\r", "\t", " ", "，", ",", "；", ";", "。", "、", "/", "|"} {
+	for _, boundary := range []string{"\r\n", "\n", "\r", "\t", " ", "+", "＋", "，", ",", "；", ";", "。", "、", "/", "|"} {
 		if idx := strings.Index(value, boundary); idx >= 0 && idx < stop {
 			stop = idx
 		}
@@ -435,6 +439,18 @@ func trimAtBoundary(value string) string {
 		}
 	}
 	return strings.TrimSpace(value[:stop])
+}
+
+func applicantAnswerText(comment string) string {
+	comment = strings.TrimSpace(comment)
+	for _, marker := range []string{"答案：", "答案:"} {
+		if index := strings.LastIndex(comment, marker); index >= 0 {
+			if answer := strings.TrimSpace(comment[index+len(marker):]); answer != "" {
+				return answer
+			}
+		}
+	}
+	return comment
 }
 
 func (s *Service) writeXLSX(path string, records []Record) error {

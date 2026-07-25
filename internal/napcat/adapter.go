@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -66,17 +67,26 @@ func (s Server) Serve(ctx context.Context) error {
 // off the read loop so a slow path (e.g. /reload) never blocks event intake.
 const maxConcurrentEvents = 32
 
+const (
+	groupRequestSyncCount    = 100
+	groupRequestSyncInterval = 10 * time.Second
+)
+
 func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
+	sessionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	sender := SDKSender{client: client}
 	if s.Handler == nil {
 		return
 	}
 	s.Handler.SetSender(sender)
+	defer s.Handler.SetSender(nil)
+	go s.syncGroupJoinRequests(sessionCtx, sender)
 	slots := make(chan struct{}, maxConcurrentEvents)
 	events := client.Events()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-sessionCtx.Done():
 			return
 		case ev, ok := <-events:
 			if !ok {
@@ -87,15 +97,43 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			// spawning unbounded goroutines.
 			select {
 			case slots <- struct{}{}:
-			case <-ctx.Done():
+			case <-sessionCtx.Done():
 				return
 			}
 			go func(evt event.Event) {
 				defer func() { <-slots }()
-				if err := s.handleEvent(ctx, client, evt); err != nil {
+				if err := s.handleEvent(sessionCtx, client, evt); err != nil {
 					log.Printf("handle napcat event failed: %v", err)
 				}
 			}(ev)
+		}
+	}
+}
+
+func (s Server) syncGroupJoinRequests(ctx context.Context, sender SDKSender) {
+	syncOnce := func() {
+		records, err := sender.FetchGroupJoinRequests(ctx, groupRequestSyncCount)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Printf("fetch group join requests for automatic sync failed: %v", err)
+			}
+			if len(records) == 0 {
+				return
+			}
+		}
+		if err := s.Handler.ReconcileGroupJoinRequests(ctx, records); err != nil && ctx.Err() == nil {
+			log.Printf("reconcile group join requests failed: %v", err)
+		}
+	}
+	syncOnce()
+	ticker := time.NewTicker(groupRequestSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			syncOnce()
 		}
 	}
 }
@@ -386,8 +424,9 @@ func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]gro
 		return nil, fmt.Errorf("fetch group system messages: %w", err)
 	}
 	joinRequests, err := decodeGroupSystemMessages(resp.JoinRequests, false)
+	var decodeErrors []error
 	if err != nil {
-		return nil, fmt.Errorf("decode join requests: %w", err)
+		decodeErrors = append(decodeErrors, fmt.Errorf("decode join requests: %w", err))
 	}
 	invitedRaw := resp.InvitedRequests
 	if len(invitedRaw) == 0 {
@@ -395,9 +434,9 @@ func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]gro
 	}
 	invitedRequests, err := decodeGroupSystemMessages(invitedRaw, true)
 	if err != nil {
-		return nil, fmt.Errorf("decode invited requests: %w", err)
+		decodeErrors = append(decodeErrors, fmt.Errorf("decode invited requests: %w", err))
 	}
-	return grouprequest.RecordsFromSystemMessages(joinRequests, invitedRequests), nil
+	return grouprequest.RecordsFromSystemMessages(joinRequests, invitedRequests), errors.Join(decodeErrors...)
 }
 
 type groupSystemMessageWire struct {
@@ -414,14 +453,16 @@ type groupSystemMessageWire struct {
 
 func decodeGroupSystemMessages(rawMessages []json.RawMessage, invited bool) ([]grouprequest.SystemMessage, error) {
 	messages := make([]grouprequest.SystemMessage, 0, len(rawMessages))
+	var decodeErrors []error
 	for i, raw := range rawMessages {
 		message, err := decodeGroupSystemMessage(raw, invited)
 		if err != nil {
-			return nil, fmt.Errorf("item %d: %w", i, err)
+			decodeErrors = append(decodeErrors, fmt.Errorf("item %d: %w", i, err))
+			continue
 		}
 		messages = append(messages, message)
 	}
-	return messages, nil
+	return messages, errors.Join(decodeErrors...)
 }
 
 func decodeGroupSystemMessage(raw json.RawMessage, invited bool) (grouprequest.SystemMessage, error) {

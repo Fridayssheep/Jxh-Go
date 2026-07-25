@@ -67,7 +67,7 @@ func main() {
 		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
 	}
 
-	aiSvc, err := newAIService(ctx, cfg, knowledgeIndex)
+	aiSvc, applicantExtractor, err := newAIServices(ctx, cfg, knowledgeIndex)
 	if err != nil {
 		log.Printf("ai service not available: %v", err)
 	}
@@ -79,11 +79,22 @@ func main() {
 		ResolveKeyword: knowledgeIndex.Keyword,
 		Location:       location,
 	})
+	var extractApplicant grouprequest.ExtractApplicantFunc
+	if applicantExtractor != nil {
+		extractApplicant = func(ctx context.Context, comment string) (grouprequest.ExtractedFields, error) {
+			fields, err := applicantExtractor.Extract(ctx, comment)
+			return grouprequest.ExtractedFields{
+				StudentID: fields.StudentID, StudentName: fields.StudentName, Major: fields.Major,
+			}, err
+		}
+	}
 	groupRequests := grouprequest.NewService(store, grouprequest.Options{
-		ExportDir: "./data/exports/group_requests",
-		Now:       now,
-		Location:  location,
+		ExportDir:        "./data/exports/group_requests",
+		Now:              now,
+		Location:         location,
+		ExtractApplicant: extractApplicant,
 	})
+	go groupRequests.RunAIParser(ctx)
 	pipeline := bot.NewPipeline(bot.Options{
 		Knowledge:     knowledgeIndex,
 		AI:            aiSvc,
@@ -161,9 +172,9 @@ func hasAIModelConfig(cfg config.AIConfig) bool {
 	}
 }
 
-func newAIService(ctx context.Context, cfg config.Config, index *knowledge.IndexRef) (*ai.Service, error) {
+func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.IndexRef) (*ai.Service, *ai.ApplicantExtractor, error) {
 	if !cfg.AI.Enabled || !hasAIModelConfig(cfg.AI) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	chatModel, err := ai.NewEinoModel(ctx, ai.EinoModelConfig{
 		Provider: cfg.AI.Provider,
@@ -172,14 +183,18 @@ func newAIService(ctx context.Context, cfg config.Config, index *knowledge.Index
 		Model:    cfg.AI.Model,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return ai.NewService(ctx, ai.Options{
+	service, err := ai.NewService(ctx, ai.Options{
 		Model:            chatModel,
 		Knowledge:        index,
 		Timeout:          time.Duration(cfg.AI.TimeoutSec) * time.Second,
 		MaxQuestionChars: cfg.AI.MaxQuestionChars,
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return service, ai.NewApplicantExtractor(chatModel, time.Duration(cfg.AI.TimeoutSec)*time.Second), nil
 }
 
 func applicationLocation(cfg config.Config) *time.Location {

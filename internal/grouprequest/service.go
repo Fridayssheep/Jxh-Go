@@ -3,7 +3,9 @@ package grouprequest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,30 +17,46 @@ import (
 )
 
 const (
-	StatusPending = "pending"
-	StatusSeen    = "observed"
+	StatusPending   = "pending"
+	StatusProcessed = "processed"
 
 	SourceEvent  = "event"
 	SourceSystem = "system"
 
-	maxFlagRunes = 512
+	AIParsePending   = "pending"
+	AIParseCompleted = "completed"
+	AIParseFailed    = "failed"
+	AIParseSkipped   = "skipped"
+
+	maxFlagRunes       = 512
+	maxRequestIDRunes  = 64
+	maxAIParseAttempts = 3
+	aiParseBatchSize   = 10
+	aiParseInterval    = 2 * time.Second
 )
 
 type Record struct {
-	ID          uint64
-	Flag        string
-	GroupID     int64
-	UserID      int64
-	StudentID   string
-	StudentName string
-	SubType     string
-	Comment     string
-	Status      string
-	Source      string
-	RawJSON     string
-	RequestedAt time.Time
-	FirstSeenAt time.Time
-	LastSeenAt  time.Time
+	ID              uint64
+	Flag            string
+	SystemRequestID string
+	GroupID         int64
+	UserID          int64
+	StudentID       string
+	StudentName     string
+	Major           string
+	SubType         string
+	Comment         string
+	Status          string
+	Source          string
+	RawJSON         string
+	SystemRawJSON   string
+	AIParseStatus   string
+	AIParseAttempts uint
+	RequestedAt     time.Time
+	ProcessedAt     *time.Time
+	FirstSeenAt     time.Time
+	LastSeenAt      time.Time
+	AIParsedAt      *time.Time
 }
 
 type SystemMessage struct {
@@ -52,20 +70,34 @@ type SystemMessage struct {
 
 type Store interface {
 	UpsertGroupJoinRequest(ctx context.Context, record Record) error
+	ReconcileGroupJoinRequest(ctx context.Context, record Record) error
 	ListGroupJoinRequests(ctx context.Context, limit int) ([]Record, error)
+	ListPendingGroupJoinRequests(ctx context.Context, limit int) ([]Record, error)
+	CompleteGroupJoinRequestAI(ctx context.Context, id uint64, fields ExtractedFields, at time.Time) error
+	FailGroupJoinRequestAI(ctx context.Context, id uint64, maxAttempts int) error
 }
 
+type ExtractedFields struct {
+	StudentID   string
+	StudentName string
+	Major       string
+}
+
+type ExtractApplicantFunc func(context.Context, string) (ExtractedFields, error)
+
 type Options struct {
-	ExportDir string
-	Now       func() time.Time
-	Location  *time.Location
+	ExportDir        string
+	Now              func() time.Time
+	Location         *time.Location
+	ExtractApplicant ExtractApplicantFunc
 }
 
 type Service struct {
-	store     Store
-	exportDir string
-	now       func() time.Time
-	location  *time.Location
+	store            Store
+	exportDir        string
+	now              func() time.Time
+	location         *time.Location
+	extractApplicant ExtractApplicantFunc
 }
 
 type ExportResult struct {
@@ -93,7 +125,10 @@ func NewService(store Store, opts Options) *Service {
 	if location == nil {
 		location = time.Local
 	}
-	return &Service{store: store, exportDir: exportDir, now: now, location: location}
+	return &Service{
+		store: store, exportDir: exportDir, now: now, location: location,
+		extractApplicant: opts.ExtractApplicant,
+	}
 }
 
 func (s *Service) Record(ctx context.Context, record Record) error {
@@ -106,13 +141,90 @@ func (s *Service) Record(ctx context.Context, record Record) error {
 	if utf8.RuneCountInString(record.Flag) > maxFlagRunes {
 		return fmt.Errorf("群申请 flag 超过 %d 个字符", maxFlagRunes)
 	}
-	record = normalizeRecord(record, s.now())
+	if record.GroupID <= 0 || record.UserID <= 0 {
+		return fmt.Errorf("群申请群号或申请人 QQ 无效")
+	}
+	record = normalizeRecord(record, s.now(), s.extractApplicant != nil)
 	return s.store.UpsertGroupJoinRequest(ctx, record)
+}
+
+func (s *Service) Reconcile(ctx context.Context, records []Record) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("群申请存储未初始化")
+	}
+	var reconcileErrors []error
+	for index, record := range records {
+		if record.SystemRequestID == "" {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请 system request id 为空", index+1))
+			continue
+		}
+		if utf8.RuneCountInString(record.SystemRequestID) > maxRequestIDRunes {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请 system request id 过长", index+1))
+			continue
+		}
+		if record.GroupID <= 0 || record.UserID <= 0 {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请群号或申请人 QQ 无效", index+1))
+			continue
+		}
+		record = normalizeRecord(record, s.now(), s.extractApplicant != nil)
+		if err := s.store.ReconcileGroupJoinRequest(ctx, record); err != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("同步第 %d 条群申请: %w", index+1, err))
+		}
+	}
+	return errors.Join(reconcileErrors...)
+}
+
+func (s *Service) RunAIParser(ctx context.Context) {
+	if s == nil || s.store == nil || s.extractApplicant == nil {
+		return
+	}
+	s.processPendingAI(ctx)
+	ticker := time.NewTicker(aiParseInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.processPendingAI(ctx)
+		}
+	}
+}
+
+func (s *Service) processPendingAI(ctx context.Context) {
+	records, err := s.store.ListPendingGroupJoinRequests(ctx, aiParseBatchSize)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("list group requests pending AI parse failed: %v", err)
+		}
+		return
+	}
+	for _, record := range records {
+		fields, err := s.extractApplicant(ctx, record.Comment)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("parse group request with AI failed: id=%d: %v", record.ID, err)
+			if markErr := s.store.FailGroupJoinRequestAI(ctx, record.ID, maxAIParseAttempts); markErr != nil {
+				log.Printf("mark group request AI parse failed: id=%d: %v", record.ID, markErr)
+			}
+			continue
+		}
+		if err := s.store.CompleteGroupJoinRequestAI(ctx, record.ID, fields, s.now()); err != nil {
+			if ctx.Err() == nil {
+				log.Printf("save group request AI fields failed: id=%d: %v", record.ID, err)
+			}
+		}
+	}
 }
 
 func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {
 	if s == nil || s.store == nil {
 		return ExportResult{}, fmt.Errorf("群申请存储未初始化")
+	}
+	if limit < 0 {
+		return ExportResult{}, fmt.Errorf("群申请导出数量不能为负数")
 	}
 	records, err := s.store.ListGroupJoinRequests(ctx, limit)
 	if err != nil {
@@ -177,6 +289,7 @@ func RecordFromEvent(raw []byte) (Record, bool, error) {
 		UserID:      event.UserID,
 		StudentID:   extractStudentID(event.Comment),
 		StudentName: extractStudentName(event.Comment),
+		Major:       extractMajor(event.Comment),
 		SubType:     event.SubType,
 		Comment:     event.Comment,
 		Status:      StatusPending,
@@ -201,28 +314,37 @@ func RecordsFromSystemMessages(joinRequests, invitedRequests []SystemMessage) []
 func recordFromSystemMessage(raw SystemMessage, subType string) Record {
 	status := StatusPending
 	if raw.Checked {
-		status = StatusSeen
+		status = StatusProcessed
 	}
 	return Record{
-		Flag:        raw.RequestID,
-		GroupID:     raw.GroupID,
-		UserID:      raw.UserID,
-		StudentID:   extractStudentID(raw.Message),
-		StudentName: extractStudentName(raw.Message),
-		SubType:     subType,
-		Comment:     raw.Message,
-		Status:      status,
-		Source:      SourceSystem,
-		RawJSON:     raw.RawJSON,
+		Flag:            raw.RequestID,
+		SystemRequestID: raw.RequestID,
+		GroupID:         raw.GroupID,
+		UserID:          raw.UserID,
+		StudentID:       extractStudentID(raw.Message),
+		StudentName:     extractStudentName(raw.Message),
+		Major:           extractMajor(raw.Message),
+		SubType:         subType,
+		Comment:         raw.Message,
+		Status:          status,
+		Source:          SourceSystem,
+		SystemRawJSON:   raw.RawJSON,
 	}
 }
 
-func normalizeRecord(record Record, now time.Time) Record {
+func normalizeRecord(record Record, now time.Time, aiEnabled bool) Record {
 	if record.Status == "" {
 		record.Status = StatusPending
 	}
 	if record.Source == "" {
 		record.Source = SourceEvent
+	}
+	if record.AIParseStatus == "" {
+		if aiEnabled && record.SubType == "add" {
+			record.AIParseStatus = AIParsePending
+		} else {
+			record.AIParseStatus = AIParseSkipped
+		}
 	}
 	if record.RequestedAt.IsZero() {
 		record.RequestedAt = now
@@ -232,6 +354,10 @@ func normalizeRecord(record Record, now time.Time) Record {
 	}
 	if record.LastSeenAt.IsZero() {
 		record.LastSeenAt = now
+	}
+	if record.Status == StatusProcessed && record.ProcessedAt == nil {
+		processedAt := now
+		record.ProcessedAt = &processedAt
 	}
 	return record
 }
@@ -265,6 +391,15 @@ func extractStudentName(comment string) string {
 		if r >= '0' && r <= '9' {
 			return ""
 		}
+	}
+	return candidate
+}
+
+func extractMajor(comment string) string {
+	candidate := extractLabeledValue(comment, []string{"专业", "大类"})
+	candidate = strings.Trim(candidate, " \t\r\n:：=，,；;。、/|")
+	if candidate == "" || utf8.RuneCountInString(candidate) > 128 {
+		return ""
 	}
 	return candidate
 }
@@ -310,7 +445,7 @@ func (s *Service) writeXLSX(path string, records []Record) error {
 	if err := f.SetSheetName(defaultSheet, sheet); err != nil {
 		return err
 	}
-	headers := []string{"记录ID", "群号", "用户QQ", "学号", "姓名", "申请类型", "验证信息", "状态", "来源", "申请时间", "首次记录时间", "最近出现时间", "flag"}
+	headers := []string{"记录ID", "群号", "用户QQ", "学号", "姓名", "专业", "申请类型", "验证信息", "状态", "处理时间", "AI解析状态", "AI解析时间", "来源", "申请时间", "首次记录时间", "最近出现时间", "flag", "系统申请ID"}
 	for i, header := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		if err := f.SetCellValue(sheet, cell, header); err != nil {
@@ -324,14 +459,19 @@ func (s *Service) writeXLSX(path string, records []Record) error {
 			record.UserID,
 			record.StudentID,
 			record.StudentName,
+			record.Major,
 			record.SubType,
 			record.Comment,
 			record.Status,
+			s.formatOptionalTime(record.ProcessedAt),
+			record.AIParseStatus,
+			s.formatOptionalTime(record.AIParsedAt),
 			record.Source,
 			s.formatTime(record.RequestedAt),
 			s.formatTime(record.FirstSeenAt),
 			s.formatTime(record.LastSeenAt),
 			record.Flag,
+			record.SystemRequestID,
 		}
 		for col, value := range values {
 			cell, _ := excelize.CoordinatesToCellName(col+1, row+2)
@@ -344,6 +484,13 @@ func (s *Service) writeXLSX(path string, records []Record) error {
 		return err
 	}
 	return os.Chmod(path, 0o600)
+}
+
+func (s *Service) formatOptionalTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return s.formatTime(*t)
 }
 
 func (s *Service) formatTime(t time.Time) string {

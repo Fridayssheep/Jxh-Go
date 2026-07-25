@@ -15,7 +15,7 @@ const (
 	GroupRoleAdmin  = "admin"
 	GroupRoleMember = "member"
 
-	schedFmtHelp = "格式：/admin 定时任务 添加 <每天|单次> <时间> <当前群ID> <消息内容>\n每天任务时间：HH:MM\n单次任务时间：YYYY-MM-DD HH:MM"
+	schedFmtHelp = "格式：@bot /admin 定时任务 添加 <每天|单次> <时间> <当前群ID> <消息内容>\n每天任务时间：HH:MM\n单次任务时间：YYYY-MM-DD HH:MM"
 )
 
 type SchedulerStore interface {
@@ -99,7 +99,7 @@ func (h *AdminHandler) Execute(ctx context.Context, groupID int64, input string)
 		if jobType == scheduler.JobTypeOnce {
 			dateTimeSplit := strings.SplitN(typeAndRest[1], " ", 3)
 			if len(dateTimeSplit) < 3 {
-				return "单次任务格式：/admin 定时任务 添加 单次 YYYY-MM-DD HH:MM <当前群ID> <消息内容>", nil
+				return "单次任务格式：@bot /admin 定时任务 添加 单次 YYYY-MM-DD HH:MM <当前群ID> <消息内容>", nil
 			}
 			parsedDate, err := time.ParseInLocation("2006-01-02", dateTimeSplit[0], h.location)
 			if err != nil {

@@ -30,7 +30,6 @@ const (
 	AIParseSkipped   = "skipped"
 
 	maxFlagRunes       = 512
-	maxRequestIDRunes  = 64
 	maxAIParseAttempts = 3
 	aiParseBatchSize   = 10
 	aiParseInterval    = 2 * time.Second
@@ -39,7 +38,6 @@ const (
 type Record struct {
 	ID              uint64
 	Flag            string
-	SystemRequestID string
 	GroupID         int64
 	UserID          int64
 	StudentID       string
@@ -71,7 +69,6 @@ type SystemMessage struct {
 
 type Store interface {
 	UpsertGroupJoinRequest(ctx context.Context, record Record) error
-	ReconcileGroupJoinRequest(ctx context.Context, record Record) error
 	ListGroupJoinRequests(ctx context.Context, limit int) ([]Record, error)
 	ListPendingGroupJoinRequests(ctx context.Context, limit int) ([]Record, error)
 	CompleteGroupJoinRequestAI(ctx context.Context, id uint64, fields ExtractedFields, at time.Time) error
@@ -155,12 +152,12 @@ func (s *Service) Reconcile(ctx context.Context, records []Record) error {
 	}
 	var reconcileErrors []error
 	for index, record := range records {
-		if record.SystemRequestID == "" {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请 system request id 为空", index+1))
+		if record.Flag == "" {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请 flag 为空", index+1))
 			continue
 		}
-		if utf8.RuneCountInString(record.SystemRequestID) > maxRequestIDRunes {
-			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请 system request id 过长", index+1))
+		if utf8.RuneCountInString(record.Flag) > maxFlagRunes {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("第 %d 条群申请 flag 超过 %d 个字符", index+1, maxFlagRunes))
 			continue
 		}
 		if record.GroupID <= 0 || record.UserID <= 0 {
@@ -168,7 +165,7 @@ func (s *Service) Reconcile(ctx context.Context, records []Record) error {
 			continue
 		}
 		record = normalizeRecord(record, s.now(), s.extractApplicant != nil)
-		if err := s.store.ReconcileGroupJoinRequest(ctx, record); err != nil {
+		if err := s.store.UpsertGroupJoinRequest(ctx, record); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("同步第 %d 条群申请: %w", index+1, err))
 		}
 	}
@@ -318,18 +315,17 @@ func recordFromSystemMessage(raw SystemMessage, subType string) Record {
 		status = StatusProcessed
 	}
 	return Record{
-		Flag:            raw.RequestID,
-		SystemRequestID: raw.RequestID,
-		GroupID:         raw.GroupID,
-		UserID:          raw.UserID,
-		StudentID:       extractStudentID(raw.Message),
-		StudentName:     extractStudentName(raw.Message),
-		Major:           extractMajor(raw.Message),
-		SubType:         subType,
-		Comment:         raw.Message,
-		Status:          status,
-		Source:          SourceSystem,
-		SystemRawJSON:   raw.RawJSON,
+		Flag:          raw.RequestID,
+		GroupID:       raw.GroupID,
+		UserID:        raw.UserID,
+		StudentID:     extractStudentID(raw.Message),
+		StudentName:   extractStudentName(raw.Message),
+		Major:         extractMajor(raw.Message),
+		SubType:       subType,
+		Comment:       raw.Message,
+		Status:        status,
+		Source:        SourceSystem,
+		SystemRawJSON: raw.RawJSON,
 	}
 }
 
@@ -461,7 +457,7 @@ func (s *Service) writeXLSX(path string, records []Record) error {
 	if err := f.SetSheetName(defaultSheet, sheet); err != nil {
 		return err
 	}
-	headers := []string{"记录ID", "群号", "用户QQ", "学号", "姓名", "专业", "申请类型", "验证信息", "状态", "处理时间", "AI解析状态", "AI解析时间", "来源", "申请时间", "首次记录时间", "最近出现时间", "flag", "系统申请ID"}
+	headers := []string{"记录ID", "群号", "用户QQ", "学号", "姓名", "专业", "申请类型", "验证信息", "状态", "处理时间", "AI解析状态", "AI解析时间", "来源", "申请时间", "首次记录时间", "最近出现时间", "flag"}
 	for i, header := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		if err := f.SetCellValue(sheet, cell, header); err != nil {
@@ -487,7 +483,6 @@ func (s *Service) writeXLSX(path string, records []Record) error {
 			s.formatTime(record.FirstSeenAt),
 			s.formatTime(record.LastSeenAt),
 			record.Flag,
-			record.SystemRequestID,
 		}
 		for col, value := range values {
 			cell, _ := excelize.CoordinatesToCellName(col+1, row+2)

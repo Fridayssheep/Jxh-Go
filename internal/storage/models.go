@@ -32,22 +32,21 @@ func (ScheduledJob) TableName() string {
 }
 
 type GroupJoinRequest struct {
-	ID              uint64  `gorm:"primaryKey"`
-	Flag            string  `gorm:"size:512;not null;uniqueIndex"`
-	SystemRequestID *string `gorm:"size:64;uniqueIndex"`
-	GroupID         int64   `gorm:"index"`
-	UserID          int64   `gorm:"index"`
-	StudentID       string  `gorm:"size:64"`
-	StudentName     string  `gorm:"size:64"`
-	Major           string  `gorm:"size:128"`
-	SubType         string  `gorm:"size:32"`
-	Comment         string  `gorm:"type:text"`
-	Status          string  `gorm:"size:32;not null;index"`
-	Source          string  `gorm:"size:32;not null"`
-	RawJSON         string  `gorm:"type:mediumtext"`
-	SystemRawJSON   string  `gorm:"type:mediumtext"`
-	AIParseStatus   string  `gorm:"column:ai_parse_status;size:32;not null;index"`
-	AIParseAttempts uint    `gorm:"column:ai_parse_attempts"`
+	ID              uint64 `gorm:"primaryKey"`
+	Flag            string `gorm:"size:512;not null;uniqueIndex"`
+	GroupID         int64  `gorm:"index"`
+	UserID          int64  `gorm:"index"`
+	StudentID       string `gorm:"size:64"`
+	StudentName     string `gorm:"size:64"`
+	Major           string `gorm:"size:128"`
+	SubType         string `gorm:"size:32"`
+	Comment         string `gorm:"type:text"`
+	Status          string `gorm:"size:32;not null;index"`
+	Source          string `gorm:"size:32;not null"`
+	RawJSON         string `gorm:"type:mediumtext"`
+	SystemRawJSON   string `gorm:"type:mediumtext"`
+	AIParseStatus   string `gorm:"column:ai_parse_status;size:32;not null;index"`
+	AIParseAttempts uint   `gorm:"column:ai_parse_attempts"`
 	RequestedAt     time.Time
 	ProcessedAt     *time.Time
 	FirstSeenAt     time.Time

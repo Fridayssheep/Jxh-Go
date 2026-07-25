@@ -12,8 +12,6 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const groupRequestCorrelationWindow = time.Minute
-
 type Store struct {
 	db *gorm.DB
 }
@@ -135,102 +133,32 @@ func (s *Store) MarkScheduledJobRan(ctx context.Context, id uint64, at time.Time
 }
 
 func (s *Store) UpsertGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var candidates []GroupJoinRequest
-		if err := tx.Where(
-			"system_request_id IS NOT NULL AND source = ? AND group_id = ? AND user_id = ? AND sub_type = ? AND comment = ? AND last_seen_at >= ?",
-			grouprequest.SourceSystem, record.GroupID, record.UserID, record.SubType, record.Comment,
-			record.LastSeenAt.Add(-groupRequestCorrelationWindow),
-		).Order("last_seen_at DESC").Limit(2).Find(&candidates).Error; err != nil {
-			return err
-		}
-		if len(candidates) == 1 {
-			return tx.Model(&GroupJoinRequest{}).Where("id = ?", candidates[0].ID).Updates(map[string]any{
-				"flag":         record.Flag,
-				"group_id":     record.GroupID,
-				"user_id":      record.UserID,
-				"sub_type":     record.SubType,
-				"comment":      record.Comment,
-				"source":       grouprequest.SourceEvent,
-				"raw_json":     record.RawJSON,
-				"requested_at": record.RequestedAt,
-				"last_seen_at": record.LastSeenAt,
-			}).Error
-		}
-		model := groupJoinRequestToModel(record)
-		return tx.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "flag"}},
-			DoUpdates: clause.Assignments(map[string]any{
-				"group_id":     model.GroupID,
-				"user_id":      model.UserID,
-				"sub_type":     model.SubType,
-				"comment":      model.Comment,
-				"raw_json":     model.RawJSON,
-				"last_seen_at": model.LastSeenAt,
-			}),
-		}).Create(&model).Error
-	})
-}
-
-func (s *Store) ReconcileGroupJoinRequest(ctx context.Context, record grouprequest.Record) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var matched GroupJoinRequest
-		if err := tx.Where("system_request_id = ?", record.SystemRequestID).Limit(1).Find(&matched).Error; err != nil {
-			return err
-		}
-		if matched.ID == 0 {
-			if err := tx.Where("flag = ?", record.SystemRequestID).Limit(1).Find(&matched).Error; err != nil {
-				return err
-			}
-		}
-		if matched.ID == 0 {
-			var candidates []GroupJoinRequest
-			if err := tx.Where(
-				"system_request_id IS NULL AND status = ? AND group_id = ? AND user_id = ? AND sub_type = ? AND comment = ? AND last_seen_at >= ?",
-				grouprequest.StatusPending, record.GroupID, record.UserID, record.SubType, record.Comment,
-				record.LastSeenAt.Add(-groupRequestCorrelationWindow),
-			).Order("last_seen_at DESC").Limit(2).Find(&candidates).Error; err != nil {
-				return err
-			}
-			if len(candidates) == 1 {
-				matched = candidates[0]
-			}
-		}
-		if matched.ID != 0 && matched.Source == grouprequest.SourceSystem {
-			var eventCandidates []GroupJoinRequest
-			if err := tx.Where(
-				"system_request_id IS NULL AND source = ? AND group_id = ? AND user_id = ? AND sub_type = ? AND comment = ? AND last_seen_at >= ?",
-				grouprequest.SourceEvent, record.GroupID, record.UserID, record.SubType, record.Comment,
-				record.LastSeenAt.Add(-groupRequestCorrelationWindow),
-			).Order("last_seen_at DESC").Limit(2).Find(&eventCandidates).Error; err != nil {
-				return err
-			}
-			if len(eventCandidates) == 1 {
-				if err := tx.Delete(&GroupJoinRequest{}, matched.ID).Error; err != nil {
-					return err
-				}
-				return tx.Model(&GroupJoinRequest{}).Where("id = ?", eventCandidates[0].ID).
-					Updates(systemGroupRequestUpdates(record)).Error
-			}
-		}
-		if matched.ID == 0 {
-			model := groupJoinRequestToModel(record)
-			return tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "system_request_id"}},
-				DoUpdates: clause.Assignments(systemGroupRequestUpdates(record)),
-			}).Create(&model).Error
-		}
-		return tx.Model(&GroupJoinRequest{}).Where("id = ?", matched.ID).Updates(systemGroupRequestUpdates(record)).Error
-	})
+	model := groupJoinRequestToModel(record)
+	updates := map[string]any{
+		"group_id":     model.GroupID,
+		"user_id":      model.UserID,
+		"sub_type":     model.SubType,
+		"comment":      model.Comment,
+		"source":       model.Source,
+		"raw_json":     model.RawJSON,
+		"requested_at": model.RequestedAt,
+		"last_seen_at": model.LastSeenAt,
+	}
+	if record.Source == grouprequest.SourceSystem {
+		updates = systemGroupRequestUpdates(record)
+	}
+	return s.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "flag"}},
+		DoUpdates: clause.Assignments(updates),
+	}).Create(&model).Error
 }
 
 func systemGroupRequestUpdates(record grouprequest.Record) map[string]any {
 	updates := map[string]any{
-		"system_request_id": record.SystemRequestID,
-		"group_id":          record.GroupID,
-		"user_id":           record.UserID,
-		"sub_type":          record.SubType,
-		"comment":           record.Comment,
+		"group_id": record.GroupID,
+		"user_id":  record.UserID,
+		"sub_type": record.SubType,
+		"comment":  record.Comment,
 		"status": gorm.Expr(
 			"IF(status = ?, status, ?)", grouprequest.StatusProcessed, record.Status,
 		),
@@ -316,14 +244,9 @@ WHERE id = ? AND ai_parse_status = ?`,
 }
 
 func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
-	var systemRequestID *string
-	if record.SystemRequestID != "" {
-		systemRequestID = &record.SystemRequestID
-	}
 	return GroupJoinRequest{
 		ID:              record.ID,
 		Flag:            record.Flag,
-		SystemRequestID: systemRequestID,
 		GroupID:         record.GroupID,
 		UserID:          record.UserID,
 		StudentID:       record.StudentID,
@@ -346,14 +269,9 @@ func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 }
 
 func groupJoinRequestFromModel(model GroupJoinRequest) grouprequest.Record {
-	systemRequestID := ""
-	if model.SystemRequestID != nil {
-		systemRequestID = *model.SystemRequestID
-	}
 	return grouprequest.Record{
 		ID:              model.ID,
 		Flag:            model.Flag,
-		SystemRequestID: systemRequestID,
 		GroupID:         model.GroupID,
 		UserID:          model.UserID,
 		StudentID:       model.StudentID,

@@ -2,11 +2,13 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 
 	"github.com/zjutjh/jxh-go/internal/cqreply"
+	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/message"
 )
 
@@ -35,6 +37,9 @@ func sendKeywordReply(ctx context.Context, sender Sender, groupID int64, sourceK
 		}
 	}
 	if err := sender.SendGroupMessage(ctx, groupID, chain); err != nil {
+		if isAmbiguousImageSendTimeout(err) {
+			return fmt.Errorf("keyword image send outcome unknown, source_key=%q: %w", sourceKey, err)
+		}
 		log.Printf("send keyword image reply failed, source_key=%q: %v", sourceKey, err)
 		fallback := parsed.PlainText
 		if strings.TrimSpace(fallback) == "" {
@@ -45,4 +50,16 @@ func sendKeywordReply(ctx context.Context, sender Sender, groupID int64, sourceK
 		}
 	}
 	return nil
+}
+
+func isAmbiguousImageSendTimeout(err error) bool {
+	if errors.Is(err, napcatsdk.ErrTimeout) {
+		return true
+	}
+	var apiErr *napcatsdk.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	detail := strings.ToLower(apiErr.Message + " " + apiErr.Wording)
+	return strings.Contains(detail, "timeout") || strings.Contains(detail, "超时")
 }

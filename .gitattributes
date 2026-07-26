@@ -6,6 +6,8 @@ Dockerfile text eol=lf
 *.dockerfile text eol=lf
 docker-compose*.yml text eol=lf
 entrypoint* text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
 
 
 *.bat text eol=crlf

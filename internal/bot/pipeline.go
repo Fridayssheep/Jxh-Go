@@ -21,6 +21,7 @@ import (
 type Sender interface {
 	SendGroupText(ctx context.Context, groupID int64, text string) error
 	SendGroupMessage(ctx context.Context, groupID int64, message message.Chain) error
+	SendGroupFlashFile(ctx context.Context, groupID int64, source, name string) error
 	GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]QuotedMessage, error)
 	ResolveImage(ctx context.Context, file string) (string, error)
 	SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error

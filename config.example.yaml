@@ -3,6 +3,35 @@ app:
   # 应用默认时区。定时任务、日志和时间计算建议统一使用 Asia/Shanghai。
   timezone: "Asia/Shanghai"
 
+admin:
+  # 管理 API 监听地址。生产环境建议只监听内网或回环地址，并由 HTTPS 反向代理转发。
+  addr: "127.0.0.1:8090"
+  # 浏览器访问管理面板的唯一 Origin，用于 Origin/CSRF 校验；部署前必须改为实际 HTTPS 地址。
+  public_origin: "https://manager.example.com"
+  # 会话令牌服务端摘要使用的高强度随机密钥，建议仅通过 JXH_ADMIN_SESSION_SECRET 注入。
+  session_secret: ""
+  # 生产环境必须为 true；仅在隔离的本地 HTTP 开发环境临时关闭。
+  cookie_secure: true
+  # 会话绝对有效期，单位秒；可用 JXH_ADMIN_SESSION_TTL_SECONDS 覆盖，非正值恢复为 43200。
+  session_ttl_seconds: 43200
+  # 会话无操作空闲有效期，单位秒；可用 JXH_ADMIN_SESSION_IDLE_TIMEOUT_SECONDS 覆盖，非正值恢复为 1800。
+  session_idle_timeout_seconds: 1800
+  # 登录失败计数窗口，单位秒；JXH_ADMIN_LOGIN_WINDOW_SECONDS 可覆盖，非正值恢复为 300。
+  login_window_seconds: 300
+  # 单个计数窗口允许的失败次数；JXH_ADMIN_LOGIN_MAX_ATTEMPTS 可覆盖，非正值恢复为 5。
+  login_max_attempts: 5
+  # 仅信任明确列出的反向代理 CIDR；空数组表示不采信转发客户端地址。
+  trusted_proxies: []
+  # HTTP 读取请求头、读取请求、写响应、空闲连接和优雅关闭超时，均为秒；非正值恢复默认值。
+  # 可分别用同名大写 JXH_ADMIN_* 环境变量覆盖。
+  read_header_timeout_seconds: 5
+  read_timeout_seconds: 15
+  write_timeout_seconds: 30
+  idle_timeout_seconds: 60
+  shutdown_timeout_seconds: 10
+  # 单个 JSON 请求体上限，单位字节；JXH_ADMIN_MAX_REQUEST_BODY_BYTES 可覆盖，非正值恢复为 1 MiB。
+  max_request_body_bytes: 1048576
+
 onebot:
   # NapCat OneBot 11 正向 WebSocket 地址。
   # compose 中 NapCat 默认把 3001 暴露到宿主机，因此本地单独运行 bot 时使用 127.0.0.1。
@@ -50,6 +79,17 @@ database:
   loc: "Local"
   # 可选完整 DSN。非空时优先使用该字段，忽略上面的 host/port/user/password/name 等拆分字段。
   dsn: ""
+  # 管理端、worker 与消息管线共享连接池；以下值限制连接占用和失效连接存活时间。
+  # 最大打开连接数；JXH_DATABASE_MAX_OPEN_CONNS 可覆盖，非正值恢复为 20。
+  max_open_conns: 20
+  # 最大空闲连接数，不得超过 max_open_conns；JXH_DATABASE_MAX_IDLE_CONNS 可覆盖，非正值恢复为 10。
+  max_idle_conns: 10
+  # 单连接最长生命周期，单位秒；JXH_DATABASE_CONN_MAX_LIFETIME_SECONDS 可覆盖，非正值恢复为 1800。
+  conn_max_lifetime_seconds: 1800
+  # 空闲连接最长保留时间，单位秒；JXH_DATABASE_CONN_MAX_IDLE_TIME_SECONDS 可覆盖，非正值恢复为 300。
+  conn_max_idle_time_seconds: 300
+  # 启动及健康探测 Ping 超时，单位秒；JXH_DATABASE_PING_TIMEOUT_SECONDS 可覆盖，非正值恢复为 5。
+  ping_timeout_seconds: 5
   # 词条触发日志保留天数；默认 180，设为 0 或负数关闭自动清理。
   trigger_log_retention_days: 180
 

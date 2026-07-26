@@ -15,6 +15,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/bot"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
+	"github.com/zjutjh/jxh-go/internal/safego"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
 	"github.com/zjutjh/napcat-sdk/event"
@@ -102,6 +103,8 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 			}
 			go func(evt event.Event) {
 				defer func() { <-slots }()
+				// 事件处理链全程处理外部可控输入，未恢复的 panic 会终止整个进程。
+				defer safego.Recover("napcat event")
 				if err := s.handleEvent(sessionCtx, client, evt); err != nil {
 					log.Printf("handle napcat event failed: %v", err)
 				}
@@ -112,6 +115,8 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 
 func (s Server) syncGroupJoinRequests(ctx context.Context, sender SDKSender) {
 	syncOnce := func() {
+		// 恢复边界放在每轮工作上，一轮 panic 不会让整个同步循环静默退出。
+		defer safego.Recover("group request sync")
 		records, err := sender.FetchGroupJoinRequests(ctx, groupRequestSyncCount)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -503,22 +508,34 @@ func decodeGroupSystemMessage(raw json.RawMessage, invited bool) (grouprequest.S
 }
 
 func firstInt64JSONValue(field string, values ...json.RawMessage) (int64, error) {
+	// 调用方按优先级传入多个候选字段。某个候选格式不对不代表整条记录无效，
+	// 继续尝试后面的；全部失败时返回第一个错误，保留具体原因。
+	var firstErr error
 	for _, raw := range values {
 		value, err := decimalJSONValue(raw, field, false)
 		if err != nil {
-			return 0, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if value == "" || value == "0" {
 			continue
 		}
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("decode %s %q: %w", field, value, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("decode %s %q: %w", field, value, err)
+			}
+			continue
 		}
 		if parsed == 0 {
 			continue
 		}
 		return parsed, nil
+	}
+	if firstErr != nil {
+		return 0, firstErr
 	}
 	return 0, fmt.Errorf("group system message %s is missing or zero", field)
 }

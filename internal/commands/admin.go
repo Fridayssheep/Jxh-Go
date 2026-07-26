@@ -114,17 +114,19 @@ func (h *AdminHandler) Execute(ctx context.Context, groupID int64, input string)
 				return "单次任务时间不能早于当前时间", nil
 			}
 			runDate = &parsedDate
-			timeHHMM = dateTimeSplit[1]
+			// 存归一化后的写法：time.Parse 接受 "9:30" 这类未补零的小时。
+			timeHHMM = parsedTime.Format("15:04")
 			afterTime = dateTimeSplit[2]
 		} else {
 			timeAndRest := strings.SplitN(typeAndRest[1], " ", 2)
 			if len(timeAndRest) < 2 {
 				return schedFmtHelp, nil
 			}
-			if _, err := time.Parse("15:04", timeAndRest[0]); err != nil {
+			normalized, err := scheduler.NormalizeHHMM(timeAndRest[0])
+			if err != nil {
 				return "时间格式不正确，请使用 HH:MM", nil
 			}
-			timeHHMM = timeAndRest[0]
+			timeHHMM = normalized
 			afterTime = timeAndRest[1]
 		}
 		groupAndMsg := strings.SplitN(afterTime, " ", 2)

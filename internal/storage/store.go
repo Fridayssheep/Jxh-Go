@@ -90,7 +90,7 @@ func (s *Store) AddScheduledJob(ctx context.Context, input commands.ScheduledJob
 		Message:  input.Message,
 		Enabled:  true,
 	}
-	if input.Type == scheduler.JobTypeDaily && input.CreatedAt.Format("15:04") >= input.TimeHHMM {
+	if input.Type == scheduler.JobTypeDaily && scheduler.TimeReached(input.CreatedAt, input.TimeHHMM) {
 		createdAt := input.CreatedAt
 		job.LastRunAt = &createdAt
 	}

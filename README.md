@@ -125,16 +125,23 @@ go run ./cmd/bot -config config.yaml
 | G | `status` | 启用状态 |
 | H | `source_id` | 稳定 ID，修改 keyword 时用于保留同一条记录 |
 
-`answer` 可以包含图片 CQ 标签，Bot 会在关键词精确回复时把它转换成文字和图片消息。本地图片使用固定的相对路径格式：
+`answer` 可以包含图片和文件 CQ 标签，Bot 会在关键词精确回复时按原顺序发送文字、图片和 QQ 闪传附件。本地媒体使用固定的相对路径格式：
 
 ```text
 校区地图：
 [CQ:image,file=maps/campus.png]
+[CQ:file,file=培养计划/人工智能.pdf]
 ```
 
-对应文件放在宿主机的 `data/media/maps/campus.png`。Compose 会把 `data/media/` 只读挂载到 NapCat 的 `/app/jxh-media/`，Bot 发送时会把相对路径转换为该目录下的 `file://` URI。WPS 中只允许使用 `/` 分隔的相对路径；绝对路径、反斜杠、`.`、`..`、查询参数以及直接填写的 `file://`、`base64://` 都会被拒绝。
+对应文件分别放在宿主机的 `data/media/maps/campus.png` 和 `data/media/培养计划/人工智能.pdf`。Compose 会把 `data/media/` 只读挂载到 NapCat 的 `/app/jxh-media/`。WPS 中只允许使用 `/` 分隔的相对路径；绝对路径、反斜杠、`.`、`..`、查询参数以及直接填写的 `file://`、`base64://` 都会被拒绝。
 
-远程图片同时支持 `http://` 和 `https://`，可以写在 `url` 或 `file` 中；有效的 `url` 优先于 `file`。图片链接无效、本地文件不存在或 NapCat 无法读取时会保留周围文字；如果词条只有图片，Bot 会提示管理员检查图片链接。`/ai` 检索只使用去掉图片标签后的文字，不会向模型发送图片或图片 URL。
+远程图片和文件同时支持 `http://` 与 `https://`，可以写在 `url` 或 `file` 中；有效的 `url` 优先于 `file`。文件显示名自动取 URL 或相对路径的最后一段，不需要额外参数，例如：
+
+```text
+[CQ:file,file=https://cube.phlin.cn/files/qqbot/2026培养计划/人工智能.pdf]
+```
+
+远程文件由 bot 下载到 `data/flash/` 后交给 NapCat，通过 QQ 闪传发送为聊天里的临时附件，不会上传到群文件。下载限制为单文件 100 MiB、最多 3 次跳转、2 分钟和同时 2 个任务，并拒绝凭据、非常用端口及内网/本机目标。相同来源在 24 小时内复用暂存文件；暂存总量最多 512 MiB、128 个文件，后续下载时会清理超过 24 小时的内容。图片或文件无效时会在对应位置给出提示并继续发送后续内容；失败提示不会回显可能含签名参数的源 URL。`/ai` 检索只使用去掉图片和文件标签后的文字，不会向模型发送媒体内容或 URL。
 
 导入器会解析 `%编号` 菜单树，并生成 `path` 和 AI 检索用的 `content`。
 

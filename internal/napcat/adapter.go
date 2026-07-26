@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
+	"github.com/zjutjh/jxh-go/internal/flashfile"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/safego"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
@@ -28,6 +30,7 @@ type Server struct {
 	RequestTimeout time.Duration
 	ReconnectDelay time.Duration
 	Handler        *bot.Pipeline
+	FlashFiles     *flashfile.Stager
 }
 
 func (s Server) Serve(ctx context.Context) error {
@@ -76,7 +79,7 @@ const (
 func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sender := SDKSender{client: client}
+	sender := SDKSender{client: client, flashFiles: s.FlashFiles}
 	if s.Handler == nil {
 		return
 	}
@@ -221,7 +224,8 @@ func extractReplyID(chain message.Chain) int64 {
 }
 
 type SDKSender struct {
-	client *napcatsdk.Client
+	client     *napcatsdk.Client
+	flashFiles *flashfile.Stager
 }
 
 func (s SDKSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
@@ -239,6 +243,119 @@ func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg mess
 		Message: encoded,
 	})
 	return err
+}
+
+func (s SDKSender) SendGroupFlashFile(ctx context.Context, groupID int64, source, name string) error {
+	if groupID <= 0 {
+		return fmt.Errorf("group ID must be positive")
+	}
+	filePath := source
+	if strings.HasPrefix(strings.ToLower(source), "http://") || strings.HasPrefix(strings.ToLower(source), "https://") {
+		if s.flashFiles == nil {
+			return fmt.Errorf("flash file stager is not initialized")
+		}
+		staged, err := s.flashFiles.Stage(ctx, source, name)
+		if err != nil {
+			return fmt.Errorf("stage remote flash file: %w", err)
+		}
+		filePath = staged
+	} else if path.Clean(source) != source || !strings.HasPrefix(source, "/app/jxh-media/") || path.Base(source) != name {
+		return fmt.Errorf("invalid local flash file source")
+	}
+
+	files, err := json.Marshal(filePath)
+	if err != nil {
+		return fmt.Errorf("encode flash file path: %w", err)
+	}
+	createResp, err := s.client.API().CreateFlashTask(ctx, api.CreateFlashTaskRequest{
+		Files: api.CreateFlashTaskRequestFilesUnion{Raw: files},
+		Name:  &name,
+	})
+	if err != nil {
+		return fmt.Errorf("create flash task: %w", err)
+	}
+	fileSetID, err := decodeCreateFlashResponse(createResp)
+	if err != nil {
+		return err
+	}
+	groupIDText := strconv.FormatInt(groupID, 10)
+	sendResp, err := s.client.API().SendFlashMsg(ctx, api.SendFlashMsgRequest{
+		FilesetID: fileSetID,
+		GroupID:   &groupIDText,
+	})
+	if err != nil {
+		return fmt.Errorf("send flash message: %w", err)
+	}
+	if err := validateSendFlashResponse(sendResp); err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeCreateFlashResponse(value any) (string, error) {
+	var response struct {
+		Result                    *oneBotInt64 `json:"result"`
+		ErrMsg                    string       `json:"errMsg"`
+		CreateFlashTransferResult struct {
+			FileSetID string `json:"fileSetId"`
+		} `json:"createFlashTransferResult"`
+	}
+	if err := decodeDynamicValue(value, &response); err != nil {
+		return "", fmt.Errorf("decode create flash task response: %w", err)
+	}
+	if response.Result == nil {
+		return "", fmt.Errorf("create flash task response is missing result")
+	}
+	if *response.Result != 0 {
+		return "", fmt.Errorf("create flash task failed with result %d: %s", *response.Result, response.ErrMsg)
+	}
+	fileSetID := strings.TrimSpace(response.CreateFlashTransferResult.FileSetID)
+	if fileSetID == "" {
+		return "", fmt.Errorf("create flash task response is missing fileSetId")
+	}
+	return fileSetID, nil
+}
+
+func validateSendFlashResponse(value any) error {
+	var response struct {
+		ErrCode *oneBotInt64 `json:"errCode"`
+		ErrMsg  string       `json:"errMsg"`
+		Rsp     *struct {
+			SendStatus []struct {
+				Result *oneBotInt64 `json:"result"`
+				Msg    string       `json:"msg"`
+			} `json:"sendStatus"`
+		} `json:"rsp"`
+	}
+	if err := decodeDynamicValue(value, &response); err != nil {
+		return fmt.Errorf("decode send flash message response: %w", err)
+	}
+	if response.ErrCode == nil {
+		return fmt.Errorf("send flash message response is missing errCode")
+	}
+	if *response.ErrCode != 0 {
+		return fmt.Errorf("send flash message failed with errCode %d: %s", *response.ErrCode, response.ErrMsg)
+	}
+	if response.Rsp == nil || len(response.Rsp.SendStatus) == 0 {
+		return fmt.Errorf("send flash message response is missing sendStatus")
+	}
+	for i, status := range response.Rsp.SendStatus {
+		if status.Result == nil {
+			return fmt.Errorf("send flash message status %d is missing result", i+1)
+		}
+		if *status.Result != 0 {
+			return fmt.Errorf("send flash message status %d failed with result %d: %s", i+1, *status.Result, status.Msg)
+		}
+	}
+	return nil
+}
+
+func decodeDynamicValue(value, target any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(encoded, target)
 }
 
 type oneBotInt64 int64

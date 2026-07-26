@@ -18,6 +18,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/bot"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/config"
+	"github.com/zjutjh/jxh-go/internal/flashfile"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
@@ -153,6 +154,7 @@ func main() {
 		RequestTimeout: time.Duration(cfg.OneBot.APITimeoutSec) * time.Second,
 		ReconnectDelay: time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second,
 		Handler:        pipeline,
+		FlashFiles:     flashfile.NewStager("./data/flash", "/app/data/flash"),
 	}
 	log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
 	if err := server.Serve(ctx); err != nil {

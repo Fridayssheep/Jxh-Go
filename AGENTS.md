@@ -22,7 +22,7 @@
 - 引用图中的 `at` 片段优先显示当前群名片，其次显示 QQ 昵称；成员查询失败时回退 QQ 号，不能因此阻断引用图生成。
 - WPS 导入为空或解析失败时不得替换现有索引或有效缓存。菜单 `%编号` 路径构建必须能终止循环父子关系。
 - WPS 基础列为 keyword、answer、维护备注；可选列为 aliases、category、usage、status、source_id。空 keyword/answer 跳过，冲突 source_key 不得静默覆盖不同答案。
-- 关键词 answer 中只执行 CQ image。远程图片仅允许合法 HTTP(S)；本地图片仅允许 `/` 分隔的安全相对路径，并映射到 NapCat 的 `/app/jxh-media/`。拒绝绝对路径、反斜杠、`.`、`..`、查询参数、`file://` 和 `base64://` 输入。
+- 关键词 answer 中只执行 CQ image 和 CQ file，其他 CQ 标签保留为普通文本。两者的远程来源仅允许合法 HTTP(S)，本地来源仅允许 `/` 分隔的安全相对路径，并映射到 NapCat 的 `/app/jxh-media/`；拒绝绝对路径、反斜杠、`.`、`..`、查询参数、`file://` 和 `base64://` 输入。远程文件由 bot 限制跳转、地址、超时、并发和暂存总量后写入共享的 `/app/data/flash/`，单文件不超过 100 MiB，再通过 NapCat 闪传发送；同一来源在保留期内复用暂存文件，失败提示不得回显可能带签名参数的源 URL，禁止改用群文件上传。
 - 定时任务只接受 `每天` 或 `单次`，格式：每天 `HH:MM`；单次 `YYYY-MM-DD HH:MM`（存 `run_date` 列），群号必须为正。只有消息实际发送成功后才能更新 `last_run_at` 或禁用单次任务；NapCat 未连接和发送错误必须保留任务等待重试。新建每天任务时若当前时刻已过 `HH:MM`，需将 `LastRunAt` 设为当前时间避免当天立即触发。
 - WPS 冲突 source_key 不同答案时保留首条并禁用其 AI 检索（`AIEnabled=false`），不得静默覆盖。
 - 群申请只有一个业务标识：NapCat 内部的 `GroupNotify.seq`。实时 OneBot 群申请事件将它以字符串字段 `flag` 返回，`get_group_system_msg` 历史查询则将同一个值以数值字段 `request_id` 返回；两者不是两个不同 ID，只是 NapCat 两套接口的字段名和 JSON 类型不一致。

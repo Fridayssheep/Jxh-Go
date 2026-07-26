@@ -13,6 +13,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/safego"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
 )
@@ -106,7 +107,9 @@ func (r *GroupCommandRouter) handleReload(ctx context.Context, msg GroupMessage,
 		return err
 	}
 	if err := r.reloader.Sync(ctx); err != nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "重载失败："+err.Error())
+		// 底层 *url.Error 会带上完整的 WPS 分享地址（含 query 参数），不能进群。
+		log.Printf("reload knowledge failed: group=%d: %v", msg.GroupID, err)
+		return sender.SendGroupText(ctx, msg.GroupID, "重载失败，请联系管理员查看服务日志")
 	}
 	return sender.SendGroupText(ctx, msg.GroupID, "重载成功")
 }
@@ -121,7 +124,8 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	}
 	quoted, err := sender.GetQuoteMessages(ctx, msg.GroupID, msg.ReplyMessageID, count)
 	if err != nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败："+err.Error())
+		log.Printf("get quote messages failed: group=%d message=%d: %v", msg.GroupID, msg.ReplyMessageID, err)
+		return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败，请稍后再试")
 	}
 	inputs := make([]quote.MessageInput, 0, len(quoted))
 	for _, message := range quoted {
@@ -136,7 +140,9 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	}
 	image, err := r.quote.Generate(ctx, payload)
 	if err != nil {
-		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败："+err.Error())
+		// quote 客户端会把服务端响应正文拼进错误，不能直接发进群。
+		log.Printf("generate quote image failed: group=%d: %v", msg.GroupID, err)
+		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败，请稍后再试")
 	}
 	return sender.SendGroupMessage(ctx, msg.GroupID, message.ChainOf(message.Image("base64://"+image)))
 }
@@ -164,6 +170,8 @@ func (r *GroupCommandRouter) startAI(ctx context.Context, msg GroupMessage, send
 	case r.aiSlots <- struct{}{}:
 		go func() {
 			defer func() { <-r.aiSlots }()
+			// 问题文本与模型输出都不可信，未恢复的 panic 会终止整个进程。
+			defer safego.Recover("ai command")
 			if err := r.handleAI(ctx, msg, sender, text); err != nil {
 				log.Printf("handle ai command failed: %v", err)
 				if sendErr := sender.SendGroupText(ctx, msg.GroupID, "AI问答失败，请稍后再试"); sendErr != nil {
@@ -182,6 +190,11 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 	answer, sourceKeys, err := r.ai.AnswerWithSources(ctx, question)
 	if err != nil {
 		return err
+	}
+	// 空文本会被 QQ 渲染成不可查看的消息，这里兜底避免任何上游路径下发空串。
+	if strings.TrimSpace(answer) == "" {
+		log.Printf("ai answer was empty for group %d, sending fallback", msg.GroupID)
+		answer = ai.EmptyKnowledgeAnswer
 	}
 	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
 		return err

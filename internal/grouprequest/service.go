@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
+	"github.com/zjutjh/jxh-go/internal/safego"
 )
 
 const (
@@ -190,6 +191,8 @@ func (s *Service) RunAIParser(ctx context.Context) {
 }
 
 func (s *Service) processPendingAI(ctx context.Context) {
+	// 恢复边界放在每轮工作上，一轮 panic 不会让整个解析循环静默退出。
+	defer safego.Recover("group request AI parse")
 	records, err := s.store.ListPendingGroupJoinRequests(ctx, aiParseBatchSize)
 	if err != nil {
 		if ctx.Err() == nil {

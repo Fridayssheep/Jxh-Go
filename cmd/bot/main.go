@@ -23,6 +23,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/napcat"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/safego"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
 	"github.com/zjutjh/jxh-go/internal/storage"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
@@ -130,12 +131,14 @@ func main() {
 		Handler: healthMux,
 	}
 	go func() {
+		defer safego.Recover("health server")
 		log.Printf("health check server listening on %s", healthAddr)
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("health check server error: %v", err)
 		}
 	}()
 	go func() {
+		defer safego.Recover("health server shutdown")
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

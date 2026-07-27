@@ -12,6 +12,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/config"
 	"github.com/zjutjh/jxh-go/internal/health"
+	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"gorm.io/gorm"
 )
@@ -135,6 +136,46 @@ func TestCheckDatabaseHealthMapsDeadlineToSafeCode(t *testing.T) {
 	}
 }
 
+func TestRuntimeHealthGroupReportsAggregateLifecycle(t *testing.T) {
+	service := health.NewService()
+	group := newRuntimeHealthGroup(2, service.SetWorkers, time.Now)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{}, 2)
+	run := group.Wrap(func(ctx context.Context) error {
+		<-ctx.Done()
+		return nil
+	})
+	for range 2 {
+		go func() {
+			_ = run(ctx)
+			done <- struct{}{}
+		}()
+	}
+	waitForBotComponentHealth(t, func() health.ComponentStatus { return service.Snapshot().Workers }, true, "available")
+	cancel()
+	<-done
+	<-done
+	waitForBotComponentHealth(t, func() health.ComponentStatus { return service.Snapshot().Workers }, false, "stopped")
+}
+
+func TestRecordQuoteHealthMapsFallbackAndFailure(t *testing.T) {
+	service := health.NewService()
+	fallbackAt := time.Unix(100, 0).UTC()
+	recordQuoteHealth(service, quote.Observation{
+		Outcome: quote.OutcomePNGFallback, OccurredAt: fallbackAt, Latency: 25 * time.Millisecond,
+	})
+	status := service.Snapshot().Quote
+	if status.Available || status.Code != "degraded_fallback" || status.LastSuccessAt != fallbackAt || status.Latency != 25*time.Millisecond {
+		t.Fatalf("fallback health=%+v", status)
+	}
+	failureAt := fallbackAt.Add(time.Minute)
+	recordQuoteHealth(service, quote.Observation{Outcome: quote.OutcomeFailure, OccurredAt: failureAt, Latency: time.Second})
+	status = service.Snapshot().Quote
+	if status.Available || status.Code != "unavailable" || status.LastSuccessAt != fallbackAt || status.LastErrorAt != failureAt {
+		t.Fatalf("failure health=%+v", status)
+	}
+}
+
 func TestRunTelemetryPublishesLifecycleAndFlushesOnShutdown(t *testing.T) {
 	store := &botTelemetryStore{}
 	worker := newBotTelemetryWorker(t, store)
@@ -204,6 +245,19 @@ func waitForBotTelemetryHealth(t *testing.T, service *health.Service, available 
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("telemetry health=%+v, want available=%t code=%s", service.Snapshot().Telemetry, available, code)
+}
+
+func waitForBotComponentHealth(t *testing.T, snapshot func() health.ComponentStatus, available bool, code string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status := snapshot()
+		if status.Available == available && status.Code == code {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("component health=%+v, want available=%t code=%s", snapshot(), available, code)
 }
 
 type botTelemetryStore struct {

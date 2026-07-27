@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -143,8 +144,6 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	healthService.SetDatabase(health.ComponentStatus{
 		Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC,
 	})
-	healthService.SetScheduler(health.ComponentStatus{Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC})
-	healthService.SetWorkers(health.ComponentStatus{Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC})
 
 	knowledgeIndex := knowledge.NewIndexRef(nil)
 	knowledgeSync := knowledge.NewSyncer(knowledge.SyncerOptions{
@@ -221,13 +220,22 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 			managementBackend.Close()
 		}
 	}()
+	quoteClient := quote.NewClient(
+		cfg.Quote.BaseURL,
+		&http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second},
+		func(observation quote.Observation) { recordQuoteHealth(healthService, observation) },
+	)
+	if strings.TrimSpace(cfg.Quote.BaseURL) == "" {
+		checkedAt := time.Now().UTC()
+		healthService.SetQuote(health.ComponentStatus{Code: "not_configured", CheckedAt: checkedAt})
+	}
 	pipeline := bot.NewPipeline(bot.Options{
 		Sender:         napcatGateway,
 		Knowledge:      knowledgeIndex,
 		AI:             aiSvc,
 		Reloader:       knowledgeRuntime,
 		Admin:          commands.NewAdminHandler(store, scheduleLocation),
-		Quote:          quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
+		Quote:          quoteClient,
 		GroupRequests:  groupRequests,
 		TriggerStats:   triggerStats,
 		LinkCleaner:    linkcleaner.NewService(),
@@ -271,15 +279,23 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	if err != nil {
 		return nil, fmt.Errorf("create admin component: %w", err)
 	}
+	adminHealth := newRuntimeHealthGroup(1, healthService.SetAdmin, time.Now)
+	adminComponent.Run = adminHealth.Wrap(adminComponent.Run)
+	schedulerHealth := newRuntimeHealthGroup(1, healthService.SetScheduler, time.Now)
+	workerCount := 3
+	if cfg.Database.TriggerLogRetentionDays > 0 {
+		workerCount++
+	}
+	workerHealth := newRuntimeHealthGroup(workerCount, healthService.SetWorkers, time.Now)
 	components := []app.Component{
 		healthComponent,
 		adminComponent,
 		{Name: "napcat", Critical: true, Run: napcatServer.Serve},
-		{Name: "scheduler", Run: func(ctx context.Context) error { schedulerRuntime.Run(ctx); return nil }},
-		{Name: "group-request-ai", Run: func(ctx context.Context) error { groupRequests.RunAIParser(ctx); return nil }},
-		{Name: "join-request-auto-approver", Run: func(ctx context.Context) error { managementBackend.JoinRequests.RunAutoApprover(ctx); return nil }},
+		{Name: "scheduler", Run: schedulerHealth.Wrap(func(ctx context.Context) error { schedulerRuntime.Run(ctx); return nil })},
+		{Name: "group-request-ai", Run: workerHealth.Wrap(func(ctx context.Context) error { groupRequests.RunAIParser(ctx); return nil })},
+		{Name: "join-request-auto-approver", Run: workerHealth.Wrap(func(ctx context.Context) error { managementBackend.JoinRequests.RunAutoApprover(ctx); return nil })},
 		{Name: "telemetry", Run: func(ctx context.Context) error { return runTelemetry(ctx, healthService, managementBackend.Telemetry) }},
-		{Name: "telemetry-maintenance", Run: managementBackend.Maintenance.Run},
+		{Name: "telemetry-maintenance", Run: workerHealth.Wrap(managementBackend.Maintenance.Run)},
 		{Name: "health-monitor", Run: func(ctx context.Context) error { runHealthMonitor(ctx, healthService, napcatGateway); return nil }},
 		{Name: "database-health-monitor", Run: func(ctx context.Context) error {
 			runDatabaseHealthMonitor(ctx, healthService, sqlDB, 5*time.Second, time.Duration(cfg.Database.PingTimeoutSeconds)*time.Second)
@@ -289,10 +305,10 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	if cfg.Database.TriggerLogRetentionDays > 0 {
 		components = append(components, app.Component{
 			Name: "trigger-log-purge",
-			Run: func(ctx context.Context) error {
+			Run: workerHealth.Wrap(func(ctx context.Context) error {
 				triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
 				return nil
-			},
+			}),
 		})
 	}
 	application, err := app.New(app.Options{
@@ -309,6 +325,96 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 type closeFunc func() error
 
 func (function closeFunc) Close() error { return function() }
+
+type runtimeHealthGroup struct {
+	mu          sync.Mutex
+	expected    int
+	running     int
+	failed      bool
+	lastSuccess time.Time
+	lastError   time.Time
+	set         func(health.ComponentStatus)
+	now         func() time.Time
+}
+
+func newRuntimeHealthGroup(expected int, set func(health.ComponentStatus), now func() time.Time) *runtimeHealthGroup {
+	return &runtimeHealthGroup{expected: expected, set: set, now: now}
+}
+
+func (g *runtimeHealthGroup) Wrap(run func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) (err error) {
+		g.started()
+		defer func() { g.stopped(ctx, err) }()
+		return run(ctx)
+	}
+}
+
+func (g *runtimeHealthGroup) started() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.running++
+	checkedAt := g.now().UTC()
+	status := health.ComponentStatus{
+		Code: "starting", CheckedAt: checkedAt, LastSuccessAt: g.lastSuccess, LastErrorAt: g.lastError,
+	}
+	if g.running == g.expected && !g.failed {
+		status.Available = true
+		status.Code = "available"
+		status.LastSuccessAt = checkedAt
+		g.lastSuccess = checkedAt
+	}
+	g.set(status)
+}
+
+func (g *runtimeHealthGroup) stopped(ctx context.Context, err error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.running > 0 {
+		g.running--
+	}
+	checkedAt := g.now().UTC()
+	failure := err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+	if failure {
+		g.failed = true
+		g.lastError = checkedAt
+	}
+	code := "stopped"
+	if g.failed {
+		code = "failed"
+	} else if ctx.Err() == nil {
+		code = "stopped_unexpectedly"
+		g.lastError = checkedAt
+	}
+	g.set(health.ComponentStatus{
+		Code: code, CheckedAt: checkedAt, LastSuccessAt: g.lastSuccess, LastErrorAt: g.lastError,
+	})
+}
+
+func recordQuoteHealth(service *health.Service, observation quote.Observation) {
+	if service == nil || observation.OccurredAt.IsZero() || observation.Latency < 0 {
+		return
+	}
+	previous := service.Snapshot().Quote
+	status := health.ComponentStatus{
+		CheckedAt: observation.OccurredAt.UTC(), Latency: observation.Latency,
+		LastSuccessAt: previous.LastSuccessAt, LastErrorAt: previous.LastErrorAt,
+	}
+	switch observation.Outcome {
+	case quote.OutcomeGIFSuccess:
+		status.Available = true
+		status.Code = "available"
+		status.LastSuccessAt = status.CheckedAt
+	case quote.OutcomePNGFallback:
+		status.Code = "degraded_fallback"
+		status.LastSuccessAt = status.CheckedAt
+	case quote.OutcomeFailure:
+		status.Code = "unavailable"
+		status.LastErrorAt = status.CheckedAt
+	default:
+		return
+	}
+	service.SetQuote(status)
+}
 
 func runTelemetry(ctx context.Context, service *health.Service, worker *telemetry.Service) error {
 	now := time.Now().UTC()

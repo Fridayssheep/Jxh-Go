@@ -18,6 +18,7 @@ type ComponentStatus struct {
 type Snapshot struct {
 	Live      bool
 	Ready     bool
+	Admin     ComponentStatus
 	Database  ComponentStatus
 	NapCat    ComponentStatus
 	WPS       ComponentStatus
@@ -51,6 +52,12 @@ func (s *Service) SetLive(live bool) {
 func (s *Service) SetDatabase(status ComponentStatus) {
 	s.update(func(snapshot *Snapshot) {
 		snapshot.Database = status
+	})
+}
+
+func (s *Service) SetAdmin(status ComponentStatus) {
+	s.update(func(snapshot *Snapshot) {
+		snapshot.Admin = status
 	})
 }
 
@@ -101,7 +108,7 @@ func (s *Service) update(change func(*Snapshot)) {
 		current := s.load()
 		next := *current
 		change(&next)
-		next.Ready = next.Live && next.Database.Available
+		next.Ready = next.Live && next.Admin.Available && next.Database.Available
 		if s.state.CompareAndSwap(current, &next) {
 			return
 		}

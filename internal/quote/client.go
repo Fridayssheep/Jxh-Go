@@ -32,29 +32,65 @@ type Payload []Message
 type Client struct {
 	baseURL string
 	client  *http.Client
+	observe func(Observation)
 }
 
-func NewClient(baseURL string, client *http.Client) *Client {
+type Outcome string
+
+const (
+	OutcomeGIFSuccess  Outcome = "gif_success"
+	OutcomePNGFallback Outcome = "png_fallback"
+	OutcomeFailure     Outcome = "failure"
+)
+
+type Observation struct {
+	Outcome    Outcome
+	OccurredAt time.Time
+	Latency    time.Duration
+}
+
+func NewClient(baseURL string, client *http.Client, observers ...func(Observation)) *Client {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), client: client}
+	result := &Client{baseURL: strings.TrimRight(baseURL, "/"), client: client}
+	if len(observers) > 0 {
+		result.observe = observers[0]
+	}
+	return result
 }
 
 func (c *Client) Generate(ctx context.Context, payload Payload) (string, error) {
+	startedAt := time.Now()
 	data, err := json.Marshal(payload)
 	if err != nil {
+		c.record(OutcomeFailure, startedAt)
 		return "", fmt.Errorf("marshal quote payload: %w", err)
 	}
 	image, gifErr := c.generate(ctx, data, "/gif/base64/")
 	if gifErr == nil {
+		c.record(OutcomeGIFSuccess, startedAt)
 		return image, nil
 	}
 	image, pngErr := c.generate(ctx, data, "/png/base64/")
 	if pngErr != nil {
+		c.record(OutcomeFailure, startedAt)
 		return "", errors.Join(fmt.Errorf("generate GIF quote: %w", gifErr), fmt.Errorf("generate PNG fallback: %w", pngErr))
 	}
+	c.record(OutcomePNGFallback, startedAt)
 	return image, nil
+}
+
+func (c *Client) record(outcome Outcome, startedAt time.Time) {
+	if c.observe == nil {
+		return
+	}
+	completedAt := time.Now()
+	latency := completedAt.Sub(startedAt)
+	if latency < 0 {
+		latency = 0
+	}
+	c.observe(Observation{Outcome: outcome, OccurredAt: completedAt.UTC(), Latency: latency})
 }
 
 func (c *Client) generate(ctx context.Context, payload []byte, path string) (string, error) {

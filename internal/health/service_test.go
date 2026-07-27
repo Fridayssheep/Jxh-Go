@@ -12,10 +12,11 @@ func TestReadinessSeparatesLivenessFromDependencies(t *testing.T) {
 	service.SetNapCat(ComponentStatus{Available: false, Code: "napcat_unavailable", CheckedAt: time.Unix(2, 0)})
 
 	snapshot := service.Snapshot()
-	if !snapshot.Live || !snapshot.Ready {
-		t.Fatalf("Snapshot() = %+v, want management ready despite NapCat outage", snapshot)
+	if !snapshot.Live || snapshot.Ready {
+		t.Fatalf("Snapshot() = %+v, want unready until Admin HTTP starts", snapshot)
 	}
 
+	service.SetAdmin(ComponentStatus{Available: true, CheckedAt: time.Unix(3, 0)})
 	service.SetNapCat(ComponentStatus{Available: true, CheckedAt: time.Unix(3, 0)})
 	if snapshot := service.Snapshot(); !snapshot.Live || !snapshot.Ready {
 		t.Fatalf("Snapshot() = %+v, want live and ready", snapshot)
@@ -23,6 +24,11 @@ func TestReadinessSeparatesLivenessFromDependencies(t *testing.T) {
 	service.SetDatabase(ComponentStatus{Available: false, CheckedAt: time.Unix(4, 0)})
 	if snapshot := service.Snapshot(); !snapshot.Live || snapshot.Ready {
 		t.Fatalf("Snapshot() = %+v, want live but database-unready", snapshot)
+	}
+	service.SetDatabase(ComponentStatus{Available: true, CheckedAt: time.Unix(5, 0)})
+	service.SetAdmin(ComponentStatus{Available: false, CheckedAt: time.Unix(6, 0)})
+	if snapshot := service.Snapshot(); !snapshot.Live || snapshot.Ready {
+		t.Fatalf("Snapshot() = %+v, want live but Admin HTTP-unready", snapshot)
 	}
 
 	service.SetLive(false)
@@ -42,6 +48,7 @@ func TestSnapshotTracksEveryComponentWithoutSharingMutableState(t *testing.T) {
 		LastSuccessAt: checkedAt,
 		Latency:       25 * time.Millisecond,
 	}
+	service.SetAdmin(status)
 	service.SetDatabase(status)
 	service.SetNapCat(status)
 	service.SetWPS(status)
@@ -53,7 +60,7 @@ func TestSnapshotTracksEveryComponentWithoutSharingMutableState(t *testing.T) {
 
 	first := service.Snapshot()
 	components := []ComponentStatus{
-		first.Database, first.NapCat, first.WPS, first.AI,
+		first.Admin, first.Database, first.NapCat, first.WPS, first.AI,
 		first.Quote, first.Scheduler, first.Workers, first.Telemetry,
 	}
 	for index, component := range components {

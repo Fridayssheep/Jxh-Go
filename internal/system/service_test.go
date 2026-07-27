@@ -109,6 +109,7 @@ func TestRecoverInterruptedPublishesUnknownOperations(t *testing.T) {
 func newSystemFixture(t *testing.T) (*Service, *fakeSystemStore, *fakeRestartGateway) {
 	t.Helper()
 	healthService := health.NewService()
+	healthService.SetAdmin(health.ComponentStatus{Available: true, Code: "available", CheckedAt: time.Unix(1, 0)})
 	healthService.SetDatabase(health.ComponentStatus{Available: true, Code: "available", CheckedAt: time.Unix(1, 0)})
 	healthService.SetNapCat(health.ComponentStatus{Available: false, Code: "napcat_unavailable", CheckedAt: time.Unix(1, 0)})
 	healthService.SetTelemetry(health.ComponentStatus{Available: true, Code: "available", CheckedAt: time.Unix(1, 0)})

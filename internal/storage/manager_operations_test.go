@@ -78,6 +78,22 @@ func TestCustomCommandJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSameCommandRunPayloadUsesJSONSemantics(t *testing.T) {
+	canonical := []byte(`{"version":1,"argument_summaries":[{"Name":"text","Type":"text","Present":true,"RuneLength":5,"Digest":"digest"}],"action_steps":[{"Index":0,"Type":"reply_text","Result":"success","Duration":20000000}]}`)
+	normalized := []byte(`{ "action_steps": [{"Duration": 20000000, "Index": 0, "Result": "success", "Type": "reply_text"}], "argument_summaries": [{"Digest": "digest", "Name": "text", "Present": true, "RuneLength": 5, "Type": "text"}], "version": 1 }`)
+	different := []byte(`{"version":1,"argument_summaries":[],"action_steps":[]}`)
+
+	if !sameCommandRunPayload(canonical, normalized) {
+		t.Fatal("semantically equal JSON payloads did not match")
+	}
+	if sameCommandRunPayload(canonical, different) {
+		t.Fatal("different JSON payloads matched")
+	}
+	if sameCommandRunPayload(canonical, []byte(`{"version":`)) {
+		t.Fatal("malformed JSON payload matched")
+	}
+}
+
 func TestTelemetryOutcomeNormalization(t *testing.T) {
 	tests := map[telemetry.Result]string{
 		telemetry.ResultSuccess:     string(analytics.ResultSuccess),

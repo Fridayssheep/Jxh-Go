@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,6 +76,53 @@ func TestExecuteRunsActionsInOrderStopsAndRecordsPartialWithoutRawText(t *testin
 	}
 	if len(store.recorded.ArgumentSummaries) != 3 || store.recorded.ArgumentSummaries[1].Digest == "" {
 		t.Fatalf("summaries=%+v", store.recorded.ArgumentSummaries)
+	}
+}
+
+func TestExecuteRetriesRunPersistenceWithoutRepeatingActions(t *testing.T) {
+	base := &fakeStore{}
+	store := &retryCommandStore{fakeStore: base, completed: make(chan Run, 1)}
+	gateway := &fakeGateway{available: true}
+	eventSink := &retryCommandEventSink{completed: make(chan events.Draft, 1)}
+	service, err := NewService(Options{
+		Store: store, Gateway: gateway, Events: eventSink,
+		Now:                   func() time.Time { return time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC) },
+		ArgumentSummaryKey:    []byte("0123456789abcdef0123456789abcdef"),
+		PersistenceRetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if err := service.Registry().Upsert(storedCommand()); err != nil {
+		t.Fatal(err)
+	}
+	_, handled, err := service.Execute(t.Context(), ExecuteInput{
+		RunIdentity: "qqmsg:123:456", GroupID: "123", SenderQQ: "9988", SenderRole: SenderAdmin,
+		Message: `/welcome 7788 "safe text" 60`,
+	})
+	if err == nil || !handled {
+		t.Fatalf("handled=%t error=%v", handled, err)
+	}
+	var stored Run
+	select {
+	case stored = <-store.completed:
+	case <-time.After(time.Second):
+		t.Fatal("command run persistence retry did not finish")
+	}
+	if stored.Result != RunSuccess || store.attempts.Load() != 2 {
+		t.Fatalf("stored=%+v attempts=%d", stored, store.attempts.Load())
+	}
+	if got := strings.Join(gateway.calls, ","); got != "reply,mention,mute,send" {
+		t.Fatalf("action calls=%q", got)
+	}
+	select {
+	case draft := <-eventSink.completed:
+		if draft.Type != events.EventCommandRunCompleted || draft.Resource == nil || draft.Resource.ID != "cmd_1" {
+			t.Fatalf("draft=%+v", draft)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("command completion event was not published")
 	}
 }
 
@@ -241,11 +289,21 @@ func newServiceFixtureWithEvents(t *testing.T, store Store, gateway Gateway, eve
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(service.Close)
 	return service
 }
 
 type commandEventSinkFake struct {
 	drafts []events.Draft
+}
+
+type retryCommandEventSink struct {
+	completed chan events.Draft
+}
+
+func (s *retryCommandEventSink) Publish(draft events.Draft) (events.Event, error) {
+	s.completed <- draft
+	return events.Event{}, nil
 }
 
 func (f *commandEventSinkFake) Publish(draft events.Draft) (events.Event, error) {
@@ -268,6 +326,23 @@ type fakeStore struct {
 	listPages   []Page[Command]
 	listQueries []ListQuery
 	listIndex   int
+}
+
+type retryCommandStore struct {
+	*fakeStore
+	attempts  atomic.Int64
+	completed chan Run
+}
+
+func (s *retryCommandStore) RecordCommandRun(ctx context.Context, run Run) (Run, error) {
+	if s.attempts.Add(1) == 1 {
+		return Run{}, errors.New("database unavailable")
+	}
+	stored, err := s.fakeStore.RecordCommandRun(ctx, run)
+	if err == nil {
+		s.completed <- cloneRun(stored)
+	}
+	return stored, err
 }
 
 func (s *fakeStore) CommandNameExists(context.Context, string, string) (bool, error) {

@@ -128,6 +128,7 @@ func (s *Service) persistRun(ctx context.Context, run Run, startedAt time.Time) 
 	stored, err := s.store.RecordCommandRun(persistContext, cloneRun(run))
 	cancel()
 	if err != nil {
+		s.scheduleRunPersistenceRetry(run)
 		return Run{}, true, fmt.Errorf("record custom command run: %w", err)
 	}
 	s.publishRunCompleted(stored)

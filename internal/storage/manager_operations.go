@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1828,6 +1829,14 @@ type commandRunPayload struct {
 	ActionSteps       []customcommand.ActionStep      `json:"action_steps"`
 }
 
+func sameCommandRunPayload(left, right []byte) bool {
+	var leftPayload, rightPayload commandRunPayload
+	if opsUnmarshalJSON(left, &leftPayload) != nil || opsUnmarshalJSON(right, &rightPayload) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftPayload, rightPayload)
+}
+
 func commandJSON(definition customcommand.Definition) ([]byte, []byte, []byte, error) {
 	scope, err := opsMarshalJSON(commandScopePayload{Type: definition.Scope.Type, GroupIDs: append([]string(nil), definition.Scope.GroupIDs...)})
 	if err != nil {
@@ -2277,7 +2286,7 @@ func (s *Store) RecordCommandRun(ctx context.Context, run customcommand.Run) (cu
 	if existing.CommandID != run.CommandID || existing.CommandName != run.CommandName || existing.GroupID != groupID ||
 		existing.TriggeredByQQ != run.TriggeredByQQ || existing.Result != string(run.Result) ||
 		existing.DurationMS != uint64(max(run.Duration.Milliseconds(), 0)) || !sameManagerString(existing.ErrorCode, run.ErrorCode) ||
-		!sameManagerString(existing.RequestID, opsOptionalString(run.RequestID)) || !bytes.Equal(existing.ActionSteps, payload) {
+		!sameManagerString(existing.RequestID, opsOptionalString(run.RequestID)) || !sameCommandRunPayload(existing.ActionSteps, payload) {
 		return customcommand.Run{}, customcommand.ErrConflict
 	}
 	return customRunFromManagerRow(existing)

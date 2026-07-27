@@ -3,6 +3,7 @@ package customcommand
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/auth"
@@ -12,14 +13,16 @@ import (
 const defaultExecutionTimeout = 30 * time.Second
 
 type Options struct {
-	Store              Store
-	Gateway            Gateway
-	Registry           *Registry
-	Now                func() time.Time
-	BuiltinNames       []string
-	ExecutionTimeout   time.Duration
-	ArgumentSummaryKey []byte
-	Events             EventPublisher
+	Store                 Store
+	Gateway               Gateway
+	Registry              *Registry
+	Now                   func() time.Time
+	BuiltinNames          []string
+	ExecutionTimeout      time.Duration
+	ArgumentSummaryKey    []byte
+	Events                EventPublisher
+	WorkerContext         context.Context
+	PersistenceRetryDelay time.Duration
 }
 
 type Service struct {
@@ -30,6 +33,12 @@ type Service struct {
 	executionTimeout time.Duration
 	summaryKey       []byte
 	events           EventPublisher
+	workerCtx        context.Context
+	cancel           context.CancelFunc
+	retryDelay       time.Duration
+	lifecycleMu      sync.Mutex
+	closed           bool
+	wait             sync.WaitGroup
 }
 
 func NewService(options Options) (*Service, error) {
@@ -51,10 +60,65 @@ func NewService(options Options) (*Service, error) {
 	if timeout > defaultExecutionTimeout {
 		return nil, ErrInvalidInput
 	}
+	if options.PersistenceRetryDelay <= 0 {
+		options.PersistenceRetryDelay = time.Second
+	}
+	workerContext := options.WorkerContext
+	if workerContext == nil {
+		workerContext = context.Background()
+	}
+	workerContext, cancel := context.WithCancel(workerContext)
 	return &Service{
 		store: options.Store, gateway: options.Gateway, registry: registry, now: options.Now,
 		executionTimeout: timeout, summaryKey: append([]byte(nil), options.ArgumentSummaryKey...), events: options.Events,
+		workerCtx: workerContext, cancel: cancel, retryDelay: options.PersistenceRetryDelay,
 	}, nil
+}
+
+func (s *Service) scheduleRunPersistenceRetry(run Run) {
+	run = cloneRun(run)
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.wait.Add(1)
+	s.lifecycleMu.Unlock()
+	go func() {
+		defer s.wait.Done()
+		for {
+			timer := time.NewTimer(s.retryDelay)
+			select {
+			case <-s.workerCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+			attemptContext, cancel := context.WithTimeout(s.workerCtx, s.executionTimeout)
+			stored, err := s.store.RecordCommandRun(attemptContext, cloneRun(run))
+			cancel()
+			if err != nil {
+				continue
+			}
+			s.publishRunCompleted(stored)
+			return
+		}
+	}()
+}
+
+func (s *Service) Close() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if !s.closed {
+		s.closed = true
+		s.cancel()
+	}
+	s.lifecycleMu.Unlock()
+	s.wait.Wait()
 }
 
 func (s *Service) Registry() *Registry {

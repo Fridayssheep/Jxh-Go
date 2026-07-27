@@ -101,6 +101,9 @@ func (b *Backend) Close() {
 	if b.ScheduledJobs != nil {
 		b.ScheduledJobs.Close()
 	}
+	if b.CustomCommands != nil {
+		b.CustomCommands.Close()
+	}
 	if b.Groups != nil {
 		b.Groups.Close()
 	}
@@ -174,6 +177,7 @@ func NewBackend(options Options) (*Backend, error) {
 	var knowledgeService *knowledgeadmin.Service
 	var joinRequestService *joinrequests.Service
 	var scheduledJobService *scheduledjobs.Service
+	var customCommandService *customcommand.Service
 	fail := func(err error) (*Backend, error) {
 		if knowledgeService != nil {
 			knowledgeService.Close()
@@ -186,6 +190,9 @@ func NewBackend(options Options) (*Backend, error) {
 		}
 		if scheduledJobService != nil {
 			scheduledJobService.Close()
+		}
+		if customCommandService != nil {
+			customCommandService.Close()
 		}
 		systemService.Close()
 		return nil, err
@@ -243,9 +250,9 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create analytics service: %w", err))
 	}
-	customCommandService, err := customcommand.NewService(customcommand.Options{
+	customCommandService, err = customcommand.NewService(customcommand.Options{
 		Store: options.Store, Gateway: napcat.NewCustomCommandGateway(options.Gateway), Now: options.Now,
-		ArgumentSummaryKey: secrets.CommandArgument, Events: hub,
+		ArgumentSummaryKey: secrets.CommandArgument, Events: hub, WorkerContext: options.Context,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create custom command service: %w", err))

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -157,15 +158,25 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		t.Fatalf("replay successful scheduled occurrence: reservation=%+v error=%v", terminalReservation, err)
 	}
 
-	recordedRun, err := store.RecordCommandRun(t.Context(), customcommand.Run{
+	runInput := customcommand.Run{
 		RunIdentity: "command-run-identity-1", CommandID: command.ID, CommandName: command.Name,
 		GroupID: "10001", TriggeredByQQ: "20001", Result: customcommand.RunSuccess,
 		ArgumentSummaries: []customcommand.ArgumentSummary{{Name: "text", Type: customcommand.ParameterText, Present: true, RuneLength: 5}},
 		ActionSteps:       []customcommand.ActionStep{{Index: 0, Type: customcommand.ActionReplyText, Result: customcommand.StepSuccess, Duration: 20 * time.Millisecond}},
 		Duration:          25 * time.Millisecond, RequestID: "req_command_run", OccurredAt: now.Add(5 * time.Minute),
-	})
+	}
+	recordedRun, err := store.RecordCommandRun(t.Context(), runInput)
 	if err != nil || recordedRun.ID == "" || recordedRun.Result != customcommand.RunSuccess || len(recordedRun.ActionSteps) != 1 {
 		t.Fatalf("record command run: run=%+v error=%v", recordedRun, err)
+	}
+	replayedCommandRun, err := store.RecordCommandRun(t.Context(), runInput)
+	if err != nil || replayedCommandRun.ID != recordedRun.ID || replayedCommandRun.Result != recordedRun.Result {
+		t.Fatalf("replay command run persistence: run=%+v error=%v", replayedCommandRun, err)
+	}
+	conflictingRun := runInput
+	conflictingRun.ArgumentSummaries = []customcommand.ArgumentSummary{{Name: "text", Type: customcommand.ParameterText, Present: true, RuneLength: 6}}
+	if _, err := store.RecordCommandRun(t.Context(), conflictingRun); !errors.Is(err, customcommand.ErrConflict) {
+		t.Fatalf("conflicting command run persistence error=%v", err)
 	}
 
 	actorHash := strings.Repeat("a", 64)

@@ -131,6 +131,35 @@ func TestCloseSessionClosesOnlyMatchingSubscriptions(t *testing.T) {
 	}
 }
 
+func TestCloseUserClosesEveryUserSubscriptionOnly(t *testing.T) {
+	hub := newTestHub(t, Options{Capacity: 8, Retention: time.Hour, SubscriberBuffer: 4})
+	first, _, err := hub.Subscribe(t.Context(), SubscribeOptions{AllowedTopics: []Topic{TopicAuth}, SessionID: "session-1", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := hub.Subscribe(t.Context(), SubscribeOptions{AllowedTopics: []Topic{TopicGroups}, SessionID: "session-2", UserID: "user-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, _, err := hub.Subscribe(t.Context(), SubscribeOptions{AllowedTopics: []Topic{TopicAuth}, SessionID: "session-3", UserID: "user-2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.CloseUser("user-1")
+	for index, subscription := range []*Subscription{first, second} {
+		select {
+		case <-subscription.Done():
+		case <-time.After(time.Second):
+			t.Fatalf("matching user subscription %d remained open", index)
+		}
+	}
+	select {
+	case <-unrelated.Done():
+		t.Fatal("unrelated user subscription was closed")
+	default:
+	}
+}
+
 func TestHubSupportsConcurrentPublishSubscribeAndClose(t *testing.T) {
 	hub := newTestHub(t, Options{Capacity: 64, Retention: time.Hour, SubscriberBuffer: 64})
 	var workers sync.WaitGroup

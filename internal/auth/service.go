@@ -261,6 +261,16 @@ func validUTF8Characters(value string, maxCharacters int) bool {
 }
 
 func (s *Service) Authenticate(ctx context.Context, sessionToken string) (AuthContext, error) {
+	return s.authenticate(ctx, sessionToken, true)
+}
+
+// AuthenticatePassive validates the current database state without extending
+// idle expiry. Long-lived streams use it to reauthorize in place.
+func (s *Service) AuthenticatePassive(ctx context.Context, sessionToken string) (AuthContext, error) {
+	return s.authenticate(ctx, sessionToken, false)
+}
+
+func (s *Service) authenticate(ctx context.Context, sessionToken string, touch bool) (AuthContext, error) {
 	sessionToken, csrfToken, ok := parseSessionCredential(sessionToken)
 	if !ok {
 		return AuthContext{}, ErrUnauthenticated
@@ -279,7 +289,7 @@ func (s *Service) Authenticate(ctx context.Context, sessionToken string) (AuthCo
 	if !hmac.Equal(identity.CSRFDigest[:], csrfDigest[:]) {
 		return AuthContext{}, ErrUnauthenticated
 	}
-	if !now.Before(identity.Session.LastSeenAt.Add(sessionTouchInterval)) {
+	if touch && !now.Before(identity.Session.LastSeenAt.Add(sessionTouchInterval)) {
 		expiresAt := now.Add(s.idleTTL)
 		if identity.Session.AbsoluteExpiresAt.Before(expiresAt) {
 			expiresAt = identity.Session.AbsoluteExpiresAt

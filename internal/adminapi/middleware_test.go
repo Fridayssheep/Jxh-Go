@@ -223,9 +223,14 @@ func (testAuthenticator) Authenticate(_ context.Context, credential string) (aut
 		return auth.AuthContext{}, auth.ErrUnauthenticated
 	}
 	return auth.AuthContext{
-		User: auth.User{ID: "usr_1", Role: role}, Session: auth.Session{ID: "ses_1", UserID: "usr_1"},
+		User:        auth.User{ID: "usr_1", Role: role, Enabled: true},
+		Session:     auth.Session{ID: "ses_1", UserID: "usr_1", Status: auth.SessionStatusActive},
 		Permissions: auth.PermissionsFor(role), CSRFToken: "valid-csrf-token",
 	}, nil
+}
+
+func (a testAuthenticator) AuthenticatePassive(ctx context.Context, credential string) (auth.AuthContext, error) {
+	return a.Authenticate(ctx, credential)
 }
 
 type failingReplacementAuthenticator struct {

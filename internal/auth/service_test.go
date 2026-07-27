@@ -297,6 +297,9 @@ func TestLoginAtomicallyUpgradesPasswordAndRotatesPriorSession(t *testing.T) {
 	if result.User.Version != 42 || result.User.LastLoginAt == nil || !result.User.LastLoginAt.Equal(now) || !result.User.UpdatedAt.Equal(now) {
 		t.Fatalf("login returned pre-commit user state: %+v", result.User)
 	}
+	if _, err := service.AuthenticatePassive(t.Context(), priorCredential); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("rotated prior credential passive authentication error = %v", err)
+	}
 }
 
 func TestAuthenticateEnforcesIdleAndAbsoluteExpiry(t *testing.T) {
@@ -434,6 +437,41 @@ func TestAuthenticateReturnsContextAndTouchesConditionallyAtSixtySeconds(t *test
 			t.Fatalf("touch = %+v, want %+v", touches[0], wantTouch)
 		}
 	})
+}
+
+func TestAuthenticatePassiveRevalidatesWithoutExtendingIdleExpiry(t *testing.T) {
+	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	credential, token, csrfToken := testSessionCredential(t, 6, 16)
+	secret := bytes.Repeat([]byte{9}, 32)
+	digest := digestSessionToken(secret, token)
+	store := newFakeAuthStore()
+	identity := testSessionIdentity(now, now.Add(-time.Minute), now.Add(time.Hour))
+	identity.CSRFDigest = digestCSRFToken(secret, csrfToken)
+	store.sessions[digest] = identity
+	service := newTestAuthService(t, store, &spyPasswordEngine{}, bytes.NewReader(bytes.Repeat([]byte{1}, 64)), now)
+
+	result, err := service.AuthenticatePassive(t.Context(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Session.LastSeenAt.Equal(identity.Session.LastSeenAt) || !result.Session.ExpiresAt.Equal(identity.Session.ExpiresAt) {
+		t.Fatalf("passive authentication changed session timestamps: %+v", result.Session)
+	}
+	if touches := store.touchesSnapshot(); len(touches) != 0 {
+		t.Fatalf("passive authentication touched the session: %+v", touches)
+	}
+
+	identity.User.Enabled = false
+	store.sessions[digest] = identity
+	if _, err := service.AuthenticatePassive(t.Context(), credential); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("disabled passive authentication error = %v", err)
+	}
+	identity.User.Enabled = true
+	identity.Session.ExpiresAt = now
+	store.sessions[digest] = identity
+	if _, err := service.AuthenticatePassive(t.Context(), credential); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expired passive authentication error = %v", err)
+	}
 }
 
 func TestLoginRejectsInvalidOrOversizedTextBeforeLookup(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 type AuthOperations interface {
 	Authenticator
 	ReplacementAuthenticator
+	StreamAuthenticator
 	Login(ctx context.Context, request auth.LoginRequest) (auth.LoginResult, error)
 	Logout(ctx context.Context, credential string, identity auth.AuthContext, request auth.MutationContext) error
 	ChangePassword(ctx context.Context, identity auth.AuthContext, input auth.ChangePasswordInput) (auth.LoginResult, error)
@@ -145,6 +146,9 @@ func (h *AuthHandlers) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	h.setSessionCookie(w, result.SessionToken)
 	h.publishRevocation(identity.Session.ID, result.Session.CreatedAt)
+	if h.events != nil {
+		h.events.CloseUser(identity.User.ID)
+	}
 	writeJSON(w, http.StatusOK, mapAuthContext(result.AuthContext))
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/events"
 )
 
 func TestLoginSetsStrictCookieWithoutReturningToken(t *testing.T) {
@@ -90,6 +91,30 @@ func TestChangePasswordAllowsReplacedCookieReplayAndRotatesCookie(t *testing.T) 
 	}
 }
 
+func TestChangePasswordClosesEverySubscriptionForUser(t *testing.T) {
+	service := newFakeAuthOperations()
+	hub := newSSETestHub(t)
+	subscription, _, err := hub.Subscribe(t.Context(), events.SubscribeOptions{
+		AllowedTopics: []events.Topic{events.TopicGroups}, SessionID: "ses_other", UserID: "usr_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := newAuthHTTPFixtureWithEvents(t, service, hub)
+	request := authMutationRequest(http.MethodPost, "/api/admin/v1/auth/change-password", `{"current_password":"current-password","new_password":"new-password-123"}`)
+	request.Header.Set("Idempotency-Key", "idem-change-1")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-subscription.Done():
+	case <-time.After(time.Second):
+		t.Fatal("user subscription remained open after password change")
+	}
+}
+
 func TestLoginUsesUniformSafeErrors(t *testing.T) {
 	for _, failure := range []error{auth.ErrInvalidCredentials, errors.New("database leaked secret")} {
 		service := newFakeAuthOperations()
@@ -127,6 +152,10 @@ func TestLoginValidatesContractBeforeService(t *testing.T) {
 }
 
 func newAuthHTTPFixture(t *testing.T, service *fakeAuthOperations) *Router {
+	return newAuthHTTPFixtureWithEvents(t, service, nil)
+}
+
+func newAuthHTTPFixtureWithEvents(t *testing.T, service *fakeAuthOperations, eventSink SessionEventSink) *Router {
 	t.Helper()
 	router, err := NewRouter(MiddlewareOptions{
 		PublicOrigin: "https://manager.example", MaxBodyBytes: 1 << 20,
@@ -135,7 +164,7 @@ func newAuthHTTPFixture(t *testing.T, service *fakeAuthOperations) *Router {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handlers, err := NewAuthHandlers(service, nil, true)
+	handlers, err := NewAuthHandlers(service, eventSink, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +210,13 @@ func newFakeAuthOperations() *fakeAuthOperations {
 }
 
 func (s *fakeAuthOperations) Authenticate(context.Context, string) (auth.AuthContext, error) {
+	if s.normalAuthErr != nil {
+		return auth.AuthContext{}, s.normalAuthErr
+	}
+	return s.identity, nil
+}
+
+func (s *fakeAuthOperations) AuthenticatePassive(context.Context, string) (auth.AuthContext, error) {
 	if s.normalAuthErr != nil {
 		return auth.AuthContext{}, s.normalAuthErr
 	}

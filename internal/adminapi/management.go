@@ -97,7 +97,7 @@ func NewManagementRouter(options ManagementOptions) (*Router, error) {
 	if err != nil {
 		return nil, err
 	}
-	eventsHandler, err := NewEventsHandler(options.Events, options.SSEHeartbeat)
+	eventsHandler, err := NewEventsHandler(options.Events, options.Auth, options.SSEHeartbeat)
 	if err != nil {
 		return nil, err
 	}

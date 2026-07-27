@@ -100,6 +100,47 @@ func TestRevokeSessionPublishesAndClosesSubscription(t *testing.T) {
 	}
 }
 
+func TestUserSecurityMutationsCloseAllUserSubscriptions(t *testing.T) {
+	for _, operation := range []string{"update", "password_reset", "bulk_revoke"} {
+		t.Run(operation, func(t *testing.T) {
+			hub := newSSETestHub(t)
+			subscription, _, err := hub.Subscribe(t.Context(), events.SubscribeOptions{
+				AllowedTopics: []events.Topic{events.TopicGroups}, SessionID: "ses_target", UserID: "usr_1",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := &fakeAdminUserService{user: testAdminUser()}
+			var request *http.Request
+			switch operation {
+			case "update":
+				request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/users/usr_1", `{"role":"observer"}`)
+				request.Header.Set("If-Match", `"2"`)
+			case "password_reset":
+				service.reset = auth.PasswordResetResult{User: testAdminUser(), RevokedSessionCount: 2, CompletedAt: time.Unix(100, 0)}
+				request = userMutationRequest(t, http.MethodPost, "/api/admin/v1/users/usr_1/password-reset", `{"new_password":"new-valid-password"}`)
+				request.Header.Set("If-Match", `"2"`)
+				request.Header.Set("Idempotency-Key", "idem-reset-1")
+			case "bulk_revoke":
+				service.revoke = auth.SessionRevokeResult{UserID: "usr_1", RevokedCount: 2, RevokedAt: time.Unix(100, 0)}
+				request = userMutationRequest(t, http.MethodPost, "/api/admin/v1/users/usr_1/sessions/revoke", "")
+				request.Header.Set("Idempotency-Key", "idem-revoke-1")
+			}
+			router := newUsersHTTPFixture(t, service, hub)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			select {
+			case <-subscription.Done():
+			case <-time.After(time.Second):
+				t.Fatal("user subscription remained open after security mutation")
+			}
+		})
+	}
+}
+
 func TestUserAndSessionQueriesRejectInvalidValuesBeforeService(t *testing.T) {
 	service := &fakeAdminUserService{}
 	router := newUsersHTTPFixture(t, service, nil)

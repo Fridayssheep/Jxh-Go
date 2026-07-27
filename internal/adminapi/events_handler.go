@@ -18,14 +18,19 @@ type EventSubscriber interface {
 	Subscribe(ctx context.Context, options events.SubscribeOptions) (*events.Subscription, events.ReplayState, error)
 }
 
-type EventsHandler struct {
-	hub       EventSubscriber
-	heartbeat time.Duration
+type StreamAuthenticator interface {
+	AuthenticatePassive(ctx context.Context, credential string) (auth.AuthContext, error)
 }
 
-func NewEventsHandler(hub EventSubscriber, heartbeat time.Duration) (*EventsHandler, error) {
-	if hub == nil {
-		return nil, fmt.Errorf("event hub is required")
+type EventsHandler struct {
+	hub           EventSubscriber
+	authenticator StreamAuthenticator
+	heartbeat     time.Duration
+}
+
+func NewEventsHandler(hub EventSubscriber, authenticator StreamAuthenticator, heartbeat time.Duration) (*EventsHandler, error) {
+	if hub == nil || authenticator == nil {
+		return nil, fmt.Errorf("event hub and stream authenticator are required")
 	}
 	if heartbeat == 0 {
 		heartbeat = defaultSSEHeartbeat
@@ -33,7 +38,7 @@ func NewEventsHandler(hub EventSubscriber, heartbeat time.Duration) (*EventsHand
 	if heartbeat < 0 {
 		return nil, fmt.Errorf("event heartbeat must be positive")
 	}
-	return &EventsHandler{hub: hub, heartbeat: heartbeat}, nil
+	return &EventsHandler{hub: hub, authenticator: authenticator, heartbeat: heartbeat}, nil
 }
 
 func (h *EventsHandler) Register(router *Router) error {
@@ -49,6 +54,22 @@ func (h *EventsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, r, http.StatusUnauthorized, CodeUnauthorized, "需要登录", nil, false)
 		return
 	}
+	cookie, err := r.Cookie(SessionCookieName)
+	if err != nil || cookie.Value == "" {
+		writeAPIError(w, r, http.StatusUnauthorized, CodeUnauthorized, "需要登录", nil, false)
+		return
+	}
+	validated, err := h.authenticator.AuthenticatePassive(r.Context(), cookie.Value)
+	if err != nil || !sameStreamAuthorization(identity, validated) {
+		if err != nil && !errors.Is(err, auth.ErrUnauthenticated) {
+			w.Header().Set("Retry-After", "3")
+			writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "authentication service is unavailable", nil, true)
+			return
+		}
+		writeAPIError(w, r, http.StatusUnauthorized, CodeUnauthorized, "登录状态无效或已过期", nil, false)
+		return
+	}
+	identity = validated
 	requested, err := parseEventTopics(r.URL.Query()["topic"])
 	if err != nil {
 		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "事件主题无效", map[string][]string{"topic": {"主题必须唯一且属于支持的枚举"}}, false)
@@ -56,7 +77,7 @@ func (h *EventsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	subscription, _, err := h.hub.Subscribe(r.Context(), events.SubscribeOptions{
 		AllowedTopics: allowedEventTopics(identity.User.Role), RequestedTopics: requested,
-		LastEventID: r.Header.Get("Last-Event-ID"), SessionID: identity.Session.ID,
+		LastEventID: r.Header.Get("Last-Event-ID"), SessionID: identity.Session.ID, UserID: identity.User.ID,
 	})
 	if err != nil {
 		if errors.Is(err, events.ErrTopicForbidden) {
@@ -96,11 +117,21 @@ func (h *EventsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ticker.C:
+			validated, err := h.authenticator.AuthenticatePassive(r.Context(), cookie.Value)
+			if err != nil || !sameStreamAuthorization(identity, validated) {
+				return
+			}
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil || controller.Flush() != nil {
 				return
 			}
 		}
 	}
+}
+
+func sameStreamAuthorization(initial, current auth.AuthContext) bool {
+	return current.User.Enabled && current.User.ID == initial.User.ID && current.User.Role == initial.User.Role &&
+		current.Session.ID == initial.Session.ID && current.Session.UserID == current.User.ID &&
+		current.Session.Status == auth.SessionStatusActive && current.Session.RevokedAt == nil
 }
 
 func parseEventTopics(values []string) ([]events.Topic, error) {

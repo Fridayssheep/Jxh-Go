@@ -107,6 +107,7 @@ type SubscribeOptions struct {
 	RequestedTopics []Topic
 	LastEventID     string
 	SessionID       string
+	UserID          string
 }
 
 type Hub struct {
@@ -125,6 +126,7 @@ type Subscription struct {
 	hub       *Hub
 	id        uint64
 	sessionID string
+	userID    string
 	topics    map[Topic]struct{}
 	events    chan Event
 	done      chan struct{}
@@ -195,7 +197,8 @@ func (h *Hub) Publish(draft Draft) (Event, error) {
 }
 
 func (h *Hub) Subscribe(ctx context.Context, options SubscribeOptions) (*Subscription, ReplayState, error) {
-	if h == nil || ctx == nil || !utf8.ValidString(options.SessionID) || len(options.SessionID) > 256 {
+	if h == nil || ctx == nil || !utf8.ValidString(options.SessionID) || len(options.SessionID) > 256 ||
+		!utf8.ValidString(options.UserID) || len(options.UserID) > 256 {
 		return nil, ReplayLive, ErrInvalidSubscription
 	}
 	topics, err := subscriptionTopics(options.AllowedTopics, options.RequestedTopics)
@@ -216,6 +219,7 @@ func (h *Hub) Subscribe(ctx context.Context, options SubscribeOptions) (*Subscri
 		hub:       h,
 		id:        h.nextSubscriberID,
 		sessionID: options.SessionID,
+		userID:    options.UserID,
 		topics:    topics,
 		events:    make(chan Event, buffer),
 		done:      make(chan struct{}),
@@ -244,6 +248,19 @@ func (h *Hub) CloseSession(sessionID string) {
 	defer h.mu.Unlock()
 	for id, subscription := range h.subscribers {
 		if subscription.sessionID == sessionID {
+			h.closeSubscriptionLocked(id, subscription)
+		}
+	}
+}
+
+func (h *Hub) CloseUser(userID string) {
+	if h == nil || userID == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, subscription := range h.subscribers {
+		if subscription.userID == userID {
 			h.closeSubscriptionLocked(id, subscription)
 		}
 	}

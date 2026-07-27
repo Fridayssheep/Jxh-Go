@@ -29,6 +29,7 @@ type AdminUserService interface {
 type SessionEventSink interface {
 	Publish(draft events.Draft) (events.Event, error)
 	CloseSession(sessionID string)
+	CloseUser(userID string)
 }
 
 type UsersHandlers struct {
@@ -189,6 +190,9 @@ func (h *UsersHandlers) updateUser(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, err)
 		return
 	}
+	if h.events != nil {
+		h.events.CloseUser(user.ID)
+	}
 	setRevisionETag(w, user.Version)
 	writeJSON(w, http.StatusOK, mapAdminUser(user))
 }
@@ -222,6 +226,9 @@ func (h *UsersHandlers) resetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	if userID == identity.User.ID {
 		h.clearSessionCookie(w)
+	}
+	if h.events != nil {
+		h.events.CloseUser(userID)
 	}
 	writeJSON(w, http.StatusOK, passwordResetDTO{
 		User: mapAdminUser(result.User), RevokedSessionCount: result.RevokedSessionCount, CompletedAt: result.CompletedAt.UTC(),
@@ -296,17 +303,16 @@ func (h *UsersHandlers) publishRevocation(result auth.SessionRevokeResult) {
 	if h.events == nil || result.RevokedCount == 0 {
 		return
 	}
-	resourceID := ""
-	if result.SessionID != nil {
-		resourceID = *result.SessionID
+	if result.SessionID == nil {
+		h.events.CloseUser(result.UserID)
+		return
 	}
+	resourceID := *result.SessionID
 	_, _ = h.events.Publish(events.Draft{
 		Type: events.EventAuthSessionRevoked, OccurredAt: result.RevokedAt,
 		Resource: &events.Resource{Type: events.ResourceSession, ID: resourceID}, Reason: "revoked",
 	})
-	if resourceID != "" {
-		h.events.CloseSession(resourceID)
-	}
+	h.events.CloseSession(resourceID)
 }
 
 func (h *UsersHandlers) clearSessionCookie(w http.ResponseWriter) {

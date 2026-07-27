@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/audit"
@@ -62,15 +63,17 @@ type TelemetryRecorder interface {
 }
 
 type Options struct {
-	Store              Store
-	Approver           Approver
-	Events             EventPublisher
-	Telemetry          TelemetryRecorder
-	Now                func() time.Time
-	OverdueAfter       time.Duration
-	DecisionTimeout    time.Duration
-	ProcessingLease    time.Duration
-	PersistenceTimeout time.Duration
+	Store                 Store
+	Approver              Approver
+	Events                EventPublisher
+	Telemetry             TelemetryRecorder
+	Now                   func() time.Time
+	OverdueAfter          time.Duration
+	DecisionTimeout       time.Duration
+	ProcessingLease       time.Duration
+	PersistenceTimeout    time.Duration
+	PersistenceRetryDelay time.Duration
+	WorkerContext         context.Context
 }
 
 type Service struct {
@@ -83,13 +86,20 @@ type Service struct {
 	decisionTimeout    time.Duration
 	processingLease    time.Duration
 	persistenceTimeout time.Duration
+	retryDelay         time.Duration
+	workerCtx          context.Context
+	cancel             context.CancelFunc
+	lifecycleMu        sync.Mutex
+	closed             bool
+	wait               sync.WaitGroup
 }
 
 const (
-	defaultOverdueAfter       = 24 * time.Hour
-	defaultDecisionTimeout    = 15 * time.Second
-	defaultProcessingLease    = time.Minute
-	defaultPersistenceTimeout = 5 * time.Second
+	defaultOverdueAfter          = 24 * time.Hour
+	defaultDecisionTimeout       = 15 * time.Second
+	defaultProcessingLease       = time.Minute
+	defaultPersistenceTimeout    = 5 * time.Second
+	defaultPersistenceRetryDelay = time.Second
 )
 
 func NewService(options Options) (*Service, error) {
@@ -100,10 +110,16 @@ func NewService(options Options) (*Service, error) {
 	decisionTimeout := positiveDuration(options.DecisionTimeout, defaultDecisionTimeout)
 	processingLease := positiveDuration(options.ProcessingLease, defaultProcessingLease)
 	persistenceTimeout := positiveDuration(options.PersistenceTimeout, defaultPersistenceTimeout)
+	retryDelay := positiveDuration(options.PersistenceRetryDelay, defaultPersistenceRetryDelay)
+	workerContext := options.WorkerContext
+	if workerContext == nil {
+		workerContext = context.Background()
+	}
+	workerContext, cancel := context.WithCancel(workerContext)
 	return &Service{
 		store: options.Store, approver: options.Approver, events: options.Events, telemetry: options.Telemetry, now: options.Now,
 		overdueAfter: overdueAfter, decisionTimeout: decisionTimeout, processingLease: processingLease,
-		persistenceTimeout: persistenceTimeout,
+		persistenceTimeout: persistenceTimeout, retryDelay: retryDelay, workerCtx: workerContext, cancel: cancel,
 	}, nil
 }
 
@@ -322,6 +338,7 @@ func (s *Service) execute(ctx context.Context, item ReservedItem, reason string)
 	result, err := s.store.CompleteDecision(persistContext, completion)
 	persistCancel()
 	if err != nil {
+		s.scheduleCompletionRetry(completion)
 		return DecisionResult{}, fmt.Errorf("complete join request decision: %w", err)
 	}
 	if !validDecisionResult(result, item.Request.ID, item.Decision.ID, attemptStatus, decisionStatus) {
@@ -349,16 +366,68 @@ func (s *Service) completeWithoutExternal(item ReservedItem, errorCode string) B
 	result, err := s.store.CompleteDecision(ctx, completion)
 	cancel()
 	if err != nil || !validDecisionResult(result, item.Request.ID, item.Decision.ID, AttemptFailed, DecisionPending) {
+		if err != nil {
+			s.scheduleCompletionRetry(completion)
+		}
 		return BulkItemResult{
 			RequestID: item.Request.ID, Outcome: ItemFailed, Request: cloneRequest(item.Request), Decision: cloneDecision(item.Decision),
 			Error: &ItemError{Code: "persistence_unavailable", Message: "decision completion could not be persisted", Retryable: true},
 		}
 	}
+	s.publish(result.Request.ID, result.Request.Version, "join_request_decided")
 	s.recordDecision(result)
 	return BulkItemResult{
 		RequestID: item.Request.ID, Outcome: ItemFailed, Request: s.normalizeRequest(result.Request), Decision: cloneDecision(result.Decision),
 		Error: &ItemError{Code: errorCode, Message: "decision was not sent", Retryable: true},
 	}
+}
+
+func (s *Service) scheduleCompletionRetry(completion CompletionMutation) {
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.wait.Add(1)
+	s.lifecycleMu.Unlock()
+	go func() {
+		defer s.wait.Done()
+		for {
+			timer := time.NewTimer(s.retryDelay)
+			select {
+			case <-s.workerCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+			attemptContext, cancel := context.WithTimeout(s.workerCtx, s.persistenceTimeout)
+			result, err := s.store.CompleteDecision(attemptContext, completion)
+			cancel()
+			if err != nil || !validDecisionResult(result, completion.RequestID, completion.DecisionID,
+				completion.AttemptStatus, completion.DecisionStatus) {
+				continue
+			}
+			result.Request = s.normalizeRequest(result.Request)
+			s.publish(result.Request.ID, result.Request.Version, "join_request_decided")
+			s.recordDecision(result)
+			return
+		}
+	}()
+}
+
+func (s *Service) Close() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if !s.closed {
+		s.closed = true
+		s.cancel()
+	}
+	s.lifecycleMu.Unlock()
+	s.wait.Wait()
 }
 
 func (s *Service) recordDecision(result DecisionResult) {

@@ -3,6 +3,7 @@ package joinrequests
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -99,6 +100,48 @@ func TestDecisionTelemetryWaitsForDurableCompletion(t *testing.T) {
 	}
 	if len(recorder.observations) != 0 {
 		t.Fatalf("failed persistence emitted telemetry=%+v", recorder.observations)
+	}
+}
+
+func TestDecisionCompletionRetriesWithoutRepeatingExternalAction(t *testing.T) {
+	request := joinRequestFixture("flag_retry", DecisionProcessing, 2)
+	decision := decisionFixture(request.ID, "dec_retry", ActionApprove, AttemptStarted)
+	var attempts atomic.Int64
+	store := &joinStoreFake{reservation: Reservation{Items: []ReservedItem{{Request: request, Decision: decision}}}}
+	store.complete = func(mutation CompletionMutation) (DecisionResult, error) {
+		if attempts.Add(1) == 1 {
+			return DecisionResult{}, errors.New("database unavailable")
+		}
+		return completedDecisionResult(request, decision, mutation), nil
+	}
+	recorder := &joinRetryTelemetryRecorder{recorded: make(chan telemetry.Observation, 1)}
+	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
+	service, err := NewService(Options{
+		Store: store, Approver: approver, Telemetry: recorder, Now: func() time.Time { return joinTestTime },
+		DecisionTimeout: time.Second, ProcessingLease: time.Minute, PersistenceTimeout: time.Second,
+		PersistenceRetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if _, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 1,
+		DecisionInput{Action: ActionApprove}, "decision-retry-key", joinMutationRequest()); err == nil {
+		t.Fatal("initial persistence failure did not reach the caller")
+	}
+	select {
+	case observation := <-recorder.recorded:
+		if observation.Result != telemetry.ResultSuccess || observation.Kind != telemetry.EventManualApproval {
+			t.Fatalf("observation=%+v", observation)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("durable completion retry did not finish")
+	}
+	if attempts.Load() != 2 {
+		t.Fatalf("completion attempts=%d, want 2", attempts.Load())
+	}
+	if len(approver.flags) != 1 {
+		t.Fatalf("external decision calls=%d, want 1", len(approver.flags))
 	}
 }
 
@@ -310,11 +353,21 @@ func newJoinServiceWithTelemetry(t *testing.T, store Store, approver Approver, r
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(service.Close)
 	return service
 }
 
 type joinTelemetryRecorderFake struct {
 	observations []telemetry.Observation
+}
+
+type joinRetryTelemetryRecorder struct {
+	recorded chan telemetry.Observation
+}
+
+func (r *joinRetryTelemetryRecorder) Record(observation telemetry.Observation) bool {
+	r.recorded <- observation
+	return true
 }
 
 func (r *joinTelemetryRecorderFake) Record(observation telemetry.Observation) bool {

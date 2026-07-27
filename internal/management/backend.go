@@ -95,6 +95,9 @@ func (b *Backend) Close() {
 	if b.Knowledge != nil {
 		b.Knowledge.Close()
 	}
+	if b.JoinRequests != nil {
+		b.JoinRequests.Close()
+	}
 	if b.Groups != nil {
 		b.Groups.Close()
 	}
@@ -166,12 +169,16 @@ func NewBackend(options Options) (*Backend, error) {
 	}
 	var groupService *groups.Service
 	var knowledgeService *knowledgeadmin.Service
+	var joinRequestService *joinrequests.Service
 	fail := func(err error) (*Backend, error) {
 		if knowledgeService != nil {
 			knowledgeService.Close()
 		}
 		if groupService != nil {
 			groupService.Close()
+		}
+		if joinRequestService != nil {
+			joinRequestService.Close()
 		}
 		systemService.Close()
 		return nil, err
@@ -204,8 +211,9 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create telemetry service: %w", err))
 	}
-	joinRequestService, err := joinrequests.NewService(joinrequests.Options{
+	joinRequestService, err = joinrequests.NewService(joinrequests.Options{
 		Store: options.Store, Approver: options.Gateway, Events: hub, Telemetry: telemetryService, Now: options.Now,
+		WorkerContext: options.Context,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create join request service: %w", err))

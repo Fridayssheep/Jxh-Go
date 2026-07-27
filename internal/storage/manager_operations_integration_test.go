@@ -77,13 +77,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		t.Fatalf("begin join decision: reservation=%+v error=%v", joinReservation, err)
 	}
 	decisionID := joinReservation.Items[0].Decision.ID
-	decisionResult, err := store.CompleteDecision(t.Context(), joinrequests.CompletionMutation{
+	decisionCompletion := joinrequests.CompletionMutation{
 		DecisionID: decisionID, RequestID: "join-flag-1", AttemptStatus: joinrequests.AttemptConfirmed,
 		DecisionStatus: joinrequests.DecisionApproved, CompletedAt: now.Add(3*time.Minute + time.Second),
-	})
+	}
+	decisionResult, err := store.CompleteDecision(t.Context(), decisionCompletion)
 	if err != nil || decisionResult.Request.DecisionStatus != joinrequests.DecisionApproved ||
 		decisionResult.Request.Version != 3 || decisionResult.Decision.Status != joinrequests.AttemptConfirmed {
 		t.Fatalf("complete join decision: result=%+v error=%v", decisionResult, err)
+	}
+	replayedDecision, err := store.CompleteDecision(t.Context(), decisionCompletion)
+	if err != nil || replayedDecision.Decision.ID != decisionID || replayedDecision.Request.Version != decisionResult.Request.Version {
+		t.Fatalf("replay join decision completion: result=%+v error=%v", replayedDecision, err)
 	}
 	joinReplay, err := store.BeginDecisions(t.Context(), joinrequests.BeginMutation{
 		Context: joinrequests.MutationContext{

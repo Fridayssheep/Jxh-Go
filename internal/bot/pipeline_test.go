@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/customcommand"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
+	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/settings"
 	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"github.com/zjutjh/napcat-sdk/message"
@@ -55,9 +59,10 @@ func TestPipelineSettingsDisableInteractiveCommandsButNotTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	sender := &botSenderFake{}
-	pipeline := NewPipeline(Options{Sender: sender, Settings: runtime})
+	recorder := &telemetryRecorderFake{}
+	pipeline := NewPipeline(Options{Sender: sender, Settings: runtime, Telemetry: recorder})
 	for _, text := range []string{"/ai question", "/q", "/test"} {
-		if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, Text: text}); err != nil {
+		if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: text}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -67,6 +72,99 @@ func TestPipelineSettingsDisableInteractiveCommandsButNotTest(t *testing.T) {
 	}
 	if sender.quoteReads != 0 {
 		t.Fatalf("disabled quote read %d messages", sender.quoteReads)
+	}
+	if !hasTelemetryResult(recorder.observations, telemetry.EventAIRequest, telemetry.ResultDisabled) {
+		t.Fatalf("disabled AI telemetry=%+v", recorder.observations)
+	}
+}
+
+func TestGroupCommandRouterRecordsAIOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		answer  string
+		sources []string
+		err     error
+		want    telemetry.Result
+	}{
+		{name: "success", answer: "answer", sources: []string{"entry_1"}, want: telemetry.ResultSuccess},
+		{name: "no knowledge", answer: "fallback", want: telemetry.ResultNoKnowledge},
+		{name: "timeout", err: context.DeadlineExceeded, want: telemetry.ResultTimeout},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := newChannelTelemetryRecorder()
+			router := NewGroupCommandRouter(Options{
+				AI: &aiAnswererFake{answer: test.answer, sources: test.sources, err: test.err}, Telemetry: recorder,
+			})
+			if err := router.startAI(t.Context(), GroupMessage{GroupID: 123, UserID: 456}, &botSenderFake{}, "/ai private question"); err != nil {
+				t.Fatal(err)
+			}
+			observation := waitTelemetry(t, recorder.events)
+			if observation.Kind != telemetry.EventAIRequest || observation.Result != test.want ||
+				observation.FeatureKey != string(settings.FeatureAIQA) || observation.GroupID != 123 || observation.UserID != 456 {
+				t.Fatalf("observation=%+v", observation)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", observation), "private question") ||
+				(test.answer != "" && strings.Contains(fmt.Sprintf("%+v", observation), test.answer)) {
+				t.Fatalf("AI telemetry retained content: %+v", observation)
+			}
+		})
+	}
+}
+
+func TestGroupCommandRouterRecordsBusyAIWithoutStartingThirdRequest(t *testing.T) {
+	recorder := newChannelTelemetryRecorder()
+	answerer := &aiAnswererFake{answer: "answer", sources: []string{"entry_1"}, started: make(chan struct{}, 2), release: make(chan struct{})}
+	router := NewGroupCommandRouter(Options{AI: answerer, Telemetry: recorder})
+	sender := &botSenderFake{}
+	message := GroupMessage{GroupID: 123, UserID: 456}
+	if err := router.startAI(t.Context(), message, sender, "/ai first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.startAI(t.Context(), message, sender, "/ai second"); err != nil {
+		t.Fatal(err)
+	}
+	waitStartedAI(t, answerer.started)
+	waitStartedAI(t, answerer.started)
+	if err := router.startAI(t.Context(), message, sender, "/ai third"); err != nil {
+		t.Fatal(err)
+	}
+	if observation := waitTelemetry(t, recorder.events); observation.Result != telemetry.ResultBusy {
+		t.Fatalf("busy observation=%+v", observation)
+	}
+	close(answerer.release)
+	for range 2 {
+		if observation := waitTelemetry(t, recorder.events); observation.Result != telemetry.ResultSuccess {
+			t.Fatalf("completed observation=%+v", observation)
+		}
+	}
+}
+
+func TestGroupCommandRouterRecordsQuotePNGFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/gif/base64/" {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("png-image"))
+	}))
+	defer server.Close()
+	recorder := &telemetryRecorderFake{}
+	sender := &botSenderFake{quoteMessages: []QuotedMessage{{
+		UserID: 789, Nickname: "User", RawMessage: "private quote text", Message: message.ChainOf(message.Text("private quote text")),
+	}}}
+	pipeline := NewPipeline(Options{Sender: sender, Quote: quote.NewClient(server.URL, server.Client()), Telemetry: recorder})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{
+		GroupID: 123, UserID: 456, Text: "/q", ReplyMessageID: 99,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !hasTelemetryResult(recorder.observations, telemetry.EventQuote, telemetry.ResultFallback) {
+		t.Fatalf("quote telemetry=%+v", recorder.observations)
+	}
+	for _, observation := range recorder.observations {
+		if strings.Contains(fmt.Sprintf("%+v", observation), "private quote text") {
+			t.Fatalf("quote telemetry retained content: %+v", observation)
+		}
 	}
 }
 
@@ -221,19 +319,26 @@ func TestPipelineRecordsOnlyStructuredTelemetry(t *testing.T) {
 }
 
 type botSenderFake struct {
-	texts      []string
-	messages   []message.Chain
-	quoteReads int
-	role       string
-	roleReads  int
+	mu            sync.Mutex
+	texts         []string
+	messages      []message.Chain
+	quoteReads    int
+	quoteMessages []QuotedMessage
+	quoteErr      error
+	role          string
+	roleReads     int
 }
 
 func (s *botSenderFake) SendGroupText(_ context.Context, _ int64, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.texts = append(s.texts, text)
 	return nil
 }
 
 func (s *botSenderFake) SendGroupMessage(_ context.Context, _ int64, value message.Chain) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.messages = append(s.messages, append(message.Chain(nil), value...))
 	return nil
 }
@@ -243,8 +348,10 @@ func (*botSenderFake) SendGroupFlashFile(context.Context, int64, string, string)
 }
 
 func (s *botSenderFake) GetQuoteMessages(context.Context, int64, int64, int) ([]QuotedMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.quoteReads++
-	return nil, nil
+	return append([]QuotedMessage(nil), s.quoteMessages...), s.quoteErr
 }
 
 func (*botSenderFake) ResolveImage(context.Context, string) (string, error) {
@@ -295,6 +402,66 @@ type telemetryRecorderFake struct {
 func (f *telemetryRecorderFake) Record(observation telemetry.Observation) bool {
 	f.observations = append(f.observations, observation)
 	return true
+}
+
+type channelTelemetryRecorder struct {
+	events chan telemetry.Observation
+}
+
+func newChannelTelemetryRecorder() *channelTelemetryRecorder {
+	return &channelTelemetryRecorder{events: make(chan telemetry.Observation, 8)}
+}
+
+func (r *channelTelemetryRecorder) Record(observation telemetry.Observation) bool {
+	r.events <- observation
+	return true
+}
+
+type aiAnswererFake struct {
+	answer  string
+	sources []string
+	err     error
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *aiAnswererFake) AnswerWithSources(context.Context, string) (string, []string, error) {
+	if a.started != nil {
+		a.started <- struct{}{}
+	}
+	if a.release != nil {
+		<-a.release
+	}
+	return a.answer, append([]string(nil), a.sources...), a.err
+}
+
+func waitTelemetry(t *testing.T, events <-chan telemetry.Observation) telemetry.Observation {
+	t.Helper()
+	select {
+	case observation := <-events:
+		return observation
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for telemetry")
+		return telemetry.Observation{}
+	}
+}
+
+func waitStartedAI(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for AI request")
+	}
+}
+
+func hasTelemetryResult(observations []telemetry.Observation, kind telemetry.EventKind, result telemetry.Result) bool {
+	for _, observation := range observations {
+		if observation.Kind == kind && observation.Result == result {
+			return true
+		}
+	}
+	return false
 }
 
 type maintenanceAllowlistFake struct {

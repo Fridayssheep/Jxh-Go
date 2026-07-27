@@ -188,8 +188,16 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create settings service: %w", err))
 	}
+	telemetryService, err := telemetry.NewService(telemetry.Options{
+		Store: options.Store, HMACSecret: secrets.TelemetryUser, Capacity: telemetryCapacity,
+		BatchSize: telemetryBatchSize, FlushInterval: telemetryFlushInterval,
+		FlushTimeout: telemetryFlushTimeout, Now: options.Now, Logger: options.Logger,
+	})
+	if err != nil {
+		return fail(fmt.Errorf("create telemetry service: %w", err))
+	}
 	joinRequestService, err := joinrequests.NewService(joinrequests.Options{
-		Store: options.Store, Approver: options.Gateway, Events: hub, Now: options.Now,
+		Store: options.Store, Approver: options.Gateway, Events: hub, Telemetry: telemetryService, Now: options.Now,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create join request service: %w", err))
@@ -217,14 +225,6 @@ func NewBackend(options Options) (*Backend, error) {
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create custom command service: %w", err))
-	}
-	telemetryService, err := telemetry.NewService(telemetry.Options{
-		Store: options.Store, HMACSecret: secrets.TelemetryUser, Capacity: telemetryCapacity,
-		BatchSize: telemetryBatchSize, FlushInterval: telemetryFlushInterval,
-		FlushTimeout: telemetryFlushTimeout, Now: options.Now, Logger: options.Logger,
-	})
-	if err != nil {
-		return fail(fmt.Errorf("create telemetry service: %w", err))
 	}
 	maintenance, err := telemetry.NewMaintenance(telemetry.MaintenanceOptions{
 		Store: options.Store, Location: options.Location, RetentionDays: telemetryRetentionDays,

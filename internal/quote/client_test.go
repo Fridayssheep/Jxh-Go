@@ -19,9 +19,9 @@ func TestClientObservesPNGFallbackWithoutRawFailure(t *testing.T) {
 	defer server.Close()
 	observed := make(chan Observation, 1)
 	client := NewClient(server.URL, server.Client(), func(value Observation) { observed <- value })
-	image, err := client.Generate(t.Context(), Payload{{UserID: 1, UserNickname: "User", Message: []MessageSegment{{Type: "text", Text: "hello"}}}})
-	if err != nil || image != "png-image" {
-		t.Fatalf("image=%q error=%v", image, err)
+	image, outcome, err := client.GenerateWithOutcome(t.Context(), Payload{{UserID: 1, UserNickname: "User", Message: []MessageSegment{{Type: "text", Text: "hello"}}}})
+	if err != nil || image != "png-image" || outcome != OutcomePNGFallback {
+		t.Fatalf("image=%q outcome=%q error=%v", image, outcome, err)
 	}
 	observation := <-observed
 	if observation.Outcome != OutcomePNGFallback || observation.OccurredAt.IsZero() || observation.Latency < 0 {
@@ -36,9 +36,12 @@ func TestClientObservesCompleteFailure(t *testing.T) {
 	defer server.Close()
 	observed := make(chan Observation, 1)
 	client := NewClient(server.URL, server.Client(), func(value Observation) { observed <- value })
-	_, err := client.Generate(context.Background(), Payload{})
+	_, outcome, err := client.GenerateWithOutcome(context.Background(), Payload{})
 	if err == nil {
 		t.Fatal("Generate() unexpectedly succeeded")
+	}
+	if outcome != OutcomeFailure {
+		t.Fatalf("outcome=%q", outcome)
 	}
 	if message := err.Error(); strings.Contains(message, "sensitive upstream response") || !strings.Contains(message, "HTTP 503") {
 		t.Fatalf("Generate() error = %q", message)

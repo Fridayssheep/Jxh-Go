@@ -163,19 +163,19 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		{Kind: telemetry.EventGroupMessage, OccurredAt: now.Add(6 * time.Minute), GroupID: "10001", UserKey: actorHash, Result: telemetry.ResultSuccess, Count: 1},
 		{Kind: telemetry.EventAIRequest, OccurredAt: now.Add(6*time.Minute + time.Second), GroupID: "10001", UserKey: actorHash, FeatureKey: "ai_qa", Result: telemetry.ResultSuccess, DurationMS: 125, Count: 2},
 		{Kind: telemetry.EventCommandRun, OccurredAt: now.Add(6*time.Minute + 2*time.Second), GroupID: "10001", UserKey: actorHash, FeatureKey: "custom_commands", Result: telemetry.ResultSuccess, CommandID: command.ID, Count: 1},
+		{Kind: telemetry.EventScheduledJobRun, OccurredAt: now.Add(6*time.Minute + 3*time.Second), GroupID: "10001", Result: telemetry.ResultSuccess, DurationMS: 50, JobID: job.ID, Count: 1},
+		{Kind: telemetry.EventManualApproval, OccurredAt: now.Add(6*time.Minute + 4*time.Second), GroupID: "10001", Result: telemetry.ResultSuccess, Count: 1},
+		{Kind: telemetry.EventAutomaticApproval, OccurredAt: now.Add(6*time.Minute + 5*time.Second), GroupID: "10001", Result: telemetry.ResultFailed, Count: 1},
+		{Kind: telemetry.EventQuote, OccurredAt: now.Add(6*time.Minute + 6*time.Second), GroupID: "10001", FeatureKey: "quote", Result: telemetry.ResultSuccess, DurationMS: 20, Count: 1},
+		{Kind: telemetry.EventQuote, OccurredAt: now.Add(6*time.Minute + 7*time.Second), GroupID: "10001", FeatureKey: "quote", Result: telemetry.ResultFallback, DurationMS: 30, Count: 1},
+		{Kind: telemetry.EventQuote, OccurredAt: now.Add(6*time.Minute + 8*time.Second), GroupID: "10001", FeatureKey: "quote", Result: telemetry.ResultFailed, DurationMS: 40, Count: 1},
 	}); err != nil {
 		t.Fatalf("append telemetry: %v", err)
 	}
 	if err := store.AggregateTelemetryDaily(t.Context(), now.AddDate(0, 0, 1), "UTC"); err != nil {
 		t.Fatalf("aggregate UTC telemetry: %v", err)
 	}
-	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM bot_operation_daily WHERE timezone = 'UTC'", 40)
-	if err := store.AppendTelemetryEvents(t.Context(), []telemetry.Event{{
-		Kind: telemetry.EventScheduledJobRun, OccurredAt: now.Add(7 * time.Minute), GroupID: "10001",
-		Result: telemetry.ResultSuccess, DurationMS: 50, JobID: job.ID, Count: 1,
-	}}); err != nil {
-		t.Fatalf("append scheduled job telemetry: %v", err)
-	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM bot_operation_daily WHERE timezone = 'UTC'", 76)
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM bot_operation_events WHERE event_type = 'scheduled_job_run' AND job_id = "+strconv.FormatUint(numericJobID, 10)+" AND command_id IS NULL", 1)
 	filter := analytics.Filter{
 		From: now.Add(-time.Hour), To: now.Add(time.Hour), GroupIDs: []string{"10001"}, Timezone: "Asia/Shanghai",
@@ -183,7 +183,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	summary, err := store.LoadSummary(t.Context(), filter)
 	if err != nil || managerMetricValue(summary, analytics.MetricGroupMessageCount) != 1 ||
 		managerMetricValue(summary, analytics.MetricAIRequestCount) != 2 ||
-		managerMetricValue(summary, analytics.MetricActiveUserCount) != 1 {
+		managerMetricValue(summary, analytics.MetricActiveUserCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricManualApprovalCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricAutomaticApprovalCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricScheduledJobRunCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricQuoteSuccessCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricQuoteFallbackCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricQuoteFailureCount) != 1 {
 		t.Fatalf("load analytics summary: summary=%+v error=%v", summary, err)
 	}
 	rankings, err := store.LoadRankings(t.Context(), analytics.StoreRankingsQuery{

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/audit"
 	"github.com/zjutjh/jxh-go/internal/auth"
 	"github.com/zjutjh/jxh-go/internal/events"
+	"github.com/zjutjh/jxh-go/internal/telemetry"
 )
 
 var (
@@ -55,10 +57,15 @@ type EventPublisher interface {
 	Publish(draft events.Draft) (events.Event, error)
 }
 
+type TelemetryRecorder interface {
+	Record(telemetry.Observation) bool
+}
+
 type Options struct {
 	Store              Store
 	Approver           Approver
 	Events             EventPublisher
+	Telemetry          TelemetryRecorder
 	Now                func() time.Time
 	OverdueAfter       time.Duration
 	DecisionTimeout    time.Duration
@@ -70,6 +77,7 @@ type Service struct {
 	store              Store
 	approver           Approver
 	events             EventPublisher
+	telemetry          TelemetryRecorder
 	now                func() time.Time
 	overdueAfter       time.Duration
 	decisionTimeout    time.Duration
@@ -93,7 +101,7 @@ func NewService(options Options) (*Service, error) {
 	processingLease := positiveDuration(options.ProcessingLease, defaultProcessingLease)
 	persistenceTimeout := positiveDuration(options.PersistenceTimeout, defaultPersistenceTimeout)
 	return &Service{
-		store: options.Store, approver: options.Approver, events: options.Events, now: options.Now,
+		store: options.Store, approver: options.Approver, events: options.Events, telemetry: options.Telemetry, now: options.Now,
 		overdueAfter: overdueAfter, decisionTimeout: decisionTimeout, processingLease: processingLease,
 		persistenceTimeout: persistenceTimeout,
 	}, nil
@@ -321,6 +329,7 @@ func (s *Service) execute(ctx context.Context, item ReservedItem, reason string)
 	}
 	result.Request = s.normalizeRequest(result.Request)
 	s.publish(result.Request.ID, result.Request.Version, "join_request_decided")
+	s.recordDecision(result)
 	switch external.Outcome {
 	case ExternalFailed:
 		return cloneDecisionResult(result), ErrExternalFailure
@@ -345,10 +354,50 @@ func (s *Service) completeWithoutExternal(item ReservedItem, errorCode string) B
 			Error: &ItemError{Code: "persistence_unavailable", Message: "decision completion could not be persisted", Retryable: true},
 		}
 	}
+	s.recordDecision(result)
 	return BulkItemResult{
 		RequestID: item.Request.ID, Outcome: ItemFailed, Request: s.normalizeRequest(result.Request), Decision: cloneDecision(result.Decision),
 		Error: &ItemError{Code: errorCode, Message: "decision was not sent", Retryable: true},
 	}
+}
+
+func (s *Service) recordDecision(result DecisionResult) {
+	if s.telemetry == nil {
+		return
+	}
+	groupID, err := strconv.ParseInt(result.Request.Group.ID, 10, 64)
+	if err != nil || groupID <= 0 {
+		return
+	}
+	kind := telemetry.EventManualApproval
+	if result.Decision.Source == SourceAutomatic {
+		kind = telemetry.EventAutomaticApproval
+	} else if result.Decision.Source != SourceManual {
+		return
+	}
+	outcome := telemetry.ResultUnknown
+	switch result.Decision.Status {
+	case AttemptConfirmed:
+		outcome = telemetry.ResultSuccess
+	case AttemptFailed:
+		outcome = telemetry.ResultFailed
+	}
+	occurredAt := s.now().UTC()
+	if result.Decision.CompletedAt != nil {
+		occurredAt = result.Decision.CompletedAt.UTC()
+	}
+	s.telemetry.Record(telemetry.Observation{
+		Kind: kind, OccurredAt: occurredAt, GroupID: groupID, Result: outcome,
+		Duration: nonNegativeDecisionDuration(result.Decision, occurredAt),
+	})
+}
+
+func nonNegativeDecisionDuration(decision Decision, completedAt time.Time) time.Duration {
+	duration := completedAt.Sub(decision.StartedAt)
+	if duration < 0 {
+		return 0
+	}
+	return duration
 }
 
 func (s *Service) normalizeRequest(value Request) Request {

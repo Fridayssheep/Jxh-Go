@@ -8,6 +8,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/audit"
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/telemetry"
 )
 
 func TestDecidePassesExactFlagAndConfirmsApproval(t *testing.T) {
@@ -18,7 +19,8 @@ func TestDecidePassesExactFlagAndConfirmsApproval(t *testing.T) {
 		return completedDecisionResult(request, decision, mutation), nil
 	}
 	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
-	service := newJoinService(t, store, approver)
+	recorder := &joinTelemetryRecorderFake{}
+	service := newJoinServiceWithTelemetry(t, store, approver, recorder)
 
 	result, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 3, DecisionInput{Action: ActionApprove}, "decision-key-1", joinMutationRequest())
 	if err != nil {
@@ -33,6 +35,10 @@ func TestDecidePassesExactFlagAndConfirmsApproval(t *testing.T) {
 	}
 	if result.Request.DecisionStatus != DecisionApproved || result.Decision.Status != AttemptConfirmed {
 		t.Fatalf("result=%+v", result)
+	}
+	if len(recorder.observations) != 1 || recorder.observations[0].Kind != telemetry.EventManualApproval ||
+		recorder.observations[0].Result != telemetry.ResultSuccess || recorder.observations[0].GroupID != 123 {
+		t.Fatalf("decision telemetry=%+v", recorder.observations)
 	}
 }
 
@@ -52,10 +58,11 @@ func TestDecideClassifiesUnavailableFailureAndUnknown(t *testing.T) {
 		wantError      error
 		attemptStatus  AttemptStatus
 		decisionStatus DecisionStatus
+		telemetry      telemetry.Result
 	}{
-		{name: "explicit failure", external: ExternalResult{Outcome: ExternalFailed, ErrorCode: "upstream_rejected"}, wantError: ErrExternalFailure, attemptStatus: AttemptFailed, decisionStatus: DecisionPending},
-		{name: "unknown", external: ExternalResult{Outcome: ExternalUnknown, ErrorCode: "upstream_timeout"}, attemptStatus: AttemptUnknown, decisionStatus: DecisionUnknown},
-		{name: "disconnect before call", external: ExternalResult{Outcome: ExternalUnavailable, ErrorCode: "dependency_unavailable"}, wantError: ErrDependencyUnavailable, attemptStatus: AttemptFailed, decisionStatus: DecisionPending},
+		{name: "explicit failure", external: ExternalResult{Outcome: ExternalFailed, ErrorCode: "upstream_rejected"}, wantError: ErrExternalFailure, attemptStatus: AttemptFailed, decisionStatus: DecisionPending, telemetry: telemetry.ResultFailed},
+		{name: "unknown", external: ExternalResult{Outcome: ExternalUnknown, ErrorCode: "upstream_timeout"}, attemptStatus: AttemptUnknown, decisionStatus: DecisionUnknown, telemetry: telemetry.ResultUnknown},
+		{name: "disconnect before call", external: ExternalResult{Outcome: ExternalUnavailable, ErrorCode: "dependency_unavailable"}, wantError: ErrDependencyUnavailable, attemptStatus: AttemptFailed, decisionStatus: DecisionPending, telemetry: telemetry.ResultFailed},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := joinRequestFixture("flag_1", DecisionProcessing, 2)
@@ -64,12 +71,34 @@ func TestDecideClassifiesUnavailableFailureAndUnknown(t *testing.T) {
 			store.complete = func(mutation CompletionMutation) (DecisionResult, error) {
 				return completedDecisionResult(request, decision, mutation), nil
 			}
-			service := newJoinService(t, store, &joinApproverFake{available: true, results: []ExternalResult{test.external}})
+			recorder := &joinTelemetryRecorderFake{}
+			service := newJoinServiceWithTelemetry(t, store, &joinApproverFake{available: true, results: []ExternalResult{test.external}}, recorder)
 			result, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 1, DecisionInput{Action: ActionReject}, "decision-key-1", joinMutationRequest())
 			if !errors.Is(err, test.wantError) || result.Request.DecisionStatus != test.decisionStatus || result.Decision.Status != test.attemptStatus {
 				t.Fatalf("result=%+v error=%v", result, err)
 			}
+			if len(recorder.observations) != 1 || recorder.observations[0].Result != test.telemetry {
+				t.Fatalf("decision telemetry=%+v", recorder.observations)
+			}
 		})
+	}
+}
+
+func TestDecisionTelemetryWaitsForDurableCompletion(t *testing.T) {
+	request := joinRequestFixture("flag_1", DecisionProcessing, 2)
+	decision := decisionFixture(request.ID, "dec_1", ActionApprove, AttemptStarted)
+	store := &joinStoreFake{reservation: Reservation{Items: []ReservedItem{{Request: request, Decision: decision}}}}
+	store.complete = func(CompletionMutation) (DecisionResult, error) {
+		return DecisionResult{}, errors.New("database unavailable")
+	}
+	recorder := &joinTelemetryRecorderFake{}
+	service := newJoinServiceWithTelemetry(t, store, &joinApproverFake{available: true}, recorder)
+	_, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 1, DecisionInput{Action: ActionApprove}, "decision-key-1", joinMutationRequest())
+	if err == nil {
+		t.Fatal("decision unexpectedly succeeded")
+	}
+	if len(recorder.observations) != 0 {
+		t.Fatalf("failed persistence emitted telemetry=%+v", recorder.observations)
 	}
 }
 
@@ -91,10 +120,14 @@ func TestDecideConflictAndReplayNeverRepeatExternalAction(t *testing.T) {
 		t.Fatalf("invalid replay fixture request_valid=%t decision_valid=%t request=%+v decision=%+v", validRequest(request, true), validDecision(decision), request, decision)
 	}
 	store = &joinStoreFake{reservation: Reservation{Replay: true, Items: []ReservedItem{{Request: request, Decision: decision}}}}
-	service = newJoinService(t, store, approver)
+	replayRecorder := &joinTelemetryRecorderFake{}
+	service = newJoinServiceWithTelemetry(t, store, approver, replayRecorder)
 	result, err := service.Decide(t.Context(), joinMaintainer(), "flag_1", 2, DecisionInput{Action: ActionApprove}, "decision-key-1", joinMutationRequest())
 	if err != nil || result.Decision.Status != AttemptConfirmed || len(approver.flags) != 0 {
 		t.Fatalf("result=%+v error=%v gateway calls=%d", result, err, len(approver.flags))
+	}
+	if len(replayRecorder.observations) != 0 {
+		t.Fatalf("replay emitted telemetry=%+v", replayRecorder.observations)
 	}
 }
 
@@ -115,7 +148,8 @@ func TestBulkDecisionReservesAllBeforeMixedExternalResults(t *testing.T) {
 	approver := &joinApproverFake{available: true, results: []ExternalResult{
 		{Outcome: ExternalConfirmed}, {Outcome: ExternalUnknown, ErrorCode: "upstream_timeout"},
 	}}
-	service := newJoinService(t, store, approver)
+	recorder := &joinTelemetryRecorderFake{}
+	service := newJoinServiceWithTelemetry(t, store, approver, recorder)
 	result, err := service.BulkDecide(t.Context(), joinMaintainer(), BulkInput{
 		GroupID: "123", Action: ActionApprove,
 		Items: []VersionedRequest{{ID: "flag_1", Version: 1}, {ID: "flag_2", Version: 4}},
@@ -129,6 +163,10 @@ func TestBulkDecisionReservesAllBeforeMixedExternalResults(t *testing.T) {
 	if result.ConfirmedCount != 1 || result.UnknownCount != 1 || result.FailedCount != 0 ||
 		result.Items[1].Outcome != ItemUnknown || result.Items[1].Error == nil {
 		t.Fatalf("result=%+v", result)
+	}
+	if len(recorder.observations) != 2 || recorder.observations[0].Result != telemetry.ResultSuccess ||
+		recorder.observations[1].Result != telemetry.ResultUnknown {
+		t.Fatalf("bulk decision telemetry=%+v", recorder.observations)
 	}
 }
 
@@ -176,7 +214,8 @@ func TestAutomaticApprovalUsesDeterministicValidatedRule(t *testing.T) {
 		return completedDecisionResult(processing, decision, mutation), nil
 	}
 	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
-	service := newJoinService(t, store, approver)
+	recorder := &joinTelemetryRecorderFake{}
+	service := newJoinServiceWithTelemetry(t, store, approver, recorder)
 	if err := service.ProcessAutoApprovals(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +226,10 @@ func TestAutomaticApprovalUsesDeterministicValidatedRule(t *testing.T) {
 		store.beginMutation.RuleVersion == nil || *store.beginMutation.RuleVersion != AutoApprovalRuleVersion ||
 		store.beginMutation.FieldSnapshots[validRequest.ID].Valid == false {
 		t.Fatalf("automatic mutation=%+v", store.beginMutation)
+	}
+	if len(recorder.observations) != 1 || recorder.observations[0].Kind != telemetry.EventAutomaticApproval ||
+		recorder.observations[0].Result != telemetry.ResultSuccess {
+		t.Fatalf("automatic decision telemetry=%+v", recorder.observations)
 	}
 }
 
@@ -255,15 +298,28 @@ func TestCheckedObservationNeverOverwritesConfirmedDecision(t *testing.T) {
 var joinTestTime = time.Date(2026, 7, 28, 3, 0, 0, 0, time.UTC)
 
 func newJoinService(t *testing.T, store Store, approver Approver) *Service {
+	return newJoinServiceWithTelemetry(t, store, approver, nil)
+}
+
+func newJoinServiceWithTelemetry(t *testing.T, store Store, approver Approver, recorder TelemetryRecorder) *Service {
 	t.Helper()
 	service, err := NewService(Options{
-		Store: store, Approver: approver, Now: func() time.Time { return joinTestTime },
+		Store: store, Approver: approver, Telemetry: recorder, Now: func() time.Time { return joinTestTime },
 		DecisionTimeout: time.Second, ProcessingLease: time.Minute, PersistenceTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service
+}
+
+type joinTelemetryRecorderFake struct {
+	observations []telemetry.Observation
+}
+
+func (r *joinTelemetryRecorderFake) Record(observation telemetry.Observation) bool {
+	r.observations = append(r.observations, observation)
+	return true
 }
 
 func joinMaintainer() auth.Principal {

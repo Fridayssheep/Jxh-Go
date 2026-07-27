@@ -61,24 +61,29 @@ func NewClient(baseURL string, client *http.Client, observers ...func(Observatio
 }
 
 func (c *Client) Generate(ctx context.Context, payload Payload) (string, error) {
+	image, _, err := c.GenerateWithOutcome(ctx, payload)
+	return image, err
+}
+
+func (c *Client) GenerateWithOutcome(ctx context.Context, payload Payload) (string, Outcome, error) {
 	startedAt := time.Now()
 	data, err := json.Marshal(payload)
 	if err != nil {
 		c.record(OutcomeFailure, startedAt)
-		return "", fmt.Errorf("marshal quote payload: %w", err)
+		return "", OutcomeFailure, fmt.Errorf("marshal quote payload: %w", err)
 	}
 	image, gifErr := c.generate(ctx, data, "/gif/base64/")
 	if gifErr == nil {
 		c.record(OutcomeGIFSuccess, startedAt)
-		return image, nil
+		return image, OutcomeGIFSuccess, nil
 	}
 	image, pngErr := c.generate(ctx, data, "/png/base64/")
 	if pngErr != nil {
 		c.record(OutcomeFailure, startedAt)
-		return "", errors.Join(fmt.Errorf("generate GIF quote: %w", gifErr), fmt.Errorf("generate PNG fallback: %w", pngErr))
+		return "", OutcomeFailure, errors.Join(fmt.Errorf("generate GIF quote: %w", gifErr), fmt.Errorf("generate PNG fallback: %w", pngErr))
 	}
 	c.record(OutcomePNGFallback, startedAt)
-	return image, nil
+	return image, OutcomePNGFallback, nil
 }
 
 func (c *Client) record(outcome Outcome, startedAt time.Time) {

@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/customcommand"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
@@ -46,7 +45,7 @@ type QuotedMessage struct {
 type Options struct {
 	Sender               Sender
 	Knowledge            *knowledge.IndexRef
-	AI                   *ai.Service
+	AI                   AIAnswerer
 	Reloader             KnowledgeReloader
 	Admin                *commands.AdminHandler
 	Quote                *quote.Client
@@ -57,6 +56,10 @@ type Options struct {
 	CustomCommands       CustomCommandExecutor
 	MaintenanceAllowlist MaintenanceAllowlist
 	Telemetry            TelemetryRecorder
+}
+
+type AIAnswerer interface {
+	AnswerWithSources(context.Context, string) (string, []string, error)
 }
 
 type KnowledgeReloader interface {

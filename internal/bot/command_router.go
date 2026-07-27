@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -14,12 +15,13 @@ import (
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/safego"
 	"github.com/zjutjh/jxh-go/internal/settings"
+	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
 )
 
 type GroupCommandRouter struct {
-	ai            *ai.Service
+	ai            AIAnswerer
 	aiSlots       chan struct{}
 	reloader      KnowledgeReloader
 	admin         *commands.AdminHandler
@@ -27,6 +29,7 @@ type GroupCommandRouter struct {
 	groupRequests *grouprequest.Service
 	triggerStats  *triggerstats.Service
 	settings      *settings.Runtime
+	telemetry     TelemetryRecorder
 }
 
 const maxQuoteMessages = 10
@@ -63,6 +66,7 @@ func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 		groupRequests: opts.GroupRequests,
 		triggerStats:  opts.TriggerStats,
 		settings:      opts.Settings,
+		telemetry:     opts.Telemetry,
 	}
 }
 
@@ -86,6 +90,10 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 		return true, r.handleQuote(ctx, msg, sender, text)
 	case text == "/ai" || strings.HasPrefix(text, "/ai "):
 		if !r.featureEnabled(msg.GroupID, settings.FeatureAIQA) {
+			r.recordTelemetry(telemetry.Observation{
+				Kind: telemetry.EventAIRequest, GroupID: msg.GroupID, UserID: msg.UserID,
+				FeatureKey: string(settings.FeatureAIQA), Result: telemetry.ResultDisabled,
+			})
 			return true, sender.SendGroupText(ctx, msg.GroupID, disabledFeatureReply)
 		}
 		return true, r.startAI(ctx, msg, sender, text)
@@ -139,9 +147,11 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	if msg.ReplyMessageID == 0 {
 		return sender.SendGroupText(ctx, msg.GroupID, "请回复一条消息后使用 /q")
 	}
+	startedAt := time.Now()
 	quoted, err := sender.GetQuoteMessages(ctx, msg.GroupID, msg.ReplyMessageID, count)
 	if err != nil {
 		log.Printf("get quote messages failed: group=%d message=%d: %v", msg.GroupID, msg.ReplyMessageID, err)
+		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
 		return sender.SendGroupText(ctx, msg.GroupID, "获取被引用消息失败，请稍后再试")
 	}
 	inputs := make([]quote.MessageInput, 0, len(quoted))
@@ -153,15 +163,29 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 	}
 	payload := quote.BuildPayload(ctx, inputs, sender.ResolveImage)
 	if len(payload) == 0 {
+		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
 		return sender.SendGroupText(ctx, msg.GroupID, "被引用消息内容为空")
 	}
-	image, err := r.quote.Generate(ctx, payload)
-	if err != nil {
-		// quote 客户端会把服务端响应正文拼进错误，不能直接发进群。
-		log.Printf("generate quote image failed: group=%d: %v", msg.GroupID, err)
+	if r.quote == nil {
+		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
 		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败，请稍后再试")
 	}
-	return sender.SendGroupMessage(ctx, msg.GroupID, message.ChainOf(message.Image("base64://"+image)))
+	image, outcome, err := r.quote.GenerateWithOutcome(ctx, payload)
+	if err != nil {
+		log.Printf("generate quote image failed: group=%d: %v", msg.GroupID, err)
+		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
+		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败，请稍后再试")
+	}
+	if err := sender.SendGroupMessage(ctx, msg.GroupID, message.ChainOf(message.Image("base64://"+image))); err != nil {
+		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
+		return err
+	}
+	result := telemetry.ResultSuccess
+	if outcome == quote.OutcomePNGFallback {
+		result = telemetry.ResultFallback
+	}
+	r.recordQuote(msg, result, time.Since(startedAt))
+	return nil
 }
 
 func parseQuoteCount(text string) (int, error) {
@@ -180,16 +204,21 @@ func parseQuoteCount(text string) (int, error) {
 }
 
 func (r *GroupCommandRouter) startAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+	startedAt := time.Now()
 	if r.ai == nil {
+		r.recordAI(msg, telemetry.ResultDisabled, time.Since(startedAt))
 		return sender.SendGroupText(ctx, msg.GroupID, ai.DisabledAnswer)
 	}
 	select {
 	case r.aiSlots <- struct{}{}:
 		go func() {
 			defer func() { <-r.aiSlots }()
-			// 问题文本与模型输出都不可信，未恢复的 panic 会终止整个进程。
+			result := telemetry.ResultFailed
+			defer func() { r.recordAI(msg, result, time.Since(startedAt)) }()
 			defer safego.Recover("ai command")
-			if err := r.handleAI(ctx, msg, sender, text); err != nil {
+			var err error
+			result, err = r.handleAI(ctx, msg, sender, text)
+			if err != nil {
 				log.Printf("handle ai command failed: %v", err)
 				if sendErr := sender.SendGroupText(ctx, msg.GroupID, "AI问答失败，请稍后再试"); sendErr != nil {
 					log.Printf("send ai failure message failed: %v", sendErr)
@@ -198,15 +227,19 @@ func (r *GroupCommandRouter) startAI(ctx context.Context, msg GroupMessage, send
 		}()
 		return nil
 	default:
+		r.recordAI(msg, telemetry.ResultBusy, time.Since(startedAt))
 		return sender.SendGroupText(ctx, msg.GroupID, "AI问答繁忙，请稍后再试")
 	}
 }
 
-func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sender Sender, text string) error {
+func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sender Sender, text string) (telemetry.Result, error) {
 	question := strings.TrimSpace(strings.TrimPrefix(text, "/ai"))
 	answer, sourceKeys, err := r.ai.AnswerWithSources(ctx, question)
 	if err != nil {
-		return err
+		if errors.Is(err, context.DeadlineExceeded) {
+			return telemetry.ResultTimeout, err
+		}
+		return telemetry.ResultFailed, err
 	}
 	// 空文本会被 QQ 渲染成不可查看的消息，这里兜底避免任何上游路径下发空串。
 	if strings.TrimSpace(answer) == "" {
@@ -214,7 +247,7 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 		answer = ai.EmptyKnowledgeAnswer
 	}
 	if err := sender.SendGroupText(ctx, msg.GroupID, answer); err != nil {
-		return err
+		return telemetry.ResultFailed, err
 	}
 	// Only record retrieval stats after the answer was actually delivered.
 	if r.triggerStats != nil {
@@ -223,7 +256,30 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 			log.Printf("record ai retrieval trigger failed: %v", err)
 		}
 	}
-	return nil
+	if len(sourceKeys) == 0 {
+		return telemetry.ResultNoKnowledge, nil
+	}
+	return telemetry.ResultSuccess, nil
+}
+
+func (r *GroupCommandRouter) recordAI(msg GroupMessage, result telemetry.Result, duration time.Duration) {
+	r.recordTelemetry(telemetry.Observation{
+		Kind: telemetry.EventAIRequest, GroupID: msg.GroupID, UserID: msg.UserID,
+		FeatureKey: string(settings.FeatureAIQA), Result: result, Duration: duration,
+	})
+}
+
+func (r *GroupCommandRouter) recordQuote(msg GroupMessage, result telemetry.Result, duration time.Duration) {
+	r.recordTelemetry(telemetry.Observation{
+		Kind: telemetry.EventQuote, GroupID: msg.GroupID, UserID: msg.UserID,
+		FeatureKey: string(settings.FeatureQuote), Result: result, Duration: duration,
+	})
+}
+
+func (r *GroupCommandRouter) recordTelemetry(observation telemetry.Observation) {
+	if r.telemetry != nil {
+		r.telemetry.Record(observation)
+	}
 }
 
 func (r *GroupCommandRouter) handleAdmin(ctx context.Context, msg GroupMessage, sender Sender, text string) error {

@@ -10,10 +10,11 @@ import (
 )
 
 type RouteOptions struct {
-	Public     bool
-	Mutation   bool
-	CSRF       bool
-	Permission auth.Permission
+	Public            bool
+	Mutation          bool
+	CSRF              bool
+	AllowReplacedAuth bool
+	Permission        auth.Permission
 }
 
 type route struct {

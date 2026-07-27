@@ -822,14 +822,32 @@ type fakeAuthStore struct {
 	commitErr        error
 	lookupSessionErr error
 	touchErr         error
+	passwordChanges  map[string]SessionIdentity
+	passwordCommits  []PasswordChangeCommit
+	revocations      []CurrentSessionRevocation
 }
 
 func newFakeAuthStore() *fakeAuthStore {
 	return &fakeAuthStore{
-		users:      make(map[string]UserCredentials),
-		sessions:   make(map[TokenDigest]SessionIdentity),
-		replacedBy: make(map[string]string),
+		users:           make(map[string]UserCredentials),
+		sessions:        make(map[TokenDigest]SessionIdentity),
+		replacedBy:      make(map[string]string),
+		passwordChanges: make(map[string]SessionIdentity),
 	}
+}
+
+func (s *fakeAuthStore) LookupUserByID(_ context.Context, userID string) (UserCredentials, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lookupUserErr != nil {
+		return UserCredentials{}, false, s.lookupUserErr
+	}
+	for _, user := range s.users {
+		if user.User.ID == userID {
+			return user, true, nil
+		}
+	}
+	return UserCredentials{}, false, nil
 }
 
 func (s *fakeAuthStore) LookupUserByUsername(_ context.Context, username string) (UserCredentials, bool, error) {
@@ -926,6 +944,66 @@ func (s *fakeAuthStore) TouchSessionIfStale(_ context.Context, touch SessionTouc
 		s.touches = append(s.touches, touch)
 		break
 	}
+	return nil
+}
+
+func (s *fakeAuthStore) LookupReplacedSession(_ context.Context, digest TokenDigest) (SessionIdentity, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	identity, ok := s.sessions[digest]
+	return identity, ok && identity.Session.Status == SessionStatusRevoked && s.replacedBy[identity.Session.ID] != "", nil
+}
+
+func (s *fakeAuthStore) LookupPasswordChange(_ context.Context, lookup PasswordChangeLookup) (SessionIdentity, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	identity, ok := s.passwordChanges[lookup.SessionID+"\x00"+lookup.IdempotencyKey+"\x00"+lookup.RequestHash]
+	return identity, ok, nil
+}
+
+func (s *fakeAuthStore) CommitPasswordChange(_ context.Context, commit PasswordChangeCommit) (SessionIdentity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.commitErr != nil {
+		return SessionIdentity{}, s.commitErr
+	}
+	var credentials UserCredentials
+	for username, candidate := range s.users {
+		if candidate.User.ID == commit.Actor.UserID {
+			candidate.PasswordHash = commit.PasswordHash
+			candidate.User.Version++
+			s.users[username] = candidate
+			credentials = candidate
+		}
+	}
+	revokedAt := commit.OccurredAt
+	for digest, identity := range s.sessions {
+		if identity.User.ID == commit.Actor.UserID && identity.Session.Status == SessionStatusActive {
+			identity.Session.Status = SessionStatusRevoked
+			identity.Session.RevokedAt = &revokedAt
+			s.sessions[digest] = identity
+			s.replacedBy[identity.Session.ID] = commit.NewSession.ID
+		}
+	}
+	identity := SessionIdentity{User: credentials.User, Session: commit.NewSession, CSRFDigest: commit.NewCSRFDigest}
+	s.sessions[commit.NewTokenDigest] = identity
+	s.passwordChanges[commit.PriorSessionID+"\x00"+commit.IdempotencyKey+"\x00"+commit.RequestHash] = identity
+	s.passwordCommits = append(s.passwordCommits, commit)
+	return identity, nil
+}
+
+func (s *fakeAuthStore) RevokeCurrentSession(_ context.Context, revocation CurrentSessionRevocation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.commitErr != nil {
+		return s.commitErr
+	}
+	if identity, ok := s.sessions[revocation.TokenDigest]; ok && identity.Session.Status == SessionStatusActive {
+		identity.Session.Status = SessionStatusRevoked
+		identity.Session.RevokedAt = &revocation.RevokedAt
+		s.sessions[revocation.TokenDigest] = identity
+	}
+	s.revocations = append(s.revocations, revocation)
 	return nil
 }
 

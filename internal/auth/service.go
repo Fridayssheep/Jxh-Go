@@ -66,11 +66,16 @@ type SessionTouch struct {
 
 type Store interface {
 	LookupUserByUsername(ctx context.Context, normalizedUsername string) (UserCredentials, bool, error)
+	LookupUserByID(ctx context.Context, userID string) (UserCredentials, bool, error)
 	// CommitLogin persists the new session and applies optional password/rotation changes atomically.
 	CommitLogin(ctx context.Context, commit LoginCommit) error
 	LookupSession(ctx context.Context, tokenDigest TokenDigest) (SessionIdentity, bool, error)
 	// TouchSessionIfStale updates only an active row whose last_seen_at is not after IfLastSeenBefore.
 	TouchSessionIfStale(ctx context.Context, touch SessionTouch) error
+	LookupReplacedSession(ctx context.Context, tokenDigest TokenDigest) (SessionIdentity, bool, error)
+	LookupPasswordChange(ctx context.Context, lookup PasswordChangeLookup) (SessionIdentity, bool, error)
+	CommitPasswordChange(ctx context.Context, commit PasswordChangeCommit) (SessionIdentity, error)
+	RevokeCurrentSession(ctx context.Context, revocation CurrentSessionRevocation) error
 }
 
 type LoginRequest struct {

@@ -15,6 +15,7 @@ const (
 	CodePayloadTooLarge      = "payload_too_large"
 	CodeUnsupportedMediaType = "unsupported_media_type"
 	CodeInternal             = "internal_error"
+	CodeRateLimited          = "rate_limited"
 )
 
 type Error struct {

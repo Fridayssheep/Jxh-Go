@@ -24,6 +24,10 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, credential string) (auth.AuthContext, error)
 }
 
+type ReplacementAuthenticator interface {
+	AuthenticateForRotation(ctx context.Context, credential string) (auth.AuthContext, error)
+}
+
 type MiddlewareOptions struct {
 	PublicOrigin   string
 	TrustedProxies []string
@@ -81,7 +85,7 @@ func (m *middleware) route(options RouteOptions, next http.Handler) http.Handler
 		next = m.origin(next)
 	}
 	if !options.Public {
-		next = m.authenticate(next)
+		next = m.authenticate(options.AllowReplacedAuth, next)
 	}
 	return next
 }
@@ -155,7 +159,7 @@ func (m *middleware) clientIP(next http.Handler) http.Handler {
 	})
 }
 
-func (m *middleware) authenticate(next http.Handler) http.Handler {
+func (m *middleware) authenticate(allowReplaced bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if m.authenticator == nil {
 			writeAPIError(w, r, http.StatusUnauthorized, CodeUnauthorized, "需要登录", nil, false)
@@ -167,6 +171,11 @@ func (m *middleware) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		identity, err := m.authenticator.Authenticate(r.Context(), cookie.Value)
+		if err != nil && allowReplaced {
+			if replacement, ok := m.authenticator.(ReplacementAuthenticator); ok {
+				identity, err = replacement.AuthenticateForRotation(r.Context(), cookie.Value)
+			}
+		}
 		if err != nil {
 			writeAPIError(w, r, http.StatusUnauthorized, CodeUnauthorized, "登录状态无效或已过期", nil, false)
 			return

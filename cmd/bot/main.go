@@ -97,7 +97,9 @@ func main() {
 		ExtractApplicant: extractApplicant,
 	})
 	go groupRequests.RunAIParser(ctx)
+	napcatGateway := napcat.NewGateway(flashfile.NewStager("./data/flash", "/app/data/flash"))
 	pipeline := bot.NewPipeline(bot.Options{
+		Sender:        napcatGateway,
 		Knowledge:     knowledgeIndex,
 		AI:            aiSvc,
 		Reloader:      knowledgeSync,
@@ -154,9 +156,9 @@ func main() {
 		RequestTimeout: time.Duration(cfg.OneBot.APITimeoutSec) * time.Second,
 		ReconnectDelay: time.Duration(cfg.OneBot.ReconnectIntervalSec) * time.Second,
 		Handler:        pipeline,
-		FlashFiles:     flashfile.NewStager("./data/flash", "/app/data/flash"),
+		Gateway:        napcatGateway,
 	}
-	log.Printf("connecting napcat websocket %s", cfg.OneBot.WSURL)
+	log.Printf("connecting napcat websocket")
 	if err := server.Serve(ctx); err != nil {
 		log.Fatalf("serve napcat websocket: %v", err)
 	}

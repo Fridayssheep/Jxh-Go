@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
-	"github.com/zjutjh/jxh-go/internal/flashfile"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/safego"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
@@ -30,12 +29,15 @@ type Server struct {
 	RequestTimeout time.Duration
 	ReconnectDelay time.Duration
 	Handler        *bot.Pipeline
-	FlashFiles     *flashfile.Stager
+	Gateway        *Gateway
 }
 
 func (s Server) Serve(ctx context.Context) error {
 	if strings.TrimSpace(s.WSURL) == "" {
 		return fmt.Errorf("napcat websocket URL is required")
+	}
+	if s.Gateway == nil {
+		return fmt.Errorf("napcat gateway is required")
 	}
 	delay := s.ReconnectDelay
 	if delay <= 0 {
@@ -47,14 +49,15 @@ func (s Server) Serve(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			log.Printf("connect napcat websocket failed: %v", err)
+			s.Gateway.RecordError(err)
+			log.Printf("connect napcat websocket failed: %s", safeErrorSummary(err))
 			if !sleepContext(ctx, delay) {
 				return nil
 			}
 			continue
 		}
-		log.Printf("connected to napcat websocket: %s", s.WSURL)
-		s.consume(ctx, client)
+		log.Printf("connected to napcat websocket")
+		_ = s.consume(ctx, client)
 		_ = client.Close()
 		if ctx.Err() != nil {
 			return nil
@@ -76,33 +79,35 @@ const (
 	groupRequestSyncInterval = 10 * time.Second
 )
 
-func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
+func (s Server) consume(ctx context.Context, client *napcatsdk.Client) (sessionErr error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	sender := SDKSender{client: client, flashFiles: s.FlashFiles}
+	generation := s.Gateway.Attach(client.API(), time.Now())
+	defer func() {
+		cancel()
+		s.Gateway.Detach(generation, sessionErr, time.Now())
+	}()
 	if s.Handler == nil {
-		return
+		return fmt.Errorf("napcat event handler is required")
 	}
-	s.Handler.SetSender(sender)
-	defer s.Handler.SetSender(nil)
-	go s.syncGroupJoinRequests(sessionCtx, sender)
+	go s.syncGroupJoinRequests(sessionCtx, s.Gateway)
 	slots := make(chan struct{}, maxConcurrentEvents)
 	events := client.Events()
 	for {
 		select {
 		case <-sessionCtx.Done():
-			return
+			return sessionCtx.Err()
 		case ev, ok := <-events:
 			if !ok {
-				return
+				return fmt.Errorf("napcat event stream closed")
 			}
+			s.Gateway.RecordEvent(generation, time.Now())
 			// Bounded concurrency: acquire a slot before dispatching. If all slots
 			// are busy this blocks briefly, applying backpressure instead of
 			// spawning unbounded goroutines.
 			select {
 			case slots <- struct{}{}:
 			case <-sessionCtx.Done():
-				return
+				return sessionCtx.Err()
 			}
 			go func(evt event.Event) {
 				defer func() { <-slots }()
@@ -116,11 +121,11 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) {
 	}
 }
 
-func (s Server) syncGroupJoinRequests(ctx context.Context, sender SDKSender) {
+func (s Server) syncGroupJoinRequests(ctx context.Context, gateway *Gateway) {
 	syncOnce := func() {
 		// 恢复边界放在每轮工作上，一轮 panic 不会让整个同步循环静默退出。
 		defer safego.Recover("group request sync")
-		records, err := sender.FetchGroupJoinRequests(ctx, groupRequestSyncCount)
+		records, err := gateway.FetchGroupJoinRequests(ctx, groupRequestSyncCount)
 		if err != nil {
 			if ctx.Err() == nil {
 				log.Printf("fetch group join requests for automatic sync failed: %v", err)
@@ -209,7 +214,7 @@ func markGroupMessageRead(ctx context.Context, client *napcatsdk.Client, e *even
 	_, err := client.API().MarkGroupMsgAsRead(ctx, api.MarkGroupMsgAsReadRequest{
 		GroupID: &groupID,
 	})
-	return err
+	return safeOperationError("mark_group_message_read", err)
 }
 
 func extractReplyID(chain message.Chain) int64 {
@@ -223,40 +228,43 @@ func extractReplyID(chain message.Chain) int64 {
 	return 0
 }
 
-type SDKSender struct {
-	client     *napcatsdk.Client
-	flashFiles *flashfile.Stager
+func (g *Gateway) SendGroupText(ctx context.Context, groupID int64, text string) error {
+	return g.SendGroupMessage(ctx, groupID, message.ChainOf(message.Text(text)))
 }
 
-func (s SDKSender) SendGroupText(ctx context.Context, groupID int64, text string) error {
-	return s.SendGroupMessage(ctx, groupID, message.ChainOf(message.Text(text)))
-}
-
-func (s SDKSender) SendGroupMessage(ctx context.Context, groupID int64, msg message.Chain) error {
+func (g *Gateway) SendGroupMessage(ctx context.Context, groupID int64, msg message.Chain) error {
+	client, err := g.client()
+	if err != nil {
+		return err
+	}
 	encoded, err := api.NewOB11Message(msg)
 	if err != nil {
-		return fmt.Errorf("encode group message: %w", err)
+		return operationFailure("send_group_message", FailureInvalidResponse)
 	}
 	groupIDText := strconv.FormatInt(groupID, 10)
-	_, err = s.client.API().SendGroupMsg(ctx, api.SendGroupMsgRequest{
+	_, err = client.SendGroupMsg(ctx, api.SendGroupMsgRequest{
 		GroupID: &groupIDText,
 		Message: encoded,
 	})
-	return err
+	return safeOperationError("send_group_message", err)
 }
 
-func (s SDKSender) SendGroupFlashFile(ctx context.Context, groupID int64, source, name string) error {
+func (g *Gateway) SendGroupFlashFile(ctx context.Context, groupID int64, source, name string) error {
+	client, err := g.client()
+	if err != nil {
+		return err
+	}
 	if groupID <= 0 {
 		return fmt.Errorf("group ID must be positive")
 	}
 	filePath := source
 	if strings.HasPrefix(strings.ToLower(source), "http://") || strings.HasPrefix(strings.ToLower(source), "https://") {
-		if s.flashFiles == nil {
+		if g.flashFiles == nil {
 			return fmt.Errorf("flash file stager is not initialized")
 		}
-		staged, err := s.flashFiles.Stage(ctx, source, name)
+		staged, err := g.flashFiles.Stage(ctx, source, name)
 		if err != nil {
-			return fmt.Errorf("stage remote flash file: %w", err)
+			return safeOperationError("stage_flash_file", err)
 		}
 		filePath = staged
 	} else if path.Clean(source) != source || !strings.HasPrefix(source, "/app/jxh-media/") || path.Base(source) != name {
@@ -265,29 +273,29 @@ func (s SDKSender) SendGroupFlashFile(ctx context.Context, groupID int64, source
 
 	files, err := json.Marshal(filePath)
 	if err != nil {
-		return fmt.Errorf("encode flash file path: %w", err)
+		return operationFailure("create_flash_task", FailureInvalidResponse)
 	}
-	createResp, err := s.client.API().CreateFlashTask(ctx, api.CreateFlashTaskRequest{
+	createResp, err := client.CreateFlashTask(ctx, api.CreateFlashTaskRequest{
 		Files: api.CreateFlashTaskRequestFilesUnion{Raw: files},
 		Name:  &name,
 	})
 	if err != nil {
-		return fmt.Errorf("create flash task: %w", err)
+		return safeOperationError("create_flash_task", err)
 	}
 	fileSetID, err := decodeCreateFlashResponse(createResp)
 	if err != nil {
-		return err
+		return operationFailure("create_flash_task", FailureInvalidResponse)
 	}
 	groupIDText := strconv.FormatInt(groupID, 10)
-	sendResp, err := s.client.API().SendFlashMsg(ctx, api.SendFlashMsgRequest{
+	sendResp, err := client.SendFlashMsg(ctx, api.SendFlashMsgRequest{
 		FilesetID: fileSetID,
 		GroupID:   &groupIDText,
 	})
 	if err != nil {
-		return fmt.Errorf("send flash message: %w", err)
+		return safeOperationError("send_flash_message", err)
 	}
 	if err := validateSendFlashResponse(sendResp); err != nil {
-		return err
+		return operationFailure("send_flash_message", FailureInvalidResponse)
 	}
 	return nil
 }
@@ -405,51 +413,59 @@ type quoteMessage struct {
 	Message    oneBotMessage `json:"message"`
 }
 
-func (s SDKSender) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
-	resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
+func (g *Gateway) GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error) {
+	client, err := g.client()
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
 		GroupID: strconv.FormatInt(groupID, 10),
 		UserID:  strconv.FormatInt(userID, 10),
 		NoCache: &api.GetGroupMemberInfoRequestNoCacheUnion{Raw: []byte("true")},
 	})
 	if err != nil {
-		return "", err
+		return "", safeOperationError("get_group_member_role", err)
 	}
 	if resp.Role == nil {
-		return "", fmt.Errorf("NapCat 群成员信息缺少 role")
+		return "", operationFailure("get_group_member_role", FailureInvalidResponse)
 	}
 	return *resp.Role, nil
 }
 
-func (s SDKSender) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {
+func (g *Gateway) GetQuoteMessages(ctx context.Context, groupID, messageID int64, count int) ([]bot.QuotedMessage, error) {
+	client, err := g.client()
+	if err != nil {
+		return nil, err
+	}
 	var history struct {
 		Messages []quoteMessage `json:"messages"`
 	}
 	messageSeq := strconv.FormatInt(messageID, 10)
-	err := s.client.API().Call(ctx, string(api.ActionGetGroupMsgHistory), api.GetGroupMsgHistoryRequest{
+	err = client.Call(ctx, string(api.ActionGetGroupMsgHistory), api.GetGroupMsgHistoryRequest{
 		GroupID:      strconv.FormatInt(groupID, 10),
 		MessageSeq:   &messageSeq,
 		Count:        float64(count),
 		ReverseOrder: true,
 	}, &history)
 	if err != nil {
-		return nil, fmt.Errorf("按引用消息获取群历史失败: %w", err)
+		return nil, safeOperationError("get_quote_messages", err)
 	}
 	targetIndex := slices.IndexFunc(history.Messages, func(message quoteMessage) bool {
 		return int64(message.MessageID) == messageID
 	})
 	if targetIndex < 0 {
-		return nil, fmt.Errorf("NapCat 返回的群历史中未找到被引用消息 %d", messageID)
+		return nil, operationFailure("get_quote_messages", FailureInvalidResponse)
 	}
 	start := max(0, targetIndex-count+1)
 	messages := make([]bot.QuotedMessage, 0, targetIndex-start+1)
 	for _, message := range history.Messages[start : targetIndex+1] {
 		messages = append(messages, message.quoted())
 	}
-	s.enrichQuoteAtNames(ctx, groupID, messages)
+	g.enrichQuoteAtNames(ctx, client, groupID, messages)
 	return messages, nil
 }
 
-func (s SDKSender) enrichQuoteAtNames(ctx context.Context, groupID int64, messages []bot.QuotedMessage) {
+func (g *Gateway) enrichQuoteAtNames(ctx context.Context, client *api.Client, groupID int64, messages []bot.QuotedMessage) {
 	names := map[string]string{"all": "全体成员"}
 	for messageIndex := range messages {
 		chain := message.ChainOf(messages[messageIndex].Message...)
@@ -465,7 +481,7 @@ func (s SDKSender) enrichQuoteAtNames(ctx context.Context, groupID int64, messag
 				if err != nil {
 					continue
 				}
-				resp, err := s.client.API().GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
+				resp, err := client.GetGroupMemberInfo(ctx, api.GetGroupMemberInfoRequest{
 					GroupID: strconv.FormatInt(groupID, 10),
 					UserID:  strconv.FormatInt(userID, 10),
 					NoCache: &api.GetGroupMemberInfoRequestNoCacheUnion{Raw: []byte("true")},
@@ -505,10 +521,14 @@ func (m quoteMessage) quoted() bot.QuotedMessage {
 	}
 }
 
-func (s SDKSender) ResolveImage(ctx context.Context, file string) (string, error) {
-	data, err := s.client.API().GetImage(ctx, api.GetImageRequest{File: &file})
+func (g *Gateway) ResolveImage(ctx context.Context, file string) (string, error) {
+	client, err := g.client()
 	if err != nil {
 		return "", err
+	}
+	data, err := client.GetImage(ctx, api.GetImageRequest{File: &file})
+	if err != nil {
+		return "", safeOperationError("resolve_image", err)
 	}
 	if data.URL != nil && *data.URL != "" {
 		return *data.URL, nil
@@ -519,31 +539,43 @@ func (s SDKSender) ResolveImage(ctx context.Context, file string) (string, error
 	return "", nil
 }
 
-func (s SDKSender) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
-	_, err := s.client.API().SetGroupBan(ctx, api.SetGroupBanRequest{
+func (g *Gateway) SetGroupBan(ctx context.Context, groupID, userID int64, duration time.Duration) error {
+	client, err := g.client()
+	if err != nil {
+		return err
+	}
+	_, err = client.SetGroupBan(ctx, api.SetGroupBanRequest{
 		GroupID:  strconv.FormatInt(groupID, 10),
 		UserID:   strconv.FormatInt(userID, 10),
 		Duration: api.SetGroupBanRequestDurationUnion{Raw: []byte(strconv.FormatInt(int64(duration.Seconds()), 10))},
 	})
-	return err
+	return safeOperationError("set_group_ban", err)
 }
 
-func (s SDKSender) SetRestart(ctx context.Context) error {
-	_, err := s.client.API().SetRestart(ctx, api.SetRestartRequest{})
-	return err
+func (g *Gateway) SetRestart(ctx context.Context) error {
+	client, err := g.client()
+	if err != nil {
+		return err
+	}
+	_, err = client.SetRestart(ctx, api.SetRestartRequest{})
+	return safeOperationError("restart", err)
 }
 
-func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
+func (g *Gateway) FetchGroupJoinRequests(ctx context.Context, count int) ([]grouprequest.Record, error) {
+	client, err := g.client()
+	if err != nil {
+		return nil, err
+	}
 	var resp struct {
 		InvitedRequests []json.RawMessage `json:"invited_requests"`
 		InvitedRequest  []json.RawMessage `json:"InvitedRequest"`
 		JoinRequests    []json.RawMessage `json:"join_requests"`
 	}
-	err := s.client.API().Call(ctx, string(api.ActionGetGroupSystemMsg), api.GetGroupSystemMsgRequest{
+	err = client.Call(ctx, string(api.ActionGetGroupSystemMsg), api.GetGroupSystemMsgRequest{
 		Count: api.GetGroupSystemMsgRequestCountUnion{Raw: []byte(strconv.Itoa(count))},
 	}, &resp)
 	if err != nil {
-		return nil, fmt.Errorf("fetch group system messages: %w", err)
+		return nil, safeOperationError("fetch_group_join_requests", err)
 	}
 	joinRequests, err := decodeGroupSystemMessages(resp.JoinRequests, false)
 	var decodeErrors []error
@@ -558,7 +590,11 @@ func (s SDKSender) FetchGroupJoinRequests(ctx context.Context, count int) ([]gro
 	if err != nil {
 		decodeErrors = append(decodeErrors, fmt.Errorf("decode invited requests: %w", err))
 	}
-	return grouprequest.RecordsFromSystemMessages(joinRequests, invitedRequests), errors.Join(decodeErrors...)
+	records := grouprequest.RecordsFromSystemMessages(joinRequests, invitedRequests)
+	if err := errors.Join(decodeErrors...); err != nil {
+		return records, operationFailure("fetch_group_join_requests", FailureInvalidResponse)
+	}
+	return records, nil
 }
 
 type groupSystemMessageWire struct {

@@ -40,6 +40,7 @@ type QuotedMessage struct {
 }
 
 type Options struct {
+	Sender        Sender
 	Knowledge     *knowledge.IndexRef
 	AI            *ai.Service
 	Reloader      *knowledge.Syncer
@@ -80,13 +81,15 @@ type GroupMessage struct {
 }
 
 func NewPipeline(opts Options) *Pipeline {
-	return &Pipeline{
+	pipeline := &Pipeline{
 		knowledge:     opts.Knowledge,
 		groupRequests: opts.GroupRequests,
 		stats:         opts.TriggerStats,
 		linkCleaner:   opts.LinkCleaner,
 		commandRouter: NewGroupCommandRouter(opts),
 	}
+	pipeline.SetSender(opts.Sender)
+	return pipeline
 }
 
 func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) error {

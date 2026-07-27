@@ -141,6 +141,68 @@ func TestAllRolesApplyCompleteAuditDenylist(t *testing.T) {
 	}
 }
 
+func TestSanitizeForWriteRemovesNestedSecretsAndDetachesPayload(t *testing.T) {
+	type upstreamPayload struct {
+		Cookie      string         `json:"cookie"`
+		RawResponse map[string]any `json:"raw_response"`
+		Summary     string         `json:"summary"`
+	}
+
+	original := map[string]any{
+		"display_name": "visible",
+		"password":     "plain-password",
+		"nested": []any{
+			map[string]any{"access_token": "raw-token", "enabled": true},
+			upstreamPayload{
+				Cookie:      "session=raw-cookie",
+				RawResponse: map[string]any{"body": "raw-upstream-body"},
+				Summary:     "safe summary",
+			},
+		},
+	}
+
+	sanitized, redacted := SanitizeForWrite(original)
+	result, ok := sanitized.(map[string]any)
+	if !ok || !redacted {
+		t.Fatalf("SanitizeForWrite() = %#v, redacted=%t", sanitized, redacted)
+	}
+	if result["password"] != RedactedValue || result["display_name"] != "visible" {
+		t.Fatalf("top-level sanitized payload = %#v", result)
+	}
+	nested := result["nested"].([]any)
+	if nested[0].(map[string]any)["access_token"] != RedactedValue {
+		t.Fatalf("nested token was not redacted: %#v", nested[0])
+	}
+	structured := nested[1].(map[string]any)
+	if structured["cookie"] != RedactedValue || structured["raw_response"] != RedactedValue || structured["summary"] != "safe summary" {
+		t.Fatalf("structured payload was not sanitized: %#v", structured)
+	}
+
+	result["display_name"] = "changed"
+	nested[0].(map[string]any)["enabled"] = false
+	if original["display_name"] != "visible" || !original["nested"].([]any)[0].(map[string]any)["enabled"].(bool) {
+		t.Fatalf("SanitizeForWrite mutated or aliased its input: %#v", original)
+	}
+}
+
+func TestSanitizeForWritePreservesSafePayloadWithoutRedactedFlag(t *testing.T) {
+	original := map[string]any{
+		"enabled": true,
+		"nested":  []any{"visible", json.Number("42")},
+	}
+	sanitized, redacted := SanitizeForWrite(original)
+	if redacted {
+		t.Fatalf("safe payload was marked redacted: %#v", sanitized)
+	}
+	encoded, err := json.Marshal(sanitized)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `{"enabled":true,"nested":["visible",42]}` {
+		t.Fatalf("sanitized safe payload = %s", encoded)
+	}
+}
+
 func TestRedactionBoundsStringsAndRejectsUnserializableValues(t *testing.T) {
 	log := Log{
 		Target: Target{Type: "settings"},

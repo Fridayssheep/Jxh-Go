@@ -1238,15 +1238,18 @@ func writeManagerAuthAudit(tx *gorm.DB, input managerAuthAuditWrite) error {
 			return err
 		}
 	}
-	before, err := managerJSON(input.Before, true)
+	sanitizedBefore, beforeRedacted := audit.SanitizeForWrite(input.Before)
+	sanitizedAfter, afterRedacted := audit.SanitizeForWrite(input.After)
+	sanitizedMetadata, metadataRedacted := audit.SanitizeForWrite(input.Metadata)
+	before, err := managerJSON(sanitizedBefore, true)
 	if err != nil {
 		return err
 	}
-	after, err := managerJSON(input.After, true)
+	after, err := managerJSON(sanitizedAfter, true)
 	if err != nil {
 		return err
 	}
-	metadata, err := managerJSON(input.Metadata, false)
+	metadata, err := managerJSON(sanitizedMetadata, false)
 	if err != nil {
 		return err
 	}
@@ -1264,7 +1267,8 @@ func writeManagerAuthAudit(tx *gorm.DB, input managerAuthAuditWrite) error {
 		TargetDisplay: managerStringPointer(input.Target.DisplayName), Result: audit.ResultSuccess,
 		RequestID: input.Context.RequestID, Source: audit.SourceWeb,
 		IPAddress: managerStringPointer(input.Context.IPAddress), UserAgent: managerStringPointer(input.Context.UserAgent),
-		BeforeSnapshot: before, AfterSnapshot: after, Metadata: metadata, Redacted: true,
+		BeforeSnapshot: before, AfterSnapshot: after, Metadata: metadata,
+		Redacted: beforeRedacted || afterRedacted || metadataRedacted,
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return managerFailure("write manager audit log", err)

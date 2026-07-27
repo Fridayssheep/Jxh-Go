@@ -420,15 +420,18 @@ func writeManagerAudit(tx *gorm.DB, value managerAuditWrite) error {
 	if err != nil {
 		return err
 	}
-	before, err := opsMarshalOptionalJSON(value.Before)
+	sanitizedBefore, beforeRedacted := audit.SanitizeForWrite(value.Before)
+	sanitizedAfter, afterRedacted := audit.SanitizeForWrite(value.After)
+	sanitizedMetadata, metadataRedacted := audit.SanitizeForWrite(value.Metadata)
+	before, err := opsMarshalOptionalJSON(sanitizedBefore)
 	if err != nil {
 		return err
 	}
-	after, err := opsMarshalOptionalJSON(value.After)
+	after, err := opsMarshalOptionalJSON(sanitizedAfter)
 	if err != nil {
 		return err
 	}
-	metadata, err := opsMarshalJSON(value.Metadata)
+	metadata, err := opsMarshalJSON(sanitizedMetadata)
 	if err != nil {
 		return err
 	}
@@ -444,7 +447,7 @@ func writeManagerAudit(tx *gorm.DB, value managerAuditWrite) error {
 		TargetDisplay: opsOptionalString(value.TargetName), Result: string(audit.ResultSuccess),
 		RequestID: value.Request.RequestID, Source: string(source), IPAddress: opsOptionalString(value.Request.IPAddress),
 		UserAgent: opsOptionalString(value.Request.UserAgent), BeforeSnapshot: before, AfterSnapshot: after,
-		Metadata: metadata, Redacted: true,
+		Metadata: metadata, Redacted: beforeRedacted || afterRedacted || metadataRedacted,
 	}
 	return tx.Create(&row).Error
 }

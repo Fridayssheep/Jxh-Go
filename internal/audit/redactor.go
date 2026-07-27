@@ -43,6 +43,13 @@ func RedactForRole(log Log, role auth.Role) Log {
 	return result
 }
 
+// SanitizeForWrite removes sensitive and oversized values before an audit
+// payload crosses the persistence boundary. It always returns a detached
+// value so callers cannot mutate the stored representation afterwards.
+func SanitizeForWrite(value any) (sanitized any, redacted bool) {
+	return redactValue(value, false)
+}
+
 func redactObject(input map[string]any, force bool) (map[string]any, bool) {
 	return redactObjectAtDepth(input, force, 0)
 }

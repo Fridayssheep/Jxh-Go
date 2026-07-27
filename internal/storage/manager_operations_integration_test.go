@@ -1,11 +1,13 @@
 package storage
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/analytics"
+	"github.com/zjutjh/jxh-go/internal/audit"
 	"github.com/zjutjh/jxh-go/internal/auth"
 	"github.com/zjutjh/jxh-go/internal/customcommand"
 	"github.com/zjutjh/jxh-go/internal/groups"
@@ -179,6 +181,90 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	assertManagerAuthCount(t, sqlDB, `SELECT
 (SELECT COUNT(*) FROM scheduled_jobs WHERE updated_by_type = 'admin_user' AND updated_by_role = 'super_admin') +
 (SELECT COUNT(*) FROM custom_commands WHERE updated_by_type = 'admin_user' AND updated_by_role = 'super_admin')`, 2)
+}
+
+func TestManagerAuditWritersSanitizePayloadsBeforeMySQLPersistence(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	now := time.Date(2026, time.July, 28, 9, 0, 0, 0, time.UTC)
+	insertManagerAuthTestUser(t, sqlDB, "usr_root", "root-admin", auth.RoleSuperAdmin, now)
+	principal := auth.Principal{UserID: "usr_root", SessionID: "ses_root", Role: auth.RoleSuperAdmin}
+	request := auth.MutationContext{RequestID: "req_audit_sanitize", IPAddress: "192.0.2.30", UserAgent: "integration-test"}
+
+	authPayload := map[string]any{
+		"safe": "auth-visible",
+		"nested": []any{
+			map[string]any{"password": "auth-plain-password", "token": "auth-raw-token"},
+			map[string]any{"cookie": "auth-raw-cookie"},
+		},
+	}
+	if err := writeManagerAuthAudit(store.db.WithContext(t.Context()), managerAuthAuditWrite{
+		ID: "aud_auth_sanitize", Actor: principal, Context: request, At: now,
+		Action: "test.auth_sanitize", Target: audit.Target{Type: "admin_user", ID: "usr_root"},
+		Before: authPayload,
+		After: map[string]any{
+			"safe":     "auth-after-visible",
+			"upstream": map[string]any{"body": "auth-upstream-body"},
+		},
+		Metadata: map[string]any{"raw_response": "auth-raw-response"},
+	}); err != nil {
+		t.Fatalf("write auth audit: %v", err)
+	}
+
+	role := string(auth.RoleSuperAdmin)
+	actorID := principal.UserID
+	if err := writeManagerAudit(store.db.WithContext(t.Context()), managerAuditWrite{
+		Actor:      OpsActorColumns{Type: string(audit.ActorAdminUser), UserID: &actorID, DisplayName: "Root Admin", Role: &role},
+		OccurredAt: now.Add(time.Second), Request: request, Action: "test.operations_sanitize",
+		TargetType: "scheduled_job", TargetID: "job-1",
+		Before: map[string]any{
+			"safe":          "operations-visible",
+			"password_hash": "operations-password-hash",
+		},
+		After: map[string]any{"session_token": "operations-session-token", "safe": "operations-after-visible"},
+		Metadata: map[string]any{
+			"nested":            []any{map[string]any{"cookie_header": "operations-cookie"}},
+			"upstream_raw_body": "operations-upstream-body",
+		},
+	}); err != nil {
+		t.Fatalf("write operations audit: %v", err)
+	}
+
+	assertPersistedAuditSanitized(t, sqlDB, "test.auth_sanitize",
+		[]string{"auth-plain-password", "auth-raw-token", "auth-raw-cookie", "auth-upstream-body", "auth-raw-response"},
+		[]string{"auth-visible", "auth-after-visible"},
+	)
+	assertPersistedAuditSanitized(t, sqlDB, "test.operations_sanitize",
+		[]string{"operations-password-hash", "operations-session-token", "operations-cookie", "operations-upstream-body"},
+		[]string{"operations-visible", "operations-after-visible"},
+	)
+
+	if authPayload["nested"].([]any)[0].(map[string]any)["password"] != "auth-plain-password" {
+		t.Fatalf("audit persistence mutated the source payload: %#v", authPayload)
+	}
+}
+
+func assertPersistedAuditSanitized(t *testing.T, db *sql.DB, action string, secrets, visible []string) {
+	t.Helper()
+	var before, after, metadata []byte
+	var redacted bool
+	if err := db.QueryRowContext(t.Context(), `SELECT before_snapshot, after_snapshot, metadata, redacted
+FROM admin_audit_logs WHERE action = ?`, action).Scan(&before, &after, &metadata, &redacted); err != nil {
+		t.Fatal(err)
+	}
+	persisted := string(before) + string(after) + string(metadata)
+	if !redacted {
+		t.Fatalf("audit %q was not marked redacted: %s", action, persisted)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(persisted, secret) {
+			t.Fatalf("audit %q persisted sensitive value %q: %s", action, secret, persisted)
+		}
+	}
+	for _, marker := range visible {
+		if !strings.Contains(persisted, marker) {
+			t.Fatalf("audit %q lost safe value %q: %s", action, marker, persisted)
+		}
+	}
 }
 
 func managerMetricValue(summary analytics.SummaryData, key analytics.MetricKey) float64 {

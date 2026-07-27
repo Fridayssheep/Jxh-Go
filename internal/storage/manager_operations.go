@@ -42,7 +42,7 @@ const (
 	analyticsZone    = "Asia/Shanghai"
 )
 
-type opsActorColumns struct {
+type OpsActorColumns struct {
 	Type        string  `gorm:"column:actor_type"`
 	UserID      *string `gorm:"column:actor_user_id"`
 	QQUserID    *string `gorm:"column:actor_qq_user_id"`
@@ -50,7 +50,7 @@ type opsActorColumns struct {
 	Role        *string `gorm:"column:actor_role"`
 }
 
-type managerUpdatedByColumns struct {
+type ManagerUpdatedByColumns struct {
 	Type        string  `gorm:"column:updated_by_type"`
 	UserID      *string `gorm:"column:updated_by_user_id"`
 	QQUserID    *string `gorm:"column:updated_by_qq_user_id"`
@@ -72,7 +72,7 @@ type joinPolicyManagerRow struct {
 	RequiredFields []byte `gorm:"column:required_fields"`
 	AutoReject     bool   `gorm:"column:auto_reject"`
 	Revision       uint64 `gorm:"column:revision"`
-	managerUpdatedByColumns
+	ManagerUpdatedByColumns
 	CreatedAt time.Time `gorm:"column:created_at"`
 	UpdatedAt time.Time `gorm:"column:updated_at"`
 }
@@ -110,13 +110,13 @@ type joinRequestManagerRow struct {
 type joinDecisionManagerRow struct {
 	DecisionID        string  `gorm:"column:decision_id;primaryKey"`
 	RequestInternalID uint64  `gorm:"column:request_id"`
-	RequestFlag       string  `gorm:"column:request_flag"`
+	RequestFlag       string  `gorm:"column:request_flag;->"`
 	IdempotencyKey    string  `gorm:"column:idempotency_key"`
 	Action            string  `gorm:"column:action"`
 	Status            string  `gorm:"column:status"`
 	Source            string  `gorm:"column:source"`
 	Reason            *string `gorm:"column:reason"`
-	opsActorColumns
+	OpsActorColumns
 	FieldSnapshot      []byte     `gorm:"column:field_snapshot"`
 	ValidationSnapshot []byte     `gorm:"column:validation_snapshot"`
 	RuleVersion        *uint64    `gorm:"column:rule_version"`
@@ -144,7 +144,7 @@ type scheduledJobManagerRow struct {
 	LastRunAt     *time.Time `gorm:"column:last_run_at"`
 	Revision      uint64     `gorm:"column:revision"`
 	LastRunResult *string    `gorm:"column:last_run_result"`
-	managerUpdatedByColumns
+	ManagerUpdatedByColumns
 	CreatedAt  time.Time  `gorm:"column:created_at"`
 	UpdatedAt  time.Time  `gorm:"column:updated_at"`
 	ArchivedAt *time.Time `gorm:"column:archived_at"`
@@ -187,7 +187,7 @@ type customCommandManagerRow struct {
 	Enabled           bool   `gorm:"column:enabled"`
 	Status            string `gorm:"column:status"`
 	Revision          uint64 `gorm:"column:revision"`
-	managerUpdatedByColumns
+	ManagerUpdatedByColumns
 	CreatedAt  time.Time  `gorm:"column:created_at"`
 	UpdatedAt  time.Time  `gorm:"column:updated_at"`
 	ArchivedAt *time.Time `gorm:"column:archived_at"`
@@ -358,27 +358,27 @@ func escapeManagerLike(value string) string {
 	return strings.ReplaceAll(value, `_`, `\_`)
 }
 
-func principalUpdatedBy(value auth.Principal) managerUpdatedByColumns {
+func principalUpdatedBy(value auth.Principal) ManagerUpdatedByColumns {
 	role := string(value.Role)
 	userID := value.UserID
-	return managerUpdatedByColumns{
+	return ManagerUpdatedByColumns{
 		Type: string(audit.ActorAdminUser), UserID: &userID, DisplayName: value.UserID, Role: &role,
 	}
 }
 
-func auditActorUpdatedBy(value audit.Actor) managerUpdatedByColumns {
-	return managerUpdatedByColumns{
+func auditActorUpdatedBy(value audit.Actor) ManagerUpdatedByColumns {
+	return ManagerUpdatedByColumns{
 		Type: string(value.Type), UserID: value.UserID, QQUserID: value.QQUserID, DisplayName: value.DisplayName,
 	}
 }
 
-func updatedByActor(value managerUpdatedByColumns) audit.Actor {
+func updatedByActor(value ManagerUpdatedByColumns) audit.Actor {
 	return audit.Actor{
 		Type: audit.ActorType(value.Type), UserID: value.UserID, QQUserID: value.QQUserID, DisplayName: value.DisplayName,
 	}
 }
 
-func decisionActor(value opsActorColumns) *audit.Actor {
+func decisionActor(value OpsActorColumns) *audit.Actor {
 	if value.Type == "" {
 		return nil
 	}
@@ -387,22 +387,22 @@ func decisionActor(value opsActorColumns) *audit.Actor {
 	}
 }
 
-func principalDecisionActor(value auth.Principal) opsActorColumns {
+func principalDecisionActor(value auth.Principal) OpsActorColumns {
 	role := string(value.Role)
 	userID := value.UserID
-	return opsActorColumns{
+	return OpsActorColumns{
 		Type: string(audit.ActorAdminUser), UserID: &userID, DisplayName: value.UserID, Role: &role,
 	}
 }
 
-func domainDecisionActor(value audit.Actor) opsActorColumns {
-	return opsActorColumns{
+func domainDecisionActor(value audit.Actor) OpsActorColumns {
+	return OpsActorColumns{
 		Type: string(value.Type), UserID: value.UserID, QQUserID: value.QQUserID, DisplayName: value.DisplayName,
 	}
 }
 
 type managerAuditWrite struct {
-	Actor      opsActorColumns
+	Actor      OpsActorColumns
 	OccurredAt time.Time
 	Request    auth.MutationContext
 	Source     audit.Source
@@ -563,7 +563,7 @@ func decisionFromManagerRow(row joinDecisionManagerRow) (joinrequests.Decision, 
 	return joinrequests.Decision{
 		ID: row.DecisionID, RequestID: row.RequestFlag, Action: joinrequests.Action(row.Action),
 		Source: joinrequests.DecisionSource(row.Source), Status: joinrequests.AttemptStatus(row.Status),
-		Actor: decisionActor(row.opsActorColumns), Reason: row.Reason, RuleVersion: row.RuleVersion,
+		Actor: decisionActor(row.OpsActorColumns), Reason: row.Reason, RuleVersion: row.RuleVersion,
 		FieldSnapshot: snapshot, StartedAt: row.StartedAt.UTC(), CompletedAt: utcTimePointer(row.CompletedAt),
 		ErrorCode: row.ErrorCode, TraceID: row.TraceID,
 	}, nil
@@ -587,7 +587,7 @@ func policyFromManagerRow(row joinPolicyManagerRow) (joinrequests.Policy, error)
 	if err := opsUnmarshalJSON(row.RequiredFields, &required); err != nil {
 		return joinrequests.Policy{}, err
 	}
-	actor := updatedByActor(row.managerUpdatedByColumns)
+	actor := updatedByActor(row.ManagerUpdatedByColumns)
 	return joinrequests.Policy{
 		GroupID: strconv.FormatInt(row.GroupID, 10), Enabled: row.Enabled, Mode: row.Mode,
 		RequiredFields: required, AutoReject: row.AutoReject, Version: row.Revision,
@@ -860,7 +860,7 @@ func (s *Store) BeginDecisions(ctx context.Context, mutation joinrequests.BeginM
 			decision := joinDecisionManagerRow{
 				DecisionID: decisionID, RequestInternalID: requestRow.InternalID,
 				IdempotencyKey: mutation.IdempotencyKey, Action: string(mutation.Action), Status: string(joinrequests.AttemptStarted),
-				Source: string(mutation.Source), Reason: mutation.Reason, opsActorColumns: actor,
+				Source: string(mutation.Source), Reason: mutation.Reason, OpsActorColumns: actor,
 				FieldSnapshot: fieldsJSON, ValidationSnapshot: validationJSON, RuleVersion: mutation.RuleVersion,
 				TraceID: traceID, StartedAt: mutation.Context.OccurredAt.UTC(),
 			}
@@ -942,7 +942,7 @@ func replayJoinDecisionReservation(tx *gorm.DB, mutation joinrequests.BeginMutat
 		decisionRow, ok := byInternalID[requestRow.InternalID]
 		if !ok || decisionRow.Action != string(mutation.Action) || decisionRow.Source != string(mutation.Source) ||
 			!sameManagerString(decisionRow.Reason, mutation.Reason) || !sameManagerUint(decisionRow.RuleVersion, mutation.RuleVersion) ||
-			!sameOpsActor(decisionRow.opsActorColumns, expectedActor) {
+			!sameOpsActor(decisionRow.OpsActorColumns, expectedActor) {
 			return joinrequests.Reservation{}, false, joinrequests.ErrIdempotencyConflict
 		}
 		if err := validateReplayFieldSnapshot(decisionRow, mutation.FieldSnapshots, item.ID); err != nil {
@@ -962,7 +962,7 @@ func replayJoinDecisionReservation(tx *gorm.DB, mutation joinrequests.BeginMutat
 	return result, true, nil
 }
 
-func sameOpsActor(left, right opsActorColumns) bool {
+func sameOpsActor(left, right OpsActorColumns) bool {
 	return left.Type == right.Type && sameManagerString(left.UserID, right.UserID) &&
 		sameManagerString(left.QQUserID, right.QQUserID) && left.DisplayName == right.DisplayName
 }
@@ -1119,7 +1119,7 @@ policy.updated_by_role AS policy_updated_role`).
 			GroupID: *row.GroupID, Enabled: row.PolicyEnabled, Mode: row.PolicyMode,
 			RequiredFields: row.PolicyRequiredFields, AutoReject: row.PolicyAutoReject,
 			Revision: row.PolicyRevision, UpdatedAt: row.PolicyUpdatedAt,
-			managerUpdatedByColumns: managerUpdatedByColumns{
+			ManagerUpdatedByColumns: ManagerUpdatedByColumns{
 				Type: row.PolicyUpdatedType, UserID: row.PolicyUpdatedUserID, QQUserID: row.PolicyUpdatedQQID,
 				DisplayName: row.PolicyUpdatedDisplay, Role: row.PolicyUpdatedRole,
 			},
@@ -1250,7 +1250,7 @@ func scheduledJobFromManagerRow(row scheduledJobManagerRow) (scheduledjobs.Job, 
 		Group: scheduledjobs.Group{ID: strconv.FormatInt(row.GroupID, 10), Name: row.GroupName}, Message: row.Message,
 		Type: jobType, Schedule: schedule, Status: scheduledjobs.Status(row.Status), NextRunAt: utcTimePointer(row.RunAt),
 		LastRunAt: utcTimePointer(row.LastRunAt), LastRunResult: lastResult, Version: row.Revision,
-		CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(), UpdatedBy: updatedByActor(row.managerUpdatedByColumns),
+		CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(), UpdatedBy: updatedByActor(row.ManagerUpdatedByColumns),
 	}, nil
 }
 
@@ -1265,7 +1265,7 @@ func loadScheduledJobManagerRow(db *gorm.DB, id string) (scheduledJobManagerRow,
 	return row, err
 }
 
-func scheduledAuditActor(principal auth.Principal) opsActorColumns {
+func scheduledAuditActor(principal auth.Principal) OpsActorColumns {
 	return principalDecisionActor(principal)
 }
 
@@ -1294,7 +1294,7 @@ func (s *Store) CreateScheduledJob(ctx context.Context, mutation scheduledjobs.C
 			Name: mutation.Input.Name, Type: jobType, TimeHHMM: timeHHMM, RunDate: runDate,
 			GroupID: groupID, Message: mutation.Input.Message, Enabled: mutation.Input.Enabled,
 			Status: string(status), Timezone: mutation.Input.Schedule.Timezone, RunAt: utcTimePointer(mutation.NextRunAt),
-			Revision: 1, managerUpdatedByColumns: actor, CreatedAt: at, UpdatedAt: at,
+			Revision: 1, ManagerUpdatedByColumns: actor, CreatedAt: at, UpdatedAt: at,
 		}
 		if err := tx.Omit("GroupName").Create(&row).Error; err != nil {
 			return err
@@ -1820,7 +1820,7 @@ func customCommandFromManagerRow(row customCommandManagerRow) (customcommand.Com
 	return customcommand.Command{
 		ID: row.CommandID, Definition: definition, Enabled: row.Enabled, Status: customcommand.Status(row.Status),
 		Version: row.Revision, CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(),
-		UpdatedBy: updatedByActor(row.managerUpdatedByColumns),
+		UpdatedBy: updatedByActor(row.ManagerUpdatedByColumns),
 	}, nil
 }
 
@@ -1874,7 +1874,7 @@ func (s *Store) CreateCommand(ctx context.Context, mutation customcommand.Create
 			Description: mutation.Definition.Description, ScopeType: string(mutation.Definition.Scope.Type), ScopeJSON: scopeJSON,
 			TriggerPermission: string(mutation.Definition.TriggerPermission), ParametersJSON: parametersJSON, ActionsJSON: actionsJSON,
 			Enabled: mutation.Enabled, Status: string(mutation.Status), Revision: 1,
-			managerUpdatedByColumns: actor, CreatedAt: at, UpdatedAt: at,
+			ManagerUpdatedByColumns: actor, CreatedAt: at, UpdatedAt: at,
 		}
 		if err := tx.Create(&row).Error; err != nil {
 			if opsIsDuplicateKey(err) {

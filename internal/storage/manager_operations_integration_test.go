@@ -1,0 +1,216 @@
+package storage
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zjutjh/jxh-go/internal/analytics"
+	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/customcommand"
+	"github.com/zjutjh/jxh-go/internal/groups"
+	"github.com/zjutjh/jxh-go/internal/joinrequests"
+	"github.com/zjutjh/jxh-go/internal/scheduledjobs"
+	"github.com/zjutjh/jxh-go/internal/telemetry"
+)
+
+func TestManagerOperationsMySQLResourceLifecycle(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	now := time.Date(2026, time.July, 28, 5, 0, 0, 0, time.UTC)
+	insertManagerAuthTestUser(t, sqlDB, "usr_root", "root-admin", auth.RoleSuperAdmin, now)
+	principal := auth.Principal{UserID: "usr_root", SessionID: "ses_root", Role: auth.RoleSuperAdmin}
+	request := auth.MutationContext{RequestID: "req_operations", IPAddress: "192.0.2.20", UserAgent: "integration-test"}
+	managerIntegrationCreateGroup(t, store, principal, request, now, "10001")
+
+	nextRun := now.Add(time.Hour)
+	job, err := store.CreateScheduledJob(t.Context(), scheduledjobs.CreateMutation{
+		Context: scheduledjobs.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(time.Minute)},
+		Input: scheduledjobs.CreateInput{
+			Name: "Morning notice", GroupID: "10001", Message: "Good morning",
+			Schedule: scheduledjobs.Schedule{Type: scheduledjobs.TypeDaily, LocalTime: "06:00", Timezone: "Asia/Shanghai"},
+			Enabled:  true,
+		},
+		NextRunAt: &nextRun,
+	})
+	if err != nil || job.ID == "" || job.Version != 1 || job.Status != scheduledjobs.StatusActive || job.UpdatedBy.UserID == nil {
+		t.Fatalf("create scheduled job: job=%+v error=%v", job, err)
+	}
+
+	command, err := store.CreateCommand(t.Context(), customcommand.CreateMutation{
+		Context: customcommand.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(2 * time.Minute)},
+		Definition: customcommand.Definition{
+			Name: "/hello", DisplayName: "Hello", Description: "Send a greeting",
+			Scope:             customcommand.Scope{Type: customcommand.ScopeGroups, GroupIDs: []string{"10001"}},
+			TriggerPermission: customcommand.TriggerEveryone,
+			Actions:           []customcommand.Action{{Type: customcommand.ActionReplyText, Template: "Hello"}},
+		},
+		Status: customcommand.StatusActive, Enabled: true,
+	})
+	if err != nil || command.ID == "" || command.Version != 1 || command.Status != customcommand.StatusActive || command.UpdatedBy.UserID == nil {
+		t.Fatalf("create custom command: command=%+v error=%v", command, err)
+	}
+
+	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
+(flag, group_id, user_id, applicant_nickname, student_id, student_name, major, sub_type, comment,
+ status, source, ai_parse_status, ai_parse_attempts, validation_snapshot, observed_status, decision_status,
+ revision, requested_at, first_seen_at, last_seen_at, ai_parsed_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'pending', 'pending', 1, ?, ?, ?, ?)`,
+		"join-flag-1", 10001, 20001, "Applicant", "20260001", "Student", "Computer Science", "verification",
+		`{"valid":true,"validation_errors":[]}`, now, now, now, now,
+	); err != nil {
+		t.Fatalf("seed join request: %v", err)
+	}
+	joinReservation, err := store.BeginDecisions(t.Context(), joinrequests.BeginMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(3 * time.Minute),
+		},
+		GroupID: "10001", Items: []joinrequests.VersionedRequest{{ID: "join-flag-1", Version: 1}},
+		Action: joinrequests.ActionApprove, Source: joinrequests.SourceManual,
+		IdempotencyKey: "join-decision-1", ProcessingExpiresAt: now.Add(4 * time.Minute),
+	})
+	if err != nil || joinReservation.Replay || len(joinReservation.Items) != 1 ||
+		joinReservation.Items[0].Request.DecisionStatus != joinrequests.DecisionProcessing {
+		t.Fatalf("begin join decision: reservation=%+v error=%v", joinReservation, err)
+	}
+	decisionID := joinReservation.Items[0].Decision.ID
+	decisionResult, err := store.CompleteDecision(t.Context(), joinrequests.CompletionMutation{
+		DecisionID: decisionID, RequestID: "join-flag-1", AttemptStatus: joinrequests.AttemptConfirmed,
+		DecisionStatus: joinrequests.DecisionApproved, CompletedAt: now.Add(3*time.Minute + time.Second),
+	})
+	if err != nil || decisionResult.Request.DecisionStatus != joinrequests.DecisionApproved ||
+		decisionResult.Request.Version != 3 || decisionResult.Decision.Status != joinrequests.AttemptConfirmed {
+		t.Fatalf("complete join decision: result=%+v error=%v", decisionResult, err)
+	}
+	joinReplay, err := store.BeginDecisions(t.Context(), joinrequests.BeginMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(3 * time.Minute),
+		},
+		GroupID: "10001", Items: []joinrequests.VersionedRequest{{ID: "join-flag-1", Version: 1}},
+		Action: joinrequests.ActionApprove, Source: joinrequests.SourceManual,
+		IdempotencyKey: "join-decision-1", ProcessingExpiresAt: now.Add(4 * time.Minute),
+	})
+	if err != nil || !joinReplay.Replay || len(joinReplay.Items) != 1 || joinReplay.Items[0].Decision.ID != decisionID {
+		t.Fatalf("replay join decision: reservation=%+v error=%v", joinReplay, err)
+	}
+
+	testSend, err := store.BeginScheduledJobTestSend(t.Context(), scheduledjobs.TestSendBegin{
+		Context: scheduledjobs.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(4 * time.Minute)},
+		JobID:   job.ID, ExpectedRevision: job.Version, IdempotencyKey: "scheduled-test-send-1",
+	})
+	if err != nil || !testSend.Fresh || testSend.Run.ID == "" || testSend.Run.CompletedAt != nil {
+		t.Fatalf("begin scheduled test send: reservation=%+v error=%v", testSend, err)
+	}
+	completedRun, err := store.CompleteScheduledJobTestSend(t.Context(), scheduledjobs.TestSendCompletion{
+		ExecutionID: testSend.ExecutionID, RunID: testSend.Run.ID, Result: scheduledjobs.RunSuccess,
+		CompletedAt: now.Add(4*time.Minute + time.Second), Duration: 125 * time.Millisecond, MessageID: "message-1",
+	})
+	if err != nil || completedRun.Result != scheduledjobs.RunSuccess || completedRun.CompletedAt == nil ||
+		completedRun.MessageID == nil || *completedRun.MessageID != "message-1" {
+		t.Fatalf("complete scheduled test send: run=%+v error=%v", completedRun, err)
+	}
+	testReplay, err := store.BeginScheduledJobTestSend(t.Context(), scheduledjobs.TestSendBegin{
+		Context: scheduledjobs.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(4 * time.Minute)},
+		JobID:   job.ID, ExpectedRevision: job.Version, IdempotencyKey: "scheduled-test-send-1",
+	})
+	if err != nil || testReplay.Fresh || testReplay.Run.ID != completedRun.ID {
+		t.Fatalf("replay scheduled test send: reservation=%+v error=%v", testReplay, err)
+	}
+
+	recordedRun, err := store.RecordCommandRun(t.Context(), customcommand.Run{
+		RunIdentity: "command-run-identity-1", CommandID: command.ID, CommandName: command.Name,
+		GroupID: "10001", TriggeredByQQ: "20001", Result: customcommand.RunSuccess,
+		ArgumentSummaries: []customcommand.ArgumentSummary{{Name: "text", Type: customcommand.ParameterText, Present: true, RuneLength: 5}},
+		ActionSteps:       []customcommand.ActionStep{{Index: 0, Type: customcommand.ActionReplyText, Result: customcommand.StepSuccess, Duration: 20 * time.Millisecond}},
+		Duration:          25 * time.Millisecond, RequestID: "req_command_run", OccurredAt: now.Add(5 * time.Minute),
+	})
+	if err != nil || recordedRun.ID == "" || recordedRun.Result != customcommand.RunSuccess || len(recordedRun.ActionSteps) != 1 {
+		t.Fatalf("record command run: run=%+v error=%v", recordedRun, err)
+	}
+
+	actorHash := strings.Repeat("a", 64)
+	if err := store.AppendTelemetryEvents(t.Context(), []telemetry.Event{
+		{Kind: telemetry.EventGroupMessage, OccurredAt: now.Add(6 * time.Minute), GroupID: "10001", UserKey: actorHash, Result: telemetry.ResultSuccess, Count: 1},
+		{Kind: telemetry.EventAIRequest, OccurredAt: now.Add(6*time.Minute + time.Second), GroupID: "10001", UserKey: actorHash, FeatureKey: "ai_qa", Result: telemetry.ResultSuccess, DurationMS: 125, Count: 2},
+		{Kind: telemetry.EventCommandRun, OccurredAt: now.Add(6*time.Minute + 2*time.Second), GroupID: "10001", UserKey: actorHash, FeatureKey: "custom_commands", Result: telemetry.ResultSuccess, CommandID: command.ID, Count: 1},
+	}); err != nil {
+		t.Fatalf("append telemetry: %v", err)
+	}
+	filter := analytics.Filter{
+		From: now.Add(-time.Hour), To: now.Add(time.Hour), GroupIDs: []string{"10001"}, Timezone: "Asia/Shanghai",
+	}
+	summary, err := store.LoadSummary(t.Context(), filter)
+	if err != nil || managerMetricValue(summary, analytics.MetricGroupMessageCount) != 1 ||
+		managerMetricValue(summary, analytics.MetricAIRequestCount) != 2 ||
+		managerMetricValue(summary, analytics.MetricActiveUserCount) != 1 {
+		t.Fatalf("load analytics summary: summary=%+v error=%v", summary, err)
+	}
+	rankings, err := store.LoadRankings(t.Context(), analytics.StoreRankingsQuery{
+		Filter: filter, Dimension: analytics.DimensionGroup, Metric: analytics.MetricGroupMessageCount, Limit: 10,
+	})
+	if err != nil || len(rankings.Items) != 1 || rankings.Items[0].Key != "10001" || rankings.Items[0].Value != 1 {
+		t.Fatalf("load analytics rankings: rankings=%+v error=%v", rankings, err)
+	}
+	timeseries, err := store.LoadTimeseries(t.Context(), analytics.StoreTimeseriesQuery{
+		Filter: filter, Granularity: analytics.GranularityHour, Metrics: []analytics.MetricKey{analytics.MetricAIRequestCount},
+	})
+	if err != nil || len(timeseries.Points[analytics.MetricAIRequestCount]) == 0 {
+		t.Fatalf("load analytics timeseries: timeseries=%+v error=%v", timeseries, err)
+	}
+
+	joinRows, err := store.OpenJoinRequestExport(t.Context(), filter)
+	if err != nil {
+		t.Fatalf("open join request export: %v", err)
+	}
+	defer joinRows.Close()
+	joinRow, ok, err := joinRows.Next(t.Context())
+	if err != nil || !ok || joinRow.RequestID != "join-flag-1" || joinRow.DecisionStatus != string(joinrequests.DecisionApproved) {
+		t.Fatalf("read join request export: row=%+v ok=%t error=%v", joinRow, ok, err)
+	}
+	scheduledRows, err := store.OpenScheduledJobRunExport(t.Context(), filter)
+	if err != nil {
+		t.Fatalf("open scheduled run export: %v", err)
+	}
+	defer scheduledRows.Close()
+	scheduledRow, ok, err := scheduledRows.Next(t.Context())
+	if err != nil || !ok || scheduledRow.RunID != completedRun.ID || scheduledRow.Result != analytics.ResultSuccess {
+		t.Fatalf("read scheduled run export: row=%+v ok=%t error=%v", scheduledRow, ok, err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN ('scheduled_job.create', 'custom_command.create')", 2)
+	assertManagerAuthCount(t, sqlDB, `SELECT
+(SELECT COUNT(*) FROM scheduled_jobs WHERE updated_by_type = 'admin_user' AND updated_by_role = 'super_admin') +
+(SELECT COUNT(*) FROM custom_commands WHERE updated_by_type = 'admin_user' AND updated_by_role = 'super_admin')`, 2)
+}
+
+func managerMetricValue(summary analytics.SummaryData, key analytics.MetricKey) float64 {
+	value := summary.Values[key]
+	if !value.Available || value.Value == nil {
+		return -1
+	}
+	return *value.Value
+}
+
+func managerIntegrationCreateGroup(
+	t *testing.T,
+	store *Store,
+	principal auth.Principal,
+	request auth.MutationContext,
+	at time.Time,
+	groupID string,
+) {
+	t.Helper()
+	reservation, err := store.BeginGroupSync(t.Context(), groups.BeginSync{
+		Context:        groups.MutationContext{Actor: principal, Request: request, OccurredAt: at},
+		IdempotencyKey: "groups-sync-" + groupID,
+	})
+	if err != nil {
+		t.Fatalf("begin group sync: %v", err)
+	}
+	if _, err := store.CompleteGroupSync(t.Context(), groups.CompleteSync{
+		ExecutionID: reservation.ExecutionID, CompletedAt: at.Add(time.Second),
+		Groups: []groups.RemoteGroup{{
+			ID: groupID, Name: "Integration Group " + groupID, MemberCount: 25, MaxMemberCount: 500, BotRole: groups.RoleAdmin,
+		}},
+	}); err != nil {
+		t.Fatalf("complete group sync: %v", err)
+	}
+}

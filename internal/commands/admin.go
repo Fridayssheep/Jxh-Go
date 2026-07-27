@@ -19,7 +19,7 @@ const (
 )
 
 type SchedulerStore interface {
-	ListScheduledJobs(ctx context.Context, groupID int64) ([]ScheduledJobView, error)
+	ListGroupScheduledJobs(ctx context.Context, groupID int64) ([]ScheduledJobView, error)
 	AddScheduledJob(ctx context.Context, job ScheduledJobInput) (uint64, error)
 	RemoveScheduledJob(ctx context.Context, groupID int64, id uint64) (bool, error)
 }
@@ -65,7 +65,7 @@ func (h *AdminHandler) Execute(ctx context.Context, groupID int64, input string)
 	text := strings.ReplaceAll(strings.TrimSpace(input), "　", " ")
 	switch {
 	case text == "定时任务 查看":
-		jobs, err := h.store.ListScheduledJobs(ctx, groupID)
+		jobs, err := h.store.ListGroupScheduledJobs(ctx, groupID)
 		if err != nil {
 			return "", err
 		}

@@ -62,7 +62,7 @@ func (s *Store) PurgeOldTriggerLogs(ctx context.Context, before time.Time) (int6
 	return result.RowsAffected, result.Error
 }
 
-func (s *Store) ListScheduledJobs(ctx context.Context, groupID int64) ([]commands.ScheduledJobView, error) {
+func (s *Store) ListGroupScheduledJobs(ctx context.Context, groupID int64) ([]commands.ScheduledJobView, error) {
 	var jobs []ScheduledJob
 	if err := s.db.WithContext(ctx).Where("group_id = ? AND enabled = ?", groupID, true).Order("id").Find(&jobs).Error; err != nil {
 		return nil, err

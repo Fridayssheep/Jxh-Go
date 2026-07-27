@@ -39,6 +39,13 @@ func ParseIfMatch(value string) (uint64, error) {
 	return version, nil
 }
 
+func ParseIfMatchIncludingZero(value string) (uint64, error) {
+	if value == `"0"` {
+		return 0, nil
+	}
+	return ParseIfMatch(value)
+}
+
 func ParseLimit(value string) (int, error) {
 	if value == "" {
 		return 50, nil

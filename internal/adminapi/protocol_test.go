@@ -19,6 +19,18 @@ func TestParseIfMatchRequiresQuotedPositiveVersion(t *testing.T) {
 	}
 }
 
+func TestParseIfMatchIncludingZeroOnlyRelaxesCanonicalZero(t *testing.T) {
+	version, err := ParseIfMatchIncludingZero(`"0"`)
+	if err != nil || version != 0 {
+		t.Fatalf("ParseIfMatchIncludingZero() = %d, %v", version, err)
+	}
+	for _, value := range []string{`"00"`, "0", `W/"0"`} {
+		if _, err := ParseIfMatchIncludingZero(value); !errors.Is(err, ErrInvalidIfMatch) {
+			t.Fatalf("ParseIfMatchIncludingZero(%q) error = %v", value, err)
+		}
+	}
+}
+
 func TestParseLimitUsesContractBounds(t *testing.T) {
 	for raw, want := range map[string]int{"": 50, "1": 1, "100": 100} {
 		got, err := ParseLimit(raw)

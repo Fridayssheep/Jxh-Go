@@ -14,6 +14,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/quote"
+	"github.com/zjutjh/jxh-go/internal/settings"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
 )
@@ -49,6 +50,7 @@ type Options struct {
 	GroupRequests *grouprequest.Service
 	TriggerStats  *triggerstats.Service
 	LinkCleaner   *linkcleaner.Service
+	Settings      *settings.Runtime
 }
 
 type Pipeline struct {
@@ -58,6 +60,7 @@ type Pipeline struct {
 	groupRequests *grouprequest.Service
 	stats         *triggerstats.Service
 	linkCleaner   *linkcleaner.Service
+	settings      *settings.Runtime
 	commandRouter *GroupCommandRouter
 }
 
@@ -86,6 +89,7 @@ func NewPipeline(opts Options) *Pipeline {
 		groupRequests: opts.GroupRequests,
 		stats:         opts.TriggerStats,
 		linkCleaner:   opts.LinkCleaner,
+		settings:      opts.Settings,
 		commandRouter: NewGroupCommandRouter(opts),
 	}
 	pipeline.SetSender(opts.Sender)
@@ -102,7 +106,7 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	if handled || err != nil {
 		return err
 	}
-	if p.linkCleaner != nil {
+	if p.linkCleaner != nil && p.featureEnabled(msg.GroupID, settings.FeatureLinkCleaner) {
 		cleaned, err := p.linkCleaner.CleanMessage(ctx, msg.Text, msg.Segments)
 		if err != nil {
 			log.Printf("clean tracked links failed: %v", err)
@@ -114,7 +118,7 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	if text == "" {
 		return nil
 	}
-	if p.knowledge != nil {
+	if p.knowledge != nil && p.featureEnabled(msg.GroupID, settings.FeatureKeywordReply) {
 		if entry, ok := p.knowledge.Lookup(text); ok {
 			if err := sendKeywordReply(ctx, sender, msg.GroupID, entry.SourceKey, entry.Answer); err != nil {
 				return err
@@ -136,9 +140,16 @@ func (p *Pipeline) HandleGroupIncrease(ctx context.Context, groupID int64, userI
 	if sender == nil {
 		return nil
 	}
+	features := settings.DefaultFeatures()
+	if p.settings != nil {
+		features = p.settings.EffectiveForGroup(groupID)
+	}
+	if !features.Welcome.Enabled {
+		return nil
+	}
 	return sender.SendGroupMessage(ctx, groupID, message.ChainOf(
 		message.At(userID),
-		message.Text("欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"),
+		message.Text(settings.RenderWelcome(features.Welcome.MessageTemplate, groupID, userID)),
 	))
 }
 
@@ -168,4 +179,8 @@ func (p *Pipeline) currentSender() Sender {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.sender
+}
+
+func (p *Pipeline) featureEnabled(groupID int64, key settings.FeatureKey) bool {
+	return p.settings == nil || p.settings.Enabled(groupID, key)
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/safego"
+	"github.com/zjutjh/jxh-go/internal/settings"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
 )
@@ -26,9 +27,12 @@ type GroupCommandRouter struct {
 	quote         *quote.Client
 	groupRequests *grouprequest.Service
 	triggerStats  *triggerstats.Service
+	settings      *settings.Runtime
 }
 
 const maxQuoteMessages = 10
+
+const disabledFeatureReply = "该功能当前已关闭"
 
 const botHelpText = `精小弘命令菜单：
 /test - 检查精小弘是否存活！
@@ -59,6 +63,7 @@ func NewGroupCommandRouter(opts Options) *GroupCommandRouter {
 		quote:         opts.Quote,
 		groupRequests: opts.GroupRequests,
 		triggerStats:  opts.TriggerStats,
+		settings:      opts.Settings,
 	}
 }
 
@@ -76,8 +81,14 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	case text == "/reload":
 		return true, r.handleReload(ctx, msg, sender)
 	case text == "/q" || strings.HasPrefix(text, "/q "):
+		if !r.featureEnabled(msg.GroupID, settings.FeatureQuote) {
+			return true, sender.SendGroupText(ctx, msg.GroupID, disabledFeatureReply)
+		}
 		return true, r.handleQuote(ctx, msg, sender, text)
 	case text == "/ai" || strings.HasPrefix(text, "/ai "):
+		if !r.featureEnabled(msg.GroupID, settings.FeatureAIQA) {
+			return true, sender.SendGroupText(ctx, msg.GroupID, disabledFeatureReply)
+		}
 		return true, r.startAI(ctx, msg, sender, text)
 	case text == "/admin" || strings.HasPrefix(text, "/admin "):
 		if !mentionsSelf(msg) {
@@ -87,6 +98,10 @@ func (r *GroupCommandRouter) Handle(ctx context.Context, msg GroupMessage, sende
 	default:
 		return false, nil
 	}
+}
+
+func (r *GroupCommandRouter) featureEnabled(groupID int64, key settings.FeatureKey) bool {
+	return r.settings == nil || r.settings.Enabled(groupID, key)
 }
 
 func mentionsSelf(msg GroupMessage) bool {

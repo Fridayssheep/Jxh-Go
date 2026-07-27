@@ -81,6 +81,7 @@ type ListQuery struct {
 	ActorType   ActorType
 	Actions     []string
 	TargetTypes []string
+	TargetID    string
 	Result      Result
 	From        *time.Time
 	To          *time.Time

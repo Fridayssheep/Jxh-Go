@@ -88,7 +88,8 @@ func boundSummary(summary Summary) Summary {
 
 func validListQuery(query ListQuery) bool {
 	if query.Limit < 1 || query.Limit > 100 || (query.Cursor != "" && !validText(query.Cursor, 256)) ||
-		(query.ActorUserID != "" && !validText(query.ActorUserID, 256)) || len(query.Actions) > 20 || len(query.TargetTypes) > 20 {
+		(query.ActorUserID != "" && !validText(query.ActorUserID, 256)) ||
+		(query.TargetID != "" && !validText(query.TargetID, 256)) || len(query.Actions) > 20 || len(query.TargetTypes) > 20 {
 		return false
 	}
 	if query.From != nil && query.To != nil && query.From.After(*query.To) {
@@ -100,8 +101,13 @@ func validListQuery(query ListQuery) bool {
 	if query.Result != "" && query.Result != ResultSuccess && query.Result != ResultFailed && query.Result != ResultUnknown {
 		return false
 	}
-	for _, value := range append(append([]string(nil), query.Actions...), query.TargetTypes...) {
+	for _, value := range query.Actions {
 		if !validText(value, 100) {
+			return false
+		}
+	}
+	for _, value := range query.TargetTypes {
+		if !validText(value, 64) {
 			return false
 		}
 	}

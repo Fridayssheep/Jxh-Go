@@ -322,15 +322,16 @@ func TestMySQLMigrationsRecoverFromEveryUnrecordedStage(t *testing.T) {
 	t.Run("completed SQL without ledger", func(t *testing.T) {
 		db := openMySQLIntegrationSchema(t)
 		applyMySQLMigrations(t, db, migrations)
-		if _, err := db.ExecContext(t.Context(), "DELETE FROM `schema_migrations` WHERE `version` = 8"); err != nil {
-			t.Fatalf("remove 008 ledger row: %v", err)
+		latest := migrations[len(migrations)-1].Version
+		if _, err := db.ExecContext(t.Context(), "DELETE FROM `schema_migrations` WHERE `version` = ?", latest); err != nil {
+			t.Fatalf("remove latest ledger row: %v", err)
 		}
 		applyMySQLMigrations(t, db, migrations)
 	})
 
 	t.Run("007 and 008 completed without ledger", func(t *testing.T) {
 		db := openMySQLIntegrationSchema(t)
-		applyMySQLMigrations(t, db, migrations)
+		applyMySQLMigrations(t, db, migrations[:8])
 		if _, err := db.ExecContext(t.Context(), "DELETE FROM `schema_migrations` WHERE `version` IN (7, 8)"); err != nil {
 			t.Fatalf("remove 007-008 ledger rows: %v", err)
 		}
@@ -543,6 +544,7 @@ func TestMySQLRawInitViaCLIThenRunnerIsNoOp(t *testing.T) {
 		t.Skip("JXH_MYSQL_INTEGRATION_CONTAINER is not set")
 	}
 	db := openMySQLIntegrationSchema(t)
+	migrations := repositoryMigrations(t)
 	var schema string
 	if err := db.QueryRowContext(t.Context(), "SELECT DATABASE()").Scan(&schema); err != nil {
 		t.Fatalf("load integration schema name: %v", err)
@@ -578,19 +580,19 @@ func TestMySQLRawInitViaCLIThenRunnerIsNoOp(t *testing.T) {
 	if got := migrationAttemptCount(t, db); got != 0 {
 		t.Fatalf("migration attempts after raw init = %d, want 0", got)
 	}
-	if got := migrationLedgerCount(t, db); got != 8 {
-		t.Fatalf("migration ledger rows after raw init = %d, want 8", got)
+	if got := migrationLedgerCount(t, db); got != len(migrations) {
+		t.Fatalf("migration ledger rows after raw init = %d, want %d", got, len(migrations))
 	}
 
-	applied, err := (Runner{DB: db, LockTimeout: 5 * time.Second}).Apply(t.Context(), repositoryMigrations(t))
+	applied, err := (Runner{DB: db, LockTimeout: 5 * time.Second}).Apply(t.Context(), migrations)
 	if err != nil {
 		t.Fatalf("rerun migrations after raw init: %v", err)
 	}
 	if len(applied) != 0 {
 		t.Fatalf("rerun migrations after raw init applied = %d, want 0", len(applied))
 	}
-	if got := migrationLedgerCount(t, db); got != 8 {
-		t.Fatalf("migration ledger rows after Runner rerun = %d, want 8", got)
+	if got := migrationLedgerCount(t, db); got != len(migrations) {
+		t.Fatalf("migration ledger rows after Runner rerun = %d, want %d", got, len(migrations))
 	}
 	if got := migrationAttemptCount(t, db); got != 0 {
 		t.Fatalf("migration attempts after Runner rerun = %d, want 0", got)
@@ -651,8 +653,8 @@ func TestMySQLRunnerAdoptsKnownZeroLedgerLegacySchemas(t *testing.T) {
 		wantFirstApply int
 		wantApplyCount int
 	}{
-		{name: "post-005", legacyVersion: 5, wantFirstApply: 6, wantApplyCount: 3},
-		{name: "post-007", legacyVersion: 7, wantFirstApply: 8, wantApplyCount: 1},
+		{name: "post-005", legacyVersion: 5, wantFirstApply: 6, wantApplyCount: 4},
+		{name: "post-007", legacyVersion: 7, wantFirstApply: 8, wantApplyCount: 2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

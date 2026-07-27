@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -218,11 +219,13 @@ type EventPublisher interface {
 }
 
 type Options struct {
-	Store       Store
-	Sender      Sender
-	Events      EventPublisher
-	Now         func() time.Time
-	SendTimeout time.Duration
+	Store                 Store
+	Sender                Sender
+	Events                EventPublisher
+	Now                   func() time.Time
+	SendTimeout           time.Duration
+	PersistenceRetryDelay time.Duration
+	WorkerContext         context.Context
 }
 
 type Service struct {
@@ -231,6 +234,12 @@ type Service struct {
 	events      EventPublisher
 	now         func() time.Time
 	sendTimeout time.Duration
+	retryDelay  time.Duration
+	workerCtx   context.Context
+	cancel      context.CancelFunc
+	lifecycleMu sync.Mutex
+	closed      bool
+	wait        sync.WaitGroup
 }
 
 var idempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
@@ -242,7 +251,19 @@ func NewService(options Options) (*Service, error) {
 	if options.SendTimeout <= 0 {
 		options.SendTimeout = 30 * time.Second
 	}
-	return &Service{store: options.Store, sender: options.Sender, events: options.Events, now: options.Now, sendTimeout: options.SendTimeout}, nil
+	if options.PersistenceRetryDelay <= 0 {
+		options.PersistenceRetryDelay = time.Second
+	}
+	workerContext := options.WorkerContext
+	if workerContext == nil {
+		workerContext = context.Background()
+	}
+	workerContext, cancel := context.WithCancel(workerContext)
+	return &Service{
+		store: options.Store, sender: options.Sender, events: options.Events, now: options.Now,
+		sendTimeout: options.SendTimeout, retryDelay: options.PersistenceRetryDelay,
+		workerCtx: workerContext, cancel: cancel,
+	}, nil
 }
 
 func (s *Service) Create(ctx context.Context, principal auth.Principal, input CreateInput, request auth.MutationContext) (Job, error) {
@@ -429,10 +450,56 @@ func (s *Service) TestSend(ctx context.Context, principal auth.Principal, id str
 	run, err := s.store.CompleteScheduledJobTestSend(completionContext, completion)
 	completionCancel()
 	if err != nil {
+		s.scheduleTestSendCompletionRetry(completion)
 		return Run{}, fmt.Errorf("complete scheduled job test send: %w", err)
 	}
 	s.publishRun(run)
 	return cloneRun(run), nil
+}
+
+func (s *Service) scheduleTestSendCompletionRetry(completion TestSendCompletion) {
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.wait.Add(1)
+	s.lifecycleMu.Unlock()
+	go func() {
+		defer s.wait.Done()
+		for {
+			timer := time.NewTimer(s.retryDelay)
+			select {
+			case <-s.workerCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+			attemptContext, cancel := context.WithTimeout(s.workerCtx, s.sendTimeout)
+			run, err := s.store.CompleteScheduledJobTestSend(attemptContext, completion)
+			cancel()
+			if err != nil {
+				continue
+			}
+			s.publishRun(run)
+			return
+		}
+	}()
+}
+
+func (s *Service) Close() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if !s.closed {
+		s.closed = true
+		s.cancel()
+	}
+	s.lifecycleMu.Unlock()
+	s.wait.Wait()
 }
 
 func (s *Service) RecoverInterruptedRuns(ctx context.Context) (int, error) {

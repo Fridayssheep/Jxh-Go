@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,6 +114,47 @@ func TestTestSendClassifiesExplicitRejectionAsFailed(t *testing.T) {
 	}
 }
 
+func TestTestSendRetriesCompletionWithoutSendingAgain(t *testing.T) {
+	base := &fakeStore{
+		reservation: TestSendReservation{
+			ExecutionID: "exec_retry", Job: testJob(),
+			Run: Run{ID: "run_retry", JobID: "job_1", Kind: RunTest, StartedAt: time.Unix(100, 0)}, Fresh: true,
+		},
+		completed: Run{
+			ID: "run_retry", JobID: "job_1", Kind: RunTest, Result: RunSuccess,
+			StartedAt: time.Unix(100, 0), CompletedAt: timePointer(time.Unix(101, 0)),
+		},
+	}
+	store := &retryTestSendStore{fakeStore: base, completed: make(chan struct{})}
+	sender := &fakeSender{available: true}
+	service, err := NewService(Options{
+		Store: store, Sender: sender, Now: func() time.Time { return time.Unix(101, 0) },
+		SendTimeout: time.Second, PersistenceRetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if _, err := service.TestSend(t.Context(), writer(), "job_1", 2, "idem-retry-send",
+		auth.MutationContext{RequestID: "req_retry"}); err == nil {
+		t.Fatal("initial persistence failure did not reach the caller")
+	}
+	select {
+	case <-store.completed:
+	case <-time.After(time.Second):
+		t.Fatal("test-send completion retry did not finish")
+	}
+	if store.attempts.Load() != 2 {
+		t.Fatalf("completion attempts=%d, want 2", store.attempts.Load())
+	}
+	sender.mu.Lock()
+	sendCalls := sender.calls
+	sender.mu.Unlock()
+	if sendCalls != 1 {
+		t.Fatalf("send calls=%d, want 1", sendCalls)
+	}
+}
+
 func newFixture(t *testing.T) (*Service, *fakeStore, *fakeSender) {
 	t.Helper()
 	store := &fakeStore{}
@@ -121,6 +163,7 @@ func newFixture(t *testing.T) (*Service, *fakeStore, *fakeSender) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(service.Close)
 	return service, store, sender
 }
 
@@ -169,6 +212,26 @@ type fakeStore struct {
 	completion  TestSendCompletion
 	recovered   int
 	recoveredAt time.Time
+}
+
+type retryTestSendStore struct {
+	*fakeStore
+	attempts  atomic.Int64
+	completed chan struct{}
+}
+
+func (s *retryTestSendStore) CompleteScheduledJobTestSend(
+	ctx context.Context,
+	completion TestSendCompletion,
+) (Run, error) {
+	if s.attempts.Add(1) == 1 {
+		return Run{}, errors.New("database unavailable")
+	}
+	run, err := s.fakeStore.CompleteScheduledJobTestSend(ctx, completion)
+	if err == nil {
+		close(s.completed)
+	}
+	return run, err
 }
 
 func (s *fakeStore) CreateScheduledJob(_ context.Context, mutation CreateMutation) (Job, error) {

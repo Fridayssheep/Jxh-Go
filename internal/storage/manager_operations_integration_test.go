@@ -109,13 +109,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	if err != nil || !testSend.Fresh || testSend.Run.ID == "" || testSend.Run.CompletedAt != nil {
 		t.Fatalf("begin scheduled test send: reservation=%+v error=%v", testSend, err)
 	}
-	completedRun, err := store.CompleteScheduledJobTestSend(t.Context(), scheduledjobs.TestSendCompletion{
+	testSendCompletion := scheduledjobs.TestSendCompletion{
 		ExecutionID: testSend.ExecutionID, RunID: testSend.Run.ID, Result: scheduledjobs.RunSuccess,
 		CompletedAt: now.Add(4*time.Minute + time.Second), Duration: 125 * time.Millisecond, MessageID: "message-1",
-	})
+	}
+	completedRun, err := store.CompleteScheduledJobTestSend(t.Context(), testSendCompletion)
 	if err != nil || completedRun.Result != scheduledjobs.RunSuccess || completedRun.CompletedAt == nil ||
 		completedRun.MessageID == nil || *completedRun.MessageID != "message-1" {
 		t.Fatalf("complete scheduled test send: run=%+v error=%v", completedRun, err)
+	}
+	replayedTestSend, err := store.CompleteScheduledJobTestSend(t.Context(), testSendCompletion)
+	if err != nil || replayedTestSend.ID != completedRun.ID || replayedTestSend.Result != completedRun.Result {
+		t.Fatalf("replay scheduled test-send completion: run=%+v error=%v", replayedTestSend, err)
 	}
 	testReplay, err := store.BeginScheduledJobTestSend(t.Context(), scheduledjobs.TestSendBegin{
 		Context: scheduledjobs.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(4 * time.Minute)},

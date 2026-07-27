@@ -98,6 +98,9 @@ func (b *Backend) Close() {
 	if b.JoinRequests != nil {
 		b.JoinRequests.Close()
 	}
+	if b.ScheduledJobs != nil {
+		b.ScheduledJobs.Close()
+	}
 	if b.Groups != nil {
 		b.Groups.Close()
 	}
@@ -170,6 +173,7 @@ func NewBackend(options Options) (*Backend, error) {
 	var groupService *groups.Service
 	var knowledgeService *knowledgeadmin.Service
 	var joinRequestService *joinrequests.Service
+	var scheduledJobService *scheduledjobs.Service
 	fail := func(err error) (*Backend, error) {
 		if knowledgeService != nil {
 			knowledgeService.Close()
@@ -179,6 +183,9 @@ func NewBackend(options Options) (*Backend, error) {
 		}
 		if joinRequestService != nil {
 			joinRequestService.Close()
+		}
+		if scheduledJobService != nil {
+			scheduledJobService.Close()
 		}
 		systemService.Close()
 		return nil, err
@@ -218,8 +225,9 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create join request service: %w", err))
 	}
-	scheduledJobService, err := scheduledjobs.NewService(scheduledjobs.Options{
+	scheduledJobService, err = scheduledjobs.NewService(scheduledjobs.Options{
 		Store: options.Store, Sender: napcat.NewScheduledJobSender(options.Gateway), Events: hub, Now: options.Now,
+		WorkerContext: options.Context,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create scheduled job service: %w", err))

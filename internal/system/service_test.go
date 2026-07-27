@@ -16,8 +16,24 @@ func TestRestartReturnsUnavailableBeforeSideEffect(t *testing.T) {
 	service, store, gateway := newSystemFixture(t)
 	gateway.connected = false
 	_, err := service.RestartNapCat(t.Context(), superPrincipal(), RestartInput{Confirmation: "restart"}, "restart-key", auth.MutationContext{RequestID: "req_1"})
-	if !errors.Is(err, ErrNapCatUnavailable) || store.beginCalls != 0 || gateway.calls != 0 {
-		t.Fatalf("error=%v store=%d gateway=%d", err, store.beginCalls, gateway.calls)
+	if !errors.Is(err, ErrNapCatUnavailable) || store.findCalls != 1 || store.beginCalls != 0 || gateway.calls != 0 {
+		t.Fatalf("error=%v find=%d store=%d gateway=%d", err, store.findCalls, store.beginCalls, gateway.calls)
+	}
+}
+
+func TestRestartReplaysBeforeCheckingCurrentConnection(t *testing.T) {
+	service, store, gateway := newSystemFixture(t)
+	defer service.Close()
+	gateway.connected = false
+	completedAt := time.Unix(99, 0).UTC()
+	store.found = true
+	store.replay = Operation{
+		ID: "op_prior", Type: "napcat_restart", Status: StatusSucceeded,
+		RequestedAt: time.Unix(90, 0).UTC(), CompletedAt: &completedAt,
+	}
+	operation, err := service.RestartNapCat(t.Context(), superPrincipal(), RestartInput{Confirmation: "restart"}, "restart-key", auth.MutationContext{RequestID: "req_1"})
+	if err != nil || operation.ID != "op_prior" || store.beginCalls != 0 || gateway.calls != 0 {
+		t.Fatalf("operation=%+v error=%v begin=%d gateway=%d", operation, err, store.beginCalls, gateway.calls)
 	}
 }
 
@@ -33,6 +49,20 @@ func TestAcceptedRestartPersistsUnknownOnDisconnect(t *testing.T) {
 	stored := store.operation(operation.ID)
 	if stored.ErrorCode == nil || *stored.ErrorCode != "restart_outcome_unknown" || gateway.calls != 1 {
 		t.Fatalf("operation=%+v gateway=%d", stored, gateway.calls)
+	}
+}
+
+func TestAcceptedRestartRetriesTerminalPersistenceWithoutRepeatingSideEffect(t *testing.T) {
+	service, store, gateway := newSystemFixture(t)
+	defer service.Close()
+	store.terminalFailures = 2
+	operation, err := service.RestartNapCat(t.Context(), superPrincipal(), RestartInput{Confirmation: "restart"}, "restart-key", auth.MutationContext{RequestID: "req_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForOperation(t, store, operation.ID, StatusSucceeded)
+	if gateway.calls != 1 || store.terminalCalls != 3 {
+		t.Fatalf("gateway calls=%d terminal calls=%d", gateway.calls, store.terminalCalls)
 	}
 }
 
@@ -90,7 +120,8 @@ func newSystemFixture(t *testing.T) (*Service, *fakeSystemStore, *fakeRestartGat
 			DependencyMySQL: {Configured: true, Required: true}, DependencyNapCat: {Configured: true},
 			DependencyTelemetry: {Configured: true},
 		},
-		Now: func() time.Time { return time.Unix(100, 0) }, WorkerTimeout: time.Second, MaxConcurrentWorkers: 1,
+		Now: func() time.Time { return time.Unix(100, 0) }, WorkerTimeout: time.Second,
+		TransitionRetryDelay: time.Millisecond, MaxConcurrentWorkers: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -123,12 +154,24 @@ func (g *fakeRestartGateway) SetRestart(context.Context) error {
 }
 
 type fakeSystemStore struct {
-	mu          sync.Mutex
-	operations  map[string]Operation
-	beginCalls  int
-	sequence    int
-	recovered   []Operation
-	recoveredAt time.Time
+	mu               sync.Mutex
+	operations       map[string]Operation
+	beginCalls       int
+	sequence         int
+	recovered        []Operation
+	recoveredAt      time.Time
+	findCalls        int
+	found            bool
+	replay           Operation
+	terminalFailures int
+	terminalCalls    int
+}
+
+func (s *fakeSystemStore) FindNapCatRestart(_ context.Context, _ FindRestart) (Operation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.findCalls++
+	return cloneOperation(s.replay), s.found, nil
 }
 
 func (s *fakeSystemStore) BeginNapCatRestart(_ context.Context, begin BeginRestart) (Operation, bool, error) {
@@ -144,6 +187,13 @@ func (s *fakeSystemStore) BeginNapCatRestart(_ context.Context, begin BeginResta
 func (s *fakeSystemStore) TransitionNapCatRestart(_ context.Context, transition Transition) (Operation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if transition.To == StatusSucceeded || transition.To == StatusFailed || transition.To == StatusUnknown {
+		s.terminalCalls++
+		if s.terminalFailures > 0 {
+			s.terminalFailures--
+			return Operation{}, errors.New("temporary database failure")
+		}
+	}
 	operation := s.operations[transition.OperationID]
 	if operation.Status != transition.From {
 		return Operation{}, errors.New("unexpected operation state")

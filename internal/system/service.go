@@ -115,6 +115,13 @@ type BeginRestart struct {
 	RequestedAt    time.Time
 }
 
+type FindRestart struct {
+	ActorID        string
+	IdempotencyKey string
+	RequestHash    string
+	At             time.Time
+}
+
 type Transition struct {
 	OperationID string
 	From        OperationStatus
@@ -124,6 +131,9 @@ type Transition struct {
 }
 
 type Store interface {
+	// FindNapCatRestart returns an unexpired prior operation without creating a
+	// new reservation. This lets retries replay while NapCat is disconnected.
+	FindNapCatRestart(ctx context.Context, find FindRestart) (operation Operation, found bool, err error)
 	// BeginNapCatRestart atomically reserves idempotency, writes the accepted
 	// operation and its requested audit record. fresh=false replays that row.
 	BeginNapCatRestart(ctx context.Context, begin BeginRestart) (operation Operation, fresh bool, err error)
@@ -149,6 +159,7 @@ type Options struct {
 	Now                  func() time.Time
 	WorkerContext        context.Context
 	WorkerTimeout        time.Duration
+	TransitionRetryDelay time.Duration
 	MaxConcurrentWorkers int
 }
 
@@ -163,6 +174,7 @@ type Service struct {
 	workerCtx     context.Context
 	cancel        context.CancelFunc
 	workerTimeout time.Duration
+	retryDelay    time.Duration
 	workers       chan struct{}
 	wait          sync.WaitGroup
 }
@@ -175,6 +187,9 @@ func NewService(options Options) (*Service, error) {
 	}
 	if options.WorkerTimeout <= 0 {
 		options.WorkerTimeout = 30 * time.Second
+	}
+	if options.TransitionRetryDelay <= 0 {
+		options.TransitionRetryDelay = time.Second
 	}
 	if options.MaxConcurrentWorkers <= 0 {
 		options.MaxConcurrentWorkers = 1
@@ -196,7 +211,8 @@ func NewService(options Options) (*Service, error) {
 		store: options.Store, health: options.Health, gateway: options.Gateway, events: options.Events,
 		secret: append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
 		workerCtx: workerContext, cancel: cancel, workerTimeout: options.WorkerTimeout,
-		workers: make(chan struct{}, options.MaxConcurrentWorkers),
+		retryDelay: options.TransitionRetryDelay,
+		workers:    make(chan struct{}, options.MaxConcurrentWorkers),
 	}, nil
 }
 
@@ -247,13 +263,29 @@ func (s *Service) RestartNapCat(ctx context.Context, principal auth.Principal, i
 		principal.UserID == "" || !validRequestContext(requestContext) {
 		return Operation{}, ErrInvalidInput
 	}
+	now := s.now().UTC()
+	requestHash := s.requestHash(input)
+	replayed, found, err := s.store.FindNapCatRestart(ctx, FindRestart{
+		ActorID: principal.UserID, IdempotencyKey: idempotencyKey, RequestHash: requestHash, At: now,
+	})
+	if err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) {
+			return Operation{}, ErrIdempotencyConflict
+		}
+		return Operation{}, fmt.Errorf("find napcat restart: %w", err)
+	}
+	if found {
+		if !validOperation(replayed) {
+			return Operation{}, errors.New("invalid restart operation store result")
+		}
+		return cloneOperation(replayed), nil
+	}
 	if !s.gateway.Snapshot().Connected {
 		return Operation{}, ErrNapCatUnavailable
 	}
-	now := s.now().UTC()
 	operation, fresh, err := s.store.BeginNapCatRestart(ctx, BeginRestart{
 		Actor: principal, Context: requestContext, IdempotencyKey: idempotencyKey,
-		RequestHash: s.requestHash(input), Reason: input.Reason, RequestedAt: now,
+		RequestHash: requestHash, Reason: input.Reason, RequestedAt: now,
 	})
 	if err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
@@ -297,17 +329,28 @@ func (s *Service) runRestart(operation Operation) {
 }
 
 func (s *Service) finish(operationID string, from, to OperationStatus, errorCode string) {
-	transitionContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	operation, err := s.store.TransitionNapCatRestart(transitionContext, Transition{
-		OperationID: operationID, From: from, To: to, At: s.now().UTC(), ErrorCode: errorCode,
-	})
-	if err == nil {
-		reason := string(to)
-		if errorCode != "" {
-			reason = errorCode
+	transition := Transition{OperationID: operationID, From: from, To: to, At: s.now().UTC(), ErrorCode: errorCode}
+	for {
+		transitionContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		operation, err := s.store.TransitionNapCatRestart(transitionContext, transition)
+		cancel()
+		if err == nil {
+			reason := string(to)
+			if errorCode != "" {
+				reason = errorCode
+			}
+			s.publish(operation, reason)
+			return
 		}
-		s.publish(operation, reason)
+		timer := time.NewTimer(s.retryDelay)
+		select {
+		case <-s.workerCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
 	}
 }
 

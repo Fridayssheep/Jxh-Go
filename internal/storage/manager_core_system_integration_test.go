@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -20,6 +21,19 @@ func TestManagerSystemMySQLRecoversInterruptedRestarts(t *testing.T) {
 	})
 	if err != nil || !fresh {
 		t.Fatalf("begin accepted restart: operation=%+v fresh=%t error=%v", accepted, fresh, err)
+	}
+	found, exists, err := store.FindNapCatRestart(t.Context(), managersystem.FindRestart{
+		ActorID: actor.UserID, IdempotencyKey: "restart-accepted", RequestHash: "hash-accepted",
+		At: requestedAt.Add(time.Second),
+	})
+	if err != nil || !exists || found.ID != accepted.ID || found.Status != managersystem.StatusAccepted {
+		t.Fatalf("find accepted restart: operation=%+v exists=%t error=%v", found, exists, err)
+	}
+	if _, _, err := store.FindNapCatRestart(t.Context(), managersystem.FindRestart{
+		ActorID: actor.UserID, IdempotencyKey: "restart-accepted", RequestHash: "different-hash",
+		At: requestedAt.Add(time.Second),
+	}); !errors.Is(err, managersystem.ErrIdempotencyConflict) {
+		t.Fatalf("find conflicting restart error=%v", err)
 	}
 	running, fresh, err := store.BeginNapCatRestart(t.Context(), managersystem.BeginRestart{
 		Actor: actor, Context: auth.MutationContext{RequestID: "req_running"}, IdempotencyKey: "restart-running",
@@ -49,6 +63,13 @@ func TestManagerSystemMySQLRecoversInterruptedRestarts(t *testing.T) {
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM system_operations WHERE status = 'unknown' AND error_code = 'restart_interrupted'", 2)
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_idempotency_keys WHERE state = 'completed' AND result_status = 'unknown' AND error_code = 'restart_interrupted'", 2)
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action = 'system.napcat_restart' AND result = 'unknown' AND error_code = 'restart_interrupted'", 2)
+	found, exists, err = store.FindNapCatRestart(t.Context(), managersystem.FindRestart{
+		ActorID: actor.UserID, IdempotencyKey: "restart-accepted", RequestHash: "hash-accepted",
+		At: recoveredAt,
+	})
+	if err != nil || !exists || found.Status != managersystem.StatusUnknown || found.CompletedAt == nil {
+		t.Fatalf("find recovered restart: operation=%+v exists=%t error=%v", found, exists, err)
+	}
 
 	replayed, err := store.RecoverInterruptedNapCatRestarts(t.Context(), recoveredAt.Add(time.Minute))
 	if err != nil || len(replayed) != 0 {

@@ -21,6 +21,37 @@ type managerRestartAuditMetadata struct {
 	ErrorCode string `json:"error_code,omitempty"`
 }
 
+func (s *Store) FindNapCatRestart(ctx context.Context, find managersystem.FindRestart) (
+	operation managersystem.Operation,
+	found bool,
+	err error,
+) {
+	var idempotency managerIdempotencyKey
+	err = s.db.WithContext(ctx).Where(
+		"actor_type = ? AND actor_id = ? AND operation = ? AND idempotency_key = ? AND expires_at > ?",
+		managerActorAdminUser, find.ActorID, managerNapCatRestartOperation, find.IdempotencyKey, find.At.UTC(),
+	).Take(&idempotency).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return managersystem.Operation{}, false, nil
+	}
+	if err != nil {
+		return managersystem.Operation{}, false, err
+	}
+	if idempotency.RequestHash != find.RequestHash {
+		return managersystem.Operation{}, false, managersystem.ErrIdempotencyConflict
+	}
+	if idempotency.ResourceID == nil || *idempotency.ResourceID == "" {
+		return managersystem.Operation{}, false, errManagerInvalidState
+	}
+	var model managerSystemOperation
+	if err = s.db.WithContext(ctx).Where(
+		"operation_id = ? AND idempotency_id = ? AND type = ?", *idempotency.ResourceID, idempotency.ID, "napcat_restart",
+	).Take(&model).Error; err != nil {
+		return managersystem.Operation{}, false, err
+	}
+	return managerSystemOperationValue(model), true, nil
+}
+
 func (s *Store) BeginNapCatRestart(ctx context.Context, begin managersystem.BeginRestart) (
 	operation managersystem.Operation,
 	fresh bool,

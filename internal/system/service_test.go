@@ -62,6 +62,20 @@ func TestHealthMapsComponentsWithoutProbingDependencies(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedPublishesUnknownOperations(t *testing.T) {
+	service, store, _ := newSystemFixture(t)
+	defer service.Close()
+	requestedAt := time.Unix(50, 0).UTC()
+	store.recovered = []Operation{
+		{ID: "op_recovered", Type: "napcat_restart", Status: StatusUnknown, RequestedAt: requestedAt,
+			CompletedAt: timePointerForSystemTest(time.Unix(100, 0).UTC()), ErrorCode: stringPointerForSystemTest("restart_interrupted")},
+	}
+	count, err := service.RecoverInterrupted(t.Context())
+	if err != nil || count != 1 || !store.recoveredAt.Equal(time.Unix(100, 0).UTC()) {
+		t.Fatalf("recovery count=%d at=%s error=%v", count, store.recoveredAt, err)
+	}
+}
+
 func newSystemFixture(t *testing.T) (*Service, *fakeSystemStore, *fakeRestartGateway) {
 	t.Helper()
 	healthService := health.NewService()
@@ -109,10 +123,12 @@ func (g *fakeRestartGateway) SetRestart(context.Context) error {
 }
 
 type fakeSystemStore struct {
-	mu         sync.Mutex
-	operations map[string]Operation
-	beginCalls int
-	sequence   int
+	mu          sync.Mutex
+	operations  map[string]Operation
+	beginCalls  int
+	sequence    int
+	recovered   []Operation
+	recoveredAt time.Time
 }
 
 func (s *fakeSystemStore) BeginNapCatRestart(_ context.Context, begin BeginRestart) (Operation, bool, error) {
@@ -145,6 +161,17 @@ func (s *fakeSystemStore) TransitionNapCatRestart(_ context.Context, transition 
 	return operation, nil
 }
 
+func (s *fakeSystemStore) RecoverInterruptedNapCatRestarts(_ context.Context, recoveredAt time.Time) ([]Operation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveredAt = recoveredAt
+	operations := make([]Operation, len(s.recovered))
+	for index := range s.recovered {
+		operations[index] = cloneOperation(s.recovered[index])
+	}
+	return operations, nil
+}
+
 func (s *fakeSystemStore) operation(id string) Operation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -162,3 +189,7 @@ func waitForOperation(t *testing.T, store *fakeSystemStore, id string, status Op
 	}
 	t.Fatalf("operation %s did not reach %s: %+v", id, status, store.operation(id))
 }
+
+func timePointerForSystemTest(value time.Time) *time.Time { return &value }
+
+func stringPointerForSystemTest(value string) *string { return &value }

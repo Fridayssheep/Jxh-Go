@@ -214,7 +214,7 @@ func NewBackend(options Options) (*Backend, error) {
 		return fail(fmt.Errorf("create telemetry maintenance: %w", err))
 	}
 
-	if err := loadRuntimeState(options.Context, settingsService, customCommandService, groupService, joinRequestService, scheduledJobService); err != nil {
+	if err := loadRuntimeState(options.Context, settingsService, customCommandService, groupService, joinRequestService, scheduledJobService, systemService); err != nil {
 		return fail(err)
 	}
 	router, err := adminapi.NewManagementRouter(adminapi.ManagementOptions{
@@ -249,6 +249,7 @@ func loadRuntimeState(
 	groupsService *groups.Service,
 	joinRequestService *joinrequests.Service,
 	scheduledJobService *scheduledjobs.Service,
+	systemService *system.Service,
 ) error {
 	if err := settingsService.ReloadRuntime(ctx); err != nil {
 		return fmt.Errorf("load runtime settings: %w", err)
@@ -264,6 +265,9 @@ func loadRuntimeState(
 	}
 	if _, err := scheduledJobService.RecoverInterruptedRuns(ctx); err != nil {
 		return fmt.Errorf("recover scheduled job runs: %w", err)
+	}
+	if _, err := systemService.RecoverInterrupted(ctx); err != nil {
+		return fmt.Errorf("recover system operations: %w", err)
 	}
 	return nil
 }

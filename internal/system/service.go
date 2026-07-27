@@ -130,6 +130,9 @@ type Store interface {
 	// TransitionNapCatRestart atomically advances the operation and writes the
 	// corresponding final audit record when To is terminal.
 	TransitionNapCatRestart(ctx context.Context, transition Transition) (Operation, error)
+	// RecoverInterruptedNapCatRestarts marks operations left by an earlier
+	// process as unknown and completes their idempotency and audit records.
+	RecoverInterruptedNapCatRestarts(ctx context.Context, recoveredAt time.Time) ([]Operation, error)
 }
 
 type EventPublisher interface {
@@ -216,6 +219,20 @@ func (s *Service) Health(_ context.Context, principal auth.Principal) (Health, e
 		dependencies = append(dependencies, mapDependency(component.key, configuration, component.status))
 	}
 	return Health{GeneratedAt: s.now().UTC(), Live: snapshot.Live, Ready: snapshot.Ready, Dependencies: dependencies}, nil
+}
+
+func (s *Service) RecoverInterrupted(ctx context.Context) (int, error) {
+	operations, err := s.store.RecoverInterruptedNapCatRestarts(ctx, s.now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted napcat restarts: %w", err)
+	}
+	for _, operation := range operations {
+		if !validOperation(operation) || operation.Status != StatusUnknown {
+			return 0, errors.New("invalid recovered restart operation")
+		}
+		s.publish(operation, "restart_interrupted")
+	}
+	return len(operations), nil
 }
 
 func (s *Service) RestartNapCat(ctx context.Context, principal auth.Principal, input RestartInput, idempotencyKey string, request ...auth.MutationContext) (Operation, error) {

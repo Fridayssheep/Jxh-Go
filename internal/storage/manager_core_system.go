@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/zjutjh/jxh-go/internal/audit"
 	managersystem "github.com/zjutjh/jxh-go/internal/system"
@@ -215,6 +216,72 @@ func (s *Store) TransitionNapCatRestart(ctx context.Context, transition managers
 		return nil
 	})
 	return operation, err
+}
+
+func (s *Store) RecoverInterruptedNapCatRestarts(ctx context.Context, recoveredAt time.Time) (
+	operations []managersystem.Operation,
+	err error,
+) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var models []managerSystemOperation
+		if loadErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("type = ? AND status IN ?", "napcat_restart", []string{
+				string(managersystem.StatusAccepted), string(managersystem.StatusRunning),
+			}).Order("requested_at ASC").Order("operation_id ASC").Find(&models).Error; loadErr != nil {
+			return loadErr
+		}
+		completedAt := recoveredAt.UTC()
+		const errorCode = "restart_interrupted"
+		for _, model := range models {
+			if model.IdempotencyID == nil {
+				return errManagerInvalidState
+			}
+			operationUpdate := tx.Model(&managerSystemOperation{}).
+				Where("operation_id = ? AND status IN ?", model.OperationID, []string{
+					string(managersystem.StatusAccepted), string(managersystem.StatusRunning),
+				}).Updates(map[string]any{
+				"status": managersystem.StatusUnknown, "completed_at": completedAt, "error_code": errorCode,
+			})
+			if operationUpdate.Error != nil {
+				return operationUpdate.Error
+			}
+			if operationUpdate.RowsAffected != 1 {
+				continue
+			}
+			idempotencyUpdate := tx.Model(&managerIdempotencyKey{}).
+				Where("idempotency_id = ? AND state = ?", *model.IdempotencyID, managerIdempotencyInProgress).
+				Updates(map[string]any{
+					"state": managerIdempotencyCompleted, "result_status": managersystem.StatusUnknown,
+					"response_status": managerRestartResponseStatus(managersystem.StatusUnknown),
+					"error_code":      errorCode, "completed_at": completedAt,
+				})
+			if idempotencyUpdate.Error != nil {
+				return idempotencyUpdate.Error
+			}
+			if idempotencyUpdate.RowsAffected != 1 {
+				return errManagerInvalidState
+			}
+			auditContext, contextErr := findManagerAuditContext(tx, managerNapCatRestartOperation, model.OperationID)
+			if contextErr != nil {
+				return contextErr
+			}
+			if auditErr := insertManagerAudit(tx, managerAuditEntry{
+				Context: auditContext, OccurredAt: completedAt, ScopeType: "system", Action: managerNapCatRestartOperation,
+				TargetType: "system_operation", TargetID: model.OperationID, Result: audit.ResultUnknown,
+				ErrorCode: errorCode, Metadata: managerRestartAuditMetadata{
+					Phase: "completed", Status: string(managersystem.StatusUnknown), ErrorCode: errorCode,
+				},
+			}); auditErr != nil {
+				return auditErr
+			}
+			model.Status = string(managersystem.StatusUnknown)
+			model.CompletedAt = &completedAt
+			model.ErrorCode = optionalString(errorCode)
+			operations = append(operations, managerSystemOperationValue(model))
+		}
+		return nil
+	})
+	return operations, err
 }
 
 func managerSystemOperationValue(model managerSystemOperation) managersystem.Operation {

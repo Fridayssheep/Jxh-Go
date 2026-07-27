@@ -23,7 +23,12 @@ COPY --from=build /out/jxh-admin-bootstrap /usr/local/bin/jxh-admin-bootstrap
 COPY deploy/mysql/migrations /app/migrations
 COPY config.example.yaml /app/config.yaml
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN mkdir -p /app/data/cache /app/data/flash && chown -R appuser:appuser /app && chmod +x /usr/local/bin/entrypoint.sh
+RUN mkdir -p /app/data/cache /app/data/flash \
+    && chown -R appuser:appuser /app \
+    && chown -R root:root /app/migrations \
+    && find /app/migrations -type d -exec chmod 0555 {} + \
+    && find /app/migrations -type f -exec chmod 0444 {} + \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
 ENV TZ=Asia/Shanghai
 EXPOSE 8080 8090

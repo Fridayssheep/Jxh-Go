@@ -68,7 +68,7 @@ type Store interface {
 	LookupUserByUsername(ctx context.Context, normalizedUsername string) (UserCredentials, bool, error)
 	LookupUserByID(ctx context.Context, userID string) (UserCredentials, bool, error)
 	// CommitLogin persists the new session and applies optional password/rotation changes atomically.
-	CommitLogin(ctx context.Context, commit LoginCommit) error
+	CommitLogin(ctx context.Context, commit LoginCommit) (SessionIdentity, error)
 	LookupSession(ctx context.Context, tokenDigest TokenDigest) (SessionIdentity, bool, error)
 	// TouchSessionIfStale updates only an active row whose last_seen_at is not after IfLastSeenBefore.
 	TouchSessionIfStale(ctx context.Context, touch SessionTouch) error
@@ -230,15 +230,22 @@ func (s *Service) Login(ctx context.Context, request LoginRequest) (LoginResult,
 		PasswordHashUpdate: passwordHashUpdate,
 		PriorTokenDigest:   priorTokenDigest,
 	}
-	if err := s.store.CommitLogin(ctx, commit); err != nil {
+	committed, err := s.store.CommitLogin(ctx, commit)
+	if err != nil {
 		return LoginResult{}, fmt.Errorf("commit login: %w", err)
 	}
+	if !committed.User.Enabled || committed.User.ID != credentials.User.ID || committed.Session.ID != session.ID ||
+		committed.Session.UserID != committed.User.ID || committed.Session.Status != SessionStatusActive ||
+		committed.Session.RevokedAt != nil || !hmac.Equal(committed.CSRFDigest[:], commit.CSRFDigest[:]) {
+		return LoginResult{}, errors.New("invalid login store result")
+	}
+	committed.Session.Current = true
 	s.limiter.RecordSuccess(username, now)
 	return LoginResult{
 		AuthContext: AuthContext{
-			User:        credentials.User,
-			Session:     session,
-			Permissions: PermissionsFor(credentials.User.Role),
+			User:        committed.User,
+			Session:     committed.Session,
+			Permissions: PermissionsFor(committed.User.Role),
 			CSRFToken:   csrfToken,
 		},
 		SessionToken: sessionCredential,

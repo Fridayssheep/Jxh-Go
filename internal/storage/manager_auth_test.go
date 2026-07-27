@@ -408,6 +408,45 @@ func TestManagerAuthMySQLMaterializesAndFiltersExpiredSessions(t *testing.T) {
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_sessions WHERE status = 'expired'", 2)
 }
 
+func TestManagerAuthMySQLLoginReturnsCommittedUserState(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	createdAt := time.Date(2026, time.July, 28, 8, 30, 0, 0, time.UTC)
+	loginAt := createdAt.Add(time.Hour)
+	insertManagerAuthTestUser(t, sqlDB, "usr_root", "root-admin", auth.RoleSuperAdmin, createdAt)
+	token := managerAuthTestTokenDigest("upgraded-login-token")
+	csrf := managerAuthTestTokenDigest("upgraded-login-csrf")
+
+	identity, err := store.CommitLogin(t.Context(), auth.LoginCommit{
+		Session: auth.Session{
+			ID: "ses_upgraded", UserID: "usr_root", Status: auth.SessionStatusActive,
+			CreatedAt: loginAt, LastSeenAt: loginAt, ExpiresAt: loginAt.Add(time.Hour), AbsoluteExpiresAt: loginAt.Add(12 * time.Hour),
+		},
+		TokenDigest: token, CSRFDigest: csrf,
+		PasswordHashUpdate: &auth.PasswordHashUpdate{
+			UserID: "usr_root", ExpectedVersion: 1, PasswordHash: "$argon2id$upgraded-test-value",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.User.Version != 2 || identity.User.LastLoginAt == nil || !identity.User.LastLoginAt.Equal(loginAt) ||
+		!identity.User.UpdatedAt.Equal(loginAt) || identity.Session.ID != "ses_upgraded" || identity.CSRFDigest != csrf {
+		t.Fatalf("committed login identity has version=%d last_login=%v updated=%v session=%s",
+			identity.User.Version, identity.User.LastLoginAt, identity.User.UpdatedAt, identity.Session.ID)
+	}
+	var storedHash string
+	var revision uint64
+	var storedLastLogin, storedUpdated time.Time
+	if err := sqlDB.QueryRowContext(t.Context(), `SELECT password_hash, revision, last_login_at, updated_at
+FROM admin_users WHERE user_id = ?`, "usr_root").Scan(&storedHash, &revision, &storedLastLogin, &storedUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if storedHash != "$argon2id$upgraded-test-value" || revision != identity.User.Version ||
+		!storedLastLogin.Equal(*identity.User.LastLoginAt) || !storedUpdated.Equal(identity.User.UpdatedAt) {
+		t.Fatalf("stored login state differs: revision=%d last_login=%v updated=%v", revision, storedLastLogin, storedUpdated)
+	}
+}
+
 func TestManagerAuthMySQLSessionReplacementChains(t *testing.T) {
 	store, sqlDB := openManagerAuthTestStore(t)
 	now := time.Date(2026, time.July, 28, 8, 0, 0, 0, time.UTC)
@@ -417,13 +456,17 @@ func TestManagerAuthMySQLSessionReplacementChains(t *testing.T) {
 
 	loginToken := managerAuthTestTokenDigest("login-token")
 	loginCSRF := managerAuthTestTokenDigest("login-csrf")
-	err := store.CommitLogin(t.Context(), auth.LoginCommit{
+	loginIdentity, err := store.CommitLogin(t.Context(), auth.LoginCommit{
 		Session: auth.Session{ID: "ses_login", UserID: "usr_root", Status: auth.SessionStatusActive,
 			CreatedAt: now.Add(time.Minute), LastSeenAt: now.Add(time.Minute), ExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(12 * time.Hour)},
 		TokenDigest: loginToken, CSRFDigest: loginCSRF, PriorTokenDigest: &oldToken,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if loginIdentity.User.Version != 1 || loginIdentity.User.LastLoginAt == nil ||
+		!loginIdentity.User.LastLoginAt.Equal(now.Add(time.Minute)) || loginIdentity.Session.ID != "ses_login" {
+		t.Fatalf("committed login identity = %+v", loginIdentity)
 	}
 	assertManagerAuthReplacement(t, sqlDB, "ses_old", "ses_login", 1)
 
@@ -455,9 +498,29 @@ func TestManagerAuthMySQLSessionReplacementChains(t *testing.T) {
 
 	replacement, found, err := store.LookupPasswordChange(t.Context(), auth.PasswordChangeLookup{
 		UserID: "usr_root", SessionID: "ses_login", IdempotencyKey: commit.IdempotencyKey, RequestHash: commit.RequestHash,
+		At: commit.OccurredAt.Add(time.Minute),
 	})
 	if err != nil || !found || replacement.Session.ID != "ses_password" {
 		t.Fatalf("password change lookup = %+v, found=%t error=%v", replacement, found, err)
+	}
+	if _, _, err := store.LookupPasswordChange(t.Context(), auth.PasswordChangeLookup{
+		UserID: "usr_root", SessionID: "ses_login", IdempotencyKey: commit.IdempotencyKey,
+		RequestHash: strings.Repeat("f", 64), At: commit.OccurredAt.Add(time.Minute),
+	}); !errors.Is(err, auth.ErrAdminIdempotencyReuse) {
+		t.Fatalf("unexpired conflicting password change lookup error = %v", err)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `UPDATE admin_idempotency_keys SET expires_at = ?
+WHERE actor_id = ? AND operation = ? AND idempotency_key = ?`,
+		commit.OccurredAt, "usr_root", operationPasswordChange, commit.IdempotencyKey); err != nil {
+		t.Fatal(err)
+	}
+	for _, requestHash := range []string{commit.RequestHash, strings.Repeat("f", 64)} {
+		if expired, found, err := store.LookupPasswordChange(t.Context(), auth.PasswordChangeLookup{
+			UserID: "usr_root", SessionID: "ses_login", IdempotencyKey: commit.IdempotencyKey,
+			RequestHash: requestHash, At: commit.OccurredAt.Add(time.Minute),
+		}); err != nil || found || expired.Session.ID != "" {
+			t.Fatalf("expired password change lookup = %+v, found=%t error=%v", expired, found, err)
+		}
 	}
 	rotated, found, err := store.LookupReplacedSession(t.Context(), oldToken)
 	if err != nil || !found || rotated.Session.ID != "ses_old" || rotated.Session.Status != auth.SessionStatusRevoked {

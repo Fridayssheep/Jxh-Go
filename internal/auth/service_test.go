@@ -255,7 +255,7 @@ func TestLoginAtomicallyUpgradesPasswordAndRotatesPriorSession(t *testing.T) {
 	}
 	service := newTestAuthService(t, store, passwords, &recordingRandomReader{}, now)
 
-	_, err = service.Login(context.Background(), LoginRequest{
+	result, err := service.Login(context.Background(), LoginRequest{
 		Username:        "alice",
 		Password:        "correct password",
 		ClientIP:        "192.0.2.10",
@@ -293,6 +293,9 @@ func TestLoginAtomicallyUpgradesPasswordAndRotatesPriorSession(t *testing.T) {
 	}
 	if upgraded.PasswordHash != "upgraded-password-hash" || upgraded.User.Version != 42 {
 		t.Fatalf("credentials were not atomically upgraded: %+v", upgraded)
+	}
+	if result.User.Version != 42 || result.User.LastLoginAt == nil || !result.User.LastLoginAt.Equal(now) || !result.User.UpdatedAt.Equal(now) {
+		t.Fatalf("login returned pre-commit user state: %+v", result.User)
 	}
 }
 
@@ -861,11 +864,11 @@ func (s *fakeAuthStore) LookupUserByUsername(_ context.Context, username string)
 	return user, ok, nil
 }
 
-func (s *fakeAuthStore) CommitLogin(_ context.Context, commit LoginCommit) error {
+func (s *fakeAuthStore) CommitLogin(_ context.Context, commit LoginCommit) (SessionIdentity, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.commitErr != nil {
-		return s.commitErr
+		return SessionIdentity{}, s.commitErr
 	}
 	var credentials UserCredentials
 	for username, candidate := range s.users {
@@ -875,8 +878,11 @@ func (s *fakeAuthStore) CommitLogin(_ context.Context, commit LoginCommit) error
 		if commit.PasswordHashUpdate != nil {
 			candidate.PasswordHash = commit.PasswordHashUpdate.PasswordHash
 			candidate.User.Version++
-			s.users[username] = candidate
 		}
+		lastLoginAt := commit.Session.CreatedAt
+		candidate.User.LastLoginAt = &lastLoginAt
+		candidate.User.UpdatedAt = commit.Session.CreatedAt
+		s.users[username] = candidate
 		credentials = candidate
 		break
 	}
@@ -889,13 +895,14 @@ func (s *fakeAuthStore) CommitLogin(_ context.Context, commit LoginCommit) error
 			s.replacedBy[identity.Session.ID] = commit.Session.ID
 		}
 	}
-	s.sessions[commit.TokenDigest] = SessionIdentity{
+	identity := SessionIdentity{
 		User:       credentials.User,
 		Session:    commit.Session,
 		CSRFDigest: commit.CSRFDigest,
 	}
+	s.sessions[commit.TokenDigest] = identity
 	s.loginCommits = append(s.loginCommits, commit)
-	return nil
+	return identity, nil
 }
 
 func (s *fakeAuthStore) atomicLoginState(priorSessionID, username string) (Session, string, UserCredentials) {

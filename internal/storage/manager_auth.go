@@ -211,12 +211,13 @@ func (s *Store) LookupUserByID(ctx context.Context, userID string) (auth.UserCre
 	return credentialsFromManagerUser(row), true, nil
 }
 
-func (s *Store) CommitLogin(ctx context.Context, commit auth.LoginCommit) error {
+func (s *Store) CommitLogin(ctx context.Context, commit auth.LoginCommit) (auth.SessionIdentity, error) {
 	db, err := s.managerDB(ctx)
 	if err != nil {
-		return err
+		return auth.SessionIdentity{}, err
 	}
-	return managerTransaction(db, "commit admin login", func(tx *gorm.DB) error {
+	var identity auth.SessionIdentity
+	err = managerTransaction(db, "commit admin login", func(tx *gorm.DB) error {
 		user, found, err := lockManagerUser(tx, commit.Session.UserID)
 		if err != nil {
 			return err
@@ -266,14 +267,26 @@ func (s *Store) CommitLogin(ctx context.Context, commit auth.LoginCommit) error 
 		if result.Error != nil || result.RowsAffected != 1 {
 			return managerFailure("update admin login state", result.Error)
 		}
-		return writeManagerAuthAudit(tx, managerAuthAuditWrite{
+		if err := writeManagerAuthAudit(tx, managerAuthAuditWrite{
 			Actor:   auth.Principal{UserID: user.UserID, SessionID: row.SessionID, Role: user.Role},
 			Context: auth.MutationContext{IPAddress: commit.Session.IPAddress, UserAgent: commit.Session.UserAgent},
 			At:      commit.Session.CreatedAt, Action: "auth.login",
 			Target:   audit.Target{Type: "admin_session", ID: row.SessionID},
 			Metadata: map[string]any{"rotated_prior": prior != nil, "password_hash_upgraded": commit.PasswordHashUpdate != nil},
-		})
+		}); err != nil {
+			return err
+		}
+		committed, found, err := loadManagerIdentity(tx, "s.session_id = ?", row.SessionID, false)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return managerFailure("reload committed admin login", nil)
+		}
+		identity = committed
+		return nil
 	})
+	return identity, err
 }
 
 func (s *Store) LookupSession(ctx context.Context, tokenDigest auth.TokenDigest) (auth.SessionIdentity, bool, error) {
@@ -311,6 +324,9 @@ func (s *Store) LookupReplacedSession(ctx context.Context, tokenDigest auth.Toke
 }
 
 func (s *Store) LookupPasswordChange(ctx context.Context, lookup auth.PasswordChangeLookup) (auth.SessionIdentity, bool, error) {
+	if lookup.At.IsZero() {
+		return auth.SessionIdentity{}, false, auth.ErrInvalidAdminInput
+	}
 	db, err := s.managerDB(ctx)
 	if err != nil {
 		return auth.SessionIdentity{}, false, err
@@ -323,6 +339,9 @@ func (s *Store) LookupPasswordChange(ctx context.Context, lookup auth.PasswordCh
 	}
 	if result.Error != nil {
 		return auth.SessionIdentity{}, false, managerFailure("lookup password change", result.Error)
+	}
+	if !reservation.ExpiresAt.After(normalizedManagerTime(lookup.At)) {
+		return auth.SessionIdentity{}, false, nil
 	}
 	if !sameManagerHash(reservation.RequestHash, lookup.RequestHash) {
 		return auth.SessionIdentity{}, false, auth.ErrAdminIdempotencyReuse

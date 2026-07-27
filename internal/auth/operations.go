@@ -30,6 +30,7 @@ type PasswordChangeLookup struct {
 	SessionID      string
 	IdempotencyKey string
 	RequestHash    string
+	At             time.Time
 }
 
 type PasswordChangeCommit struct {
@@ -111,7 +112,7 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 	}
 	requestHash := s.passwordChangeRequestHash(identity.User.ID, identity.Session.ID, input.CurrentPassword, input.NewPassword)
 	lookup := PasswordChangeLookup{
-		UserID: identity.User.ID, SessionID: identity.Session.ID, IdempotencyKey: input.IdempotencyKey, RequestHash: requestHash,
+		UserID: identity.User.ID, SessionID: identity.Session.ID, IdempotencyKey: input.IdempotencyKey, RequestHash: requestHash, At: now,
 	}
 	replayed, found, err := s.store.LookupPasswordChange(ctx, lookup)
 	if err != nil {
@@ -119,7 +120,7 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 	}
 	sessionToken, csrfToken := s.passwordChangeTokens(lookup)
 	if found {
-		result, err := s.passwordChangeResult(replayed, sessionToken, csrfToken)
+		result, err := s.passwordChangeResult(replayed, sessionToken, csrfToken, now)
 		if err != nil {
 			return LoginResult{}, err
 		}
@@ -173,7 +174,7 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("commit password change: %w", err)
 	}
-	result, err := s.passwordChangeResult(committed, sessionToken, csrfToken)
+	result, err := s.passwordChangeResult(committed, sessionToken, csrfToken, now)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -182,11 +183,17 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 	return result, nil
 }
 
-func (s *Service) passwordChangeResult(identity SessionIdentity, sessionToken, csrfToken string) (LoginResult, error) {
+func (s *Service) passwordChangeResult(identity SessionIdentity, sessionToken, csrfToken string, now time.Time) (LoginResult, error) {
 	expectedSessionID := deriveSessionID(s.sessionSecret, sessionToken)
 	expectedCSRF := digestCSRFToken(s.sessionSecret, csrfToken)
 	if !identity.User.Enabled || identity.Session.ID != expectedSessionID || identity.Session.UserID != identity.User.ID ||
-		identity.Session.Status != SessionStatusActive || !hmac.Equal(identity.CSRFDigest[:], expectedCSRF[:]) {
+		identity.Session.Status != SessionStatusActive || identity.Session.RevokedAt != nil ||
+		!identity.Session.ExpiresAt.After(now) || !identity.Session.AbsoluteExpiresAt.After(now) ||
+		!hmac.Equal(identity.CSRFDigest[:], expectedCSRF[:]) {
+		if identity.Session.ID == expectedSessionID &&
+			(!identity.Session.ExpiresAt.After(now) || !identity.Session.AbsoluteExpiresAt.After(now)) {
+			return LoginResult{}, ErrUnauthenticated
+		}
 		return LoginResult{}, errors.New("invalid password change store result")
 	}
 	credential, err := composeSessionCredential(sessionToken, csrfToken)

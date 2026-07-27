@@ -49,6 +49,28 @@ func TestChangePasswordRejectsWrongCurrentPasswordBeforeCommit(t *testing.T) {
 	}
 }
 
+func TestChangePasswordRejectsReplayWithExpiredResultSession(t *testing.T) {
+	service, store, identity, credential := newPasswordChangeFixture(t)
+	input := ChangePasswordInput{
+		Credential: credential, CurrentPassword: "current-password", NewPassword: "new-password-123",
+		IdempotencyKey: "idem-change-1", Context: MutationContext{RequestID: "req_1", IPAddress: "192.0.2.1", UserAgent: "test"},
+	}
+	if _, err := service.ChangePassword(t.Context(), identity, input); err != nil {
+		t.Fatal(err)
+	}
+	for key, replay := range store.passwordChanges {
+		replay.Session.ExpiresAt = time.Unix(100, 0)
+		store.passwordChanges[key] = replay
+	}
+	recovered, err := service.AuthenticateForRotation(t.Context(), credential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ChangePassword(t.Context(), recovered, input); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expired password change replay error = %v, want ErrUnauthenticated", err)
+	}
+}
+
 func TestLogoutPersistsOnlyDigestAndIsIdempotent(t *testing.T) {
 	service, store, identity, credential := newPasswordChangeFixture(t)
 	if err := service.Logout(t.Context(), credential, identity, MutationContext{RequestID: "req_1"}); err != nil {

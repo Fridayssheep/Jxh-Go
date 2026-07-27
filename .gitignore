@@ -10,3 +10,6 @@ data/exports/
 data/flash/
 .vscode/*
 .vscode/
+/bot.exe
+/migrate.exe
+/admin-bootstrap.exe

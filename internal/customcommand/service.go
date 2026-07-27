@@ -58,6 +58,54 @@ func (s *Service) Registry() *Registry {
 	return s.registry
 }
 
+// Probe performs the immutable registry lookup used by the message hot path.
+// Execute repeats the lookup before applying any side effect so a concurrent
+// command update cannot execute a stale definition.
+func (s *Service) Probe(message, groupID string) (TriggerPermission, bool) {
+	command, matched := s.registry.Match(message, groupID)
+	if !matched {
+		return "", false
+	}
+	return command.TriggerPermission, true
+}
+
+// LoadRegistry replaces the runtime snapshot with every stored active
+// command. It is intended for application startup before message delivery.
+func (s *Service) LoadRegistry(ctx context.Context) error {
+	if ctx == nil {
+		return ErrInvalidInput
+	}
+	const pageSize = 100
+	commands := make([]Command, 0)
+	cursor := ""
+	seenCursors := make(map[string]struct{})
+	for {
+		page, err := s.store.ListCommands(ctx, ListQuery{Status: StatusActive, Limit: pageSize, Cursor: cursor})
+		if err != nil {
+			return fmt.Errorf("load custom command registry: %w", err)
+		}
+		if len(page.Items) > pageSize || (page.HasMore && !validIdentifier(page.NextCursor)) {
+			return fmt.Errorf("load custom command registry: invalid store page: %w", ErrInvalidInput)
+		}
+		commands = append(commands, page.Items...)
+		if !page.HasMore {
+			break
+		}
+		if page.NextCursor == cursor {
+			return fmt.Errorf("load custom command registry: repeated cursor: %w", ErrInvalidInput)
+		}
+		if _, duplicate := seenCursors[page.NextCursor]; duplicate {
+			return fmt.Errorf("load custom command registry: cursor cycle: %w", ErrInvalidInput)
+		}
+		seenCursors[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
+	}
+	if err := s.registry.Replace(commands); err != nil {
+		return fmt.Errorf("load custom command registry: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) Create(ctx context.Context, principal auth.Principal, definition Definition, request auth.MutationContext) (Command, error) {
 	if !principal.Has(auth.PermissionCommandsWrite) {
 		return Command{}, ErrForbidden

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
+	"github.com/zjutjh/jxh-go/internal/customcommand"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
@@ -41,27 +43,43 @@ type QuotedMessage struct {
 }
 
 type Options struct {
-	Sender        Sender
-	Knowledge     *knowledge.IndexRef
-	AI            *ai.Service
-	Reloader      *knowledge.Syncer
-	Admin         *commands.AdminHandler
-	Quote         *quote.Client
-	GroupRequests *grouprequest.Service
-	TriggerStats  *triggerstats.Service
-	LinkCleaner   *linkcleaner.Service
-	Settings      *settings.Runtime
+	Sender               Sender
+	Knowledge            *knowledge.IndexRef
+	AI                   *ai.Service
+	Reloader             *knowledge.Syncer
+	Admin                *commands.AdminHandler
+	Quote                *quote.Client
+	GroupRequests        *grouprequest.Service
+	TriggerStats         *triggerstats.Service
+	LinkCleaner          *linkcleaner.Service
+	Settings             *settings.Runtime
+	CustomCommands       CustomCommandExecutor
+	MaintenanceAllowlist MaintenanceAllowlist
+}
+
+type CustomCommandExecutor interface {
+	Probe(message, groupID string) (customcommand.TriggerPermission, bool)
+	Execute(context.Context, customcommand.ExecuteInput) (customcommand.Run, bool, error)
+}
+
+// MaintenanceAllowlist is intentionally a small persistence boundary. The
+// database-backed implementation can be added without coupling the hot path to
+// an administrator account repository.
+type MaintenanceAllowlist interface {
+	Contains(ctx context.Context, groupID, userID int64) (bool, error)
 }
 
 type Pipeline struct {
-	mu            sync.RWMutex
-	knowledge     *knowledge.IndexRef
-	sender        Sender
-	groupRequests *grouprequest.Service
-	stats         *triggerstats.Service
-	linkCleaner   *linkcleaner.Service
-	settings      *settings.Runtime
-	commandRouter *GroupCommandRouter
+	mu                   sync.RWMutex
+	knowledge            *knowledge.IndexRef
+	sender               Sender
+	groupRequests        *grouprequest.Service
+	stats                *triggerstats.Service
+	linkCleaner          *linkcleaner.Service
+	settings             *settings.Runtime
+	customCommands       CustomCommandExecutor
+	maintenanceAllowlist MaintenanceAllowlist
+	commandRouter        *GroupCommandRouter
 }
 
 func (p *Pipeline) SetSender(sender Sender) {
@@ -85,12 +103,14 @@ type GroupMessage struct {
 
 func NewPipeline(opts Options) *Pipeline {
 	pipeline := &Pipeline{
-		knowledge:     opts.Knowledge,
-		groupRequests: opts.GroupRequests,
-		stats:         opts.TriggerStats,
-		linkCleaner:   opts.LinkCleaner,
-		settings:      opts.Settings,
-		commandRouter: NewGroupCommandRouter(opts),
+		knowledge:            opts.Knowledge,
+		groupRequests:        opts.GroupRequests,
+		stats:                opts.TriggerStats,
+		linkCleaner:          opts.LinkCleaner,
+		settings:             opts.Settings,
+		customCommands:       opts.CustomCommands,
+		maintenanceAllowlist: opts.MaintenanceAllowlist,
+		commandRouter:        NewGroupCommandRouter(opts),
 	}
 	pipeline.SetSender(opts.Sender)
 	return pipeline
@@ -105,6 +125,12 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	handled, err := p.commandRouter.Handle(ctx, msg, sender)
 	if handled || err != nil {
 		return err
+	}
+	if p.customCommands != nil && p.featureEnabled(msg.GroupID, settings.FeatureCustomCommand) {
+		handled, err := p.handleCustomCommand(ctx, msg, text, sender)
+		if handled || err != nil {
+			return err
+		}
 	}
 	if p.linkCleaner != nil && p.featureEnabled(msg.GroupID, settings.FeatureLinkCleaner) {
 		cleaned, err := p.linkCleaner.CleanMessage(ctx, msg.Text, msg.Segments)
@@ -133,6 +159,64 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 	}
 	return nil
+}
+
+func (p *Pipeline) handleCustomCommand(ctx context.Context, msg GroupMessage, text string, sender Sender) (bool, error) {
+	groupID := strconv.FormatInt(msg.GroupID, 10)
+	permission, matched := p.customCommands.Probe(text, groupID)
+	if !matched {
+		return false, nil
+	}
+	input := customcommand.ExecuteInput{
+		RunIdentity: customCommandRunIdentity(msg), GroupID: groupID,
+		SenderQQ: strconv.FormatInt(msg.UserID, 10), SenderRole: customcommand.SenderMember,
+		Message: text,
+	}
+	switch permission {
+	case customcommand.TriggerGroupAdmin:
+		role, err := sender.GetGroupMemberRole(ctx, msg.GroupID, msg.UserID)
+		if err != nil {
+			log.Printf("query custom command actor role failed: group=%d user=%d", msg.GroupID, msg.UserID)
+			return true, err
+		}
+		mapped, ok := customCommandSenderRole(role)
+		if !ok {
+			log.Printf("query custom command actor role returned invalid role: group=%d user=%d", msg.GroupID, msg.UserID)
+			return true, fmt.Errorf("invalid group member role")
+		}
+		input.SenderRole = mapped
+	case customcommand.TriggerMaintenanceAllowlist:
+		if p.maintenanceAllowlist != nil {
+			allowed, err := p.maintenanceAllowlist.Contains(ctx, msg.GroupID, msg.UserID)
+			if err != nil {
+				log.Printf("query custom command maintenance allowlist failed: group=%d user=%d", msg.GroupID, msg.UserID)
+				return true, err
+			}
+			input.MaintenanceAllowlisted = allowed
+		}
+	}
+	_, handled, err := p.customCommands.Execute(ctx, input)
+	return handled, err
+}
+
+func customCommandSenderRole(value string) (customcommand.SenderRole, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "owner":
+		return customcommand.SenderOwner, true
+	case "admin":
+		return customcommand.SenderAdmin, true
+	case "member":
+		return customcommand.SenderMember, true
+	default:
+		return "", false
+	}
+}
+
+func customCommandRunIdentity(msg GroupMessage) string {
+	if msg.MessageID <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("qqmsg:%d:%d", msg.GroupID, msg.MessageID)
 }
 
 func (p *Pipeline) HandleGroupIncrease(ctx context.Context, groupID int64, userID int64) error {

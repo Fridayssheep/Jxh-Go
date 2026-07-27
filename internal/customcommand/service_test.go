@@ -112,6 +112,45 @@ func TestRegistryUsesExactNameAndFixedScope(t *testing.T) {
 	}
 }
 
+func TestLoadRegistryPaginatesAndProbeUsesPublishedSnapshot(t *testing.T) {
+	first := storedCommand()
+	second := storedCommand()
+	second.ID = "cmd_2"
+	second.Name = "/second"
+	store := &fakeStore{listPages: []Page[Command]{
+		{Items: []Command{first}, HasMore: true, NextCursor: "cursor_2"},
+		{Items: []Command{second}},
+	}}
+	service := newServiceFixture(t, store, nil)
+	if err := service.LoadRegistry(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if permission, ok := service.Probe("/second 7788 words 60", "123"); !ok || permission != TriggerGroupAdmin {
+		t.Fatalf("probe permission=%q matched=%t", permission, ok)
+	}
+	if len(store.listQueries) != 2 || store.listQueries[0].Cursor != "" || store.listQueries[1].Cursor != "cursor_2" ||
+		store.listQueries[0].Status != StatusActive || store.listQueries[0].Limit != 100 {
+		t.Fatalf("queries=%+v", store.listQueries)
+	}
+}
+
+func TestLoadRegistryRejectsCursorCyclesWithoutReplacingSnapshot(t *testing.T) {
+	store := &fakeStore{listPages: []Page[Command]{
+		{HasMore: true, NextCursor: "cursor_2"},
+		{HasMore: true, NextCursor: "cursor_2"},
+	}}
+	service := newServiceFixture(t, store, nil)
+	if err := service.Registry().Upsert(storedCommand()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.LoadRegistry(t.Context()); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, matched := service.Probe("/welcome 7788 words 60", "123"); !matched {
+		t.Fatal("failed load replaced the prior registry")
+	}
+}
+
 func TestDefinitionAcceptsOpaqueGroupIdentifiersAndRejectsRequiredAfterOptional(t *testing.T) {
 	definition := validDefinition()
 	definition.Scope.GroupIDs = []string{"group:east-campus"}
@@ -182,8 +221,11 @@ func hasIssue(issues []ValidationIssue, code string) bool {
 }
 
 type fakeStore struct {
-	calls    int
-	recorded Run
+	calls       int
+	recorded    Run
+	listPages   []Page[Command]
+	listQueries []ListQuery
+	listIndex   int
 }
 
 func (s *fakeStore) CommandNameExists(context.Context, string, string) (bool, error) {
@@ -204,8 +246,14 @@ func (s *fakeStore) GetCommand(context.Context, string) (Command, bool, error) {
 	return storedCommand(), true, nil
 }
 
-func (s *fakeStore) ListCommands(context.Context, ListQuery) (Page[Command], error) {
+func (s *fakeStore) ListCommands(_ context.Context, query ListQuery) (Page[Command], error) {
 	s.calls++
+	s.listQueries = append(s.listQueries, query)
+	if s.listIndex < len(s.listPages) {
+		page := s.listPages[s.listIndex]
+		s.listIndex++
+		return page, nil
+	}
 	return Page[Command]{}, nil
 }
 

@@ -2,9 +2,11 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/customcommand"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/settings"
@@ -102,10 +104,97 @@ func TestPipelineUsesConfiguredWelcomeTemplateAndKeepsDefaultsWithoutRuntime(t *
 	}
 }
 
+func TestPipelineRunsCustomCommandBetweenBuiltinsAndKeywordReply(t *testing.T) {
+	executor := &customCommandExecutorFake{matched: true, handled: true, permission: customcommand.TriggerEveryone}
+	sender := &botSenderFake{}
+	pipeline := NewPipeline(Options{
+		Sender: sender, CustomCommands: executor,
+		Knowledge: knowledge.NewIndexRef([]knowledge.Entry{{
+			SourceKey: "key_1", Keyword: "/hello", Answer: "keyword", Enabled: true, ExactReply: true,
+		}}),
+	})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{
+		GroupID: 123, UserID: 456, MessageID: 789, Text: "/hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if executor.executeCalls != 1 || executor.input.RunIdentity != "qqmsg:123:789" || executor.input.SenderRole != customcommand.SenderMember {
+		t.Fatalf("executor=%+v", executor)
+	}
+	if len(sender.texts) != 0 {
+		t.Fatalf("custom command fell through to keyword reply: %v", sender.texts)
+	}
+
+	executor.executeCalls = 0
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: "/test"}); err != nil {
+		t.Fatal(err)
+	}
+	if executor.executeCalls != 0 || len(sender.texts) != 1 {
+		t.Fatalf("builtin did not take precedence: calls=%d texts=%v", executor.executeCalls, sender.texts)
+	}
+}
+
+func TestPipelineCustomCommandHonorsFeatureAndPermissionResolvers(t *testing.T) {
+	features := settings.DefaultFeatures()
+	features.CustomCommand.Enabled = false
+	runtime, err := settings.NewRuntime(features, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &customCommandExecutorFake{matched: true, handled: true, permission: customcommand.TriggerGroupAdmin}
+	sender := &botSenderFake{role: "owner"}
+	pipeline := NewPipeline(Options{Sender: sender, Settings: runtime, CustomCommands: executor})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: "/hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if executor.probeCalls != 0 || sender.roleReads != 0 {
+		t.Fatalf("disabled feature touched executor or gateway: probe=%d roles=%d", executor.probeCalls, sender.roleReads)
+	}
+
+	features.CustomCommand.Enabled = true
+	runtime, err = settings.NewRuntime(features, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline = NewPipeline(Options{Sender: sender, Settings: runtime, CustomCommands: executor})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: "/hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if executor.input.SenderRole != customcommand.SenderOwner || sender.roleReads != 1 {
+		t.Fatalf("role=%q reads=%d", executor.input.SenderRole, sender.roleReads)
+	}
+
+	executor.permission = customcommand.TriggerMaintenanceAllowlist
+	allowlist := &maintenanceAllowlistFake{allowed: true}
+	pipeline = NewPipeline(Options{Sender: sender, Settings: runtime, CustomCommands: executor, MaintenanceAllowlist: allowlist})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: "/hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if !executor.input.MaintenanceAllowlisted || allowlist.calls != 1 {
+		t.Fatalf("allowlisted=%t calls=%d", executor.input.MaintenanceAllowlisted, allowlist.calls)
+	}
+}
+
+func TestPipelineStopsAfterCustomCommandResolverFailure(t *testing.T) {
+	executor := &customCommandExecutorFake{matched: true, handled: true, permission: customcommand.TriggerMaintenanceAllowlist}
+	pipeline := NewPipeline(Options{
+		Sender: &botSenderFake{}, CustomCommands: executor,
+		MaintenanceAllowlist: &maintenanceAllowlistFake{err: errors.New("store unavailable")},
+	})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: "/hello"}); err == nil {
+		t.Fatal("expected resolver error")
+	}
+	if executor.executeCalls != 0 {
+		t.Fatal("command executed after resolver failure")
+	}
+}
+
 type botSenderFake struct {
 	texts      []string
 	messages   []message.Chain
 	quoteReads int
+	role       string
+	roleReads  int
 }
 
 func (s *botSenderFake) SendGroupText(_ context.Context, _ int64, text string) error {
@@ -139,6 +228,41 @@ func (*botSenderFake) SetRestart(context.Context) error {
 	return nil
 }
 
-func (*botSenderFake) GetGroupMemberRole(context.Context, int64, int64) (string, error) {
-	return "member", nil
+func (s *botSenderFake) GetGroupMemberRole(context.Context, int64, int64) (string, error) {
+	s.roleReads++
+	if s.role == "" {
+		return "member", nil
+	}
+	return s.role, nil
+}
+
+type customCommandExecutorFake struct {
+	matched      bool
+	handled      bool
+	permission   customcommand.TriggerPermission
+	probeCalls   int
+	executeCalls int
+	input        customcommand.ExecuteInput
+}
+
+func (f *customCommandExecutorFake) Probe(string, string) (customcommand.TriggerPermission, bool) {
+	f.probeCalls++
+	return f.permission, f.matched
+}
+
+func (f *customCommandExecutorFake) Execute(_ context.Context, input customcommand.ExecuteInput) (customcommand.Run, bool, error) {
+	f.executeCalls++
+	f.input = input
+	return customcommand.Run{}, f.handled, nil
+}
+
+type maintenanceAllowlistFake struct {
+	allowed bool
+	err     error
+	calls   int
+}
+
+func (f *maintenanceAllowlistFake) Contains(context.Context, int64, int64) (bool, error) {
+	f.calls++
+	return f.allowed, f.err
 }

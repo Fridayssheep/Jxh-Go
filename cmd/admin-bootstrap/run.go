@@ -35,16 +35,8 @@ const (
 
 var usernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{2,31}$`)
 
-type bootstrapAdmin struct {
-	User         auth.User
-	PasswordHash string
-}
-
-type bootstrapStore interface {
-	// CreateFirstSuperAdmin must atomically reject the operation when any admin
-	// user row already exists, including disabled or soft-deleted rows.
-	CreateFirstSuperAdmin(ctx context.Context, admin bootstrapAdmin) (auth.User, bool, error)
-}
+type bootstrapAdmin = auth.BootstrapAdmin
+type bootstrapStore = auth.BootstrapStore
 
 type bootstrapDeps struct {
 	hashPassword         func([]byte) (string, error)

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -32,28 +34,109 @@ import (
 	"github.com/zjutjh/jxh-go/internal/storage"
 	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
+	"gorm.io/gorm"
 )
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to config file")
-	flag.Parse()
+	os.Exit(mainResult(os.Args[1:]))
+}
+
+func mainResult(arguments []string) int {
+	flags := flag.NewFlagSet("jxh-bot", flag.ContinueOnError)
+	configPath := flags.String("config", "config.yaml", "path to config file")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		log.Printf("load config: %v", err)
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := run(ctx, cfg); err != nil {
+		log.Printf("run bot: %v", err)
+		return 1
+	}
+	return 0
+}
 
-	db, err := database.OpenGORM(ctx, cfg.Database)
+type databasePinger interface {
+	PingContext(context.Context) error
+}
+
+type databaseResources struct {
+	ORM    *gorm.DB
+	Pinger databasePinger
+	Closer io.Closer
+}
+
+type applicationRunner interface {
+	Run(context.Context) error
+}
+
+type runtimeDependencies struct {
+	openDatabase     func(context.Context, config.DatabaseConfig) (databaseResources, error)
+	buildApplication func(context.Context, config.Config, databaseResources) (applicationRunner, error)
+}
+
+func run(ctx context.Context, cfg config.Config) error {
+	return runWithDependencies(ctx, cfg, runtimeDependencies{
+		openDatabase:     openDatabaseResources,
+		buildApplication: buildApplication,
+	})
+}
+
+func runWithDependencies(ctx context.Context, cfg config.Config, dependencies runtimeDependencies) (err error) {
+	if ctx == nil || dependencies.openDatabase == nil || dependencies.buildApplication == nil {
+		return errors.New("initialize bot runtime: invalid dependencies")
+	}
+	resources, err := dependencies.openDatabase(ctx, cfg.Database)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		return fmt.Errorf("open database: %w", err)
+	}
+	if resources.ORM == nil || resources.Pinger == nil || resources.Closer == nil {
+		if resources.Closer != nil {
+			_ = resources.Closer.Close()
+		}
+		return errors.New("open database: incomplete database resources")
+	}
+	defer func() {
+		if closeErr := resources.Closer.Close(); closeErr != nil {
+			err = errors.Join(err, errors.New("close database: database operation failed"))
+		}
+	}()
+
+	application, err := dependencies.buildApplication(ctx, cfg, resources)
+	if err != nil {
+		return err
+	}
+	if application == nil {
+		return errors.New("initialize bot runtime: application is not configured")
+	}
+	return application.Run(ctx)
+}
+
+func openDatabaseResources(ctx context.Context, cfg config.DatabaseConfig) (databaseResources, error) {
+	db, err := database.OpenGORM(ctx, cfg)
+	if err != nil {
+		return databaseResources{}, err
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("access db pool: %v", err)
+		if closer, ok := db.ConnPool.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		return databaseResources{}, errors.New("access database pool: database operation failed")
 	}
+	return databaseResources{ORM: db, Pinger: sqlDB, Closer: sqlDB}, nil
+}
+
+func buildApplication(ctx context.Context, cfg config.Config, database databaseResources) (_ applicationRunner, err error) {
+	db := database.ORM
+	sqlDB := database.Pinger
 	store := storage.NewStore(db)
 	healthService := health.NewService()
 	nowUTC := time.Now().UTC()
@@ -78,7 +161,7 @@ func main() {
 	if err := knowledgeSync.Sync(ctx); err != nil {
 		log.Printf("load knowledge from WPS failed, trying local cache: %v", err)
 		if cacheErr := knowledgeSync.LoadCache(); cacheErr != nil {
-			log.Fatalf("load knowledge: WPS error: %v; cache error: %v", err, cacheErr)
+			return nil, errors.New("load knowledge: WPS and local cache unavailable")
 		}
 		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
 		healthService.SetWPS(health.ComponentStatus{Available: true, Code: "cache", CheckedAt: knowledgeLoadedAt, LastSuccessAt: knowledgeLoadedAt})
@@ -99,7 +182,7 @@ func main() {
 		Index: knowledgeIndex, Syncer: knowledgeSync, SourceConfigured: strings.TrimSpace(cfg.WPS.ShareURL) != "", Now: now,
 	})
 	if err != nil {
-		log.Fatalf("initialize knowledge runtime: %v", err)
+		return nil, fmt.Errorf("initialize knowledge runtime: %w", err)
 	}
 	settingsRuntime := settings.NewDefaultRuntime()
 	scheduleLocation := schedulerLocation(cfg)
@@ -130,8 +213,14 @@ func main() {
 		Location: location, Now: now, Logger: log.Default(),
 	})
 	if err != nil {
-		log.Fatalf("initialize management backend: %v", err)
+		return nil, fmt.Errorf("initialize management backend: %w", err)
 	}
+	backendOwned := true
+	defer func() {
+		if err != nil && backendOwned {
+			managementBackend.System.Close()
+		}
+	}()
 	pipeline := bot.NewPipeline(bot.Options{
 		Sender:         napcatGateway,
 		Knowledge:      knowledgeIndex,
@@ -176,11 +265,11 @@ func main() {
 	}
 	healthComponent, err := app.HTTPComponent("health-http", healthServer, true)
 	if err != nil {
-		log.Fatalf("create health component: %v", err)
+		return nil, fmt.Errorf("create health component: %w", err)
 	}
 	adminComponent, err := app.HTTPComponent("admin-http", managementBackend.AdminServer, false)
 	if err != nil {
-		log.Fatalf("create admin component: %v", err)
+		return nil, fmt.Errorf("create admin component: %w", err)
 	}
 	components := []app.Component{
 		healthComponent,
@@ -192,6 +281,10 @@ func main() {
 		{Name: "telemetry", Run: func(ctx context.Context) error { return runTelemetry(ctx, healthService, managementBackend.Telemetry) }},
 		{Name: "telemetry-maintenance", Run: managementBackend.Maintenance.Run},
 		{Name: "health-monitor", Run: func(ctx context.Context) error { runHealthMonitor(ctx, healthService, napcatGateway); return nil }},
+		{Name: "database-health-monitor", Run: func(ctx context.Context) error {
+			runDatabaseHealthMonitor(ctx, healthService, sqlDB, 5*time.Second, time.Duration(cfg.Database.PingTimeoutSeconds)*time.Second)
+			return nil
+		}},
 	}
 	if cfg.Database.TriggerLogRetentionDays > 0 {
 		components = append(components, app.Component{
@@ -203,16 +296,14 @@ func main() {
 		})
 	}
 	application, err := app.New(app.Options{
-		Components: components, Closers: []io.Closer{sqlDB, closeFunc(func() error { managementBackend.System.Close(); return nil })},
+		Components: components, Closers: []io.Closer{closeFunc(func() error { managementBackend.System.Close(); return nil })},
 		ShutdownTimeout: time.Duration(cfg.Admin.ShutdownTimeoutSeconds) * time.Second, Logger: log.Default(),
 	})
 	if err != nil {
-		log.Fatalf("create application: %v", err)
+		return nil, fmt.Errorf("create application: %w", err)
 	}
-	log.Printf("connecting napcat websocket")
-	if err := application.Run(ctx); err != nil {
-		log.Fatalf("run application: %v", err)
-	}
+	backendOwned = false
+	return application, nil
 }
 
 type closeFunc func() error
@@ -267,6 +358,76 @@ func runHealthMonitor(ctx context.Context, service *health.Service, gateway *nap
 			update()
 		}
 	}
+}
+
+func runDatabaseHealthMonitor(
+	ctx context.Context,
+	service *health.Service,
+	pinger databasePinger,
+	interval time.Duration,
+	timeout time.Duration,
+) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	checkDatabaseHealth(ctx, service, pinger, timeout, time.Now)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !checkDatabaseHealth(ctx, service, pinger, timeout, time.Now) {
+				return
+			}
+		}
+	}
+}
+
+func checkDatabaseHealth(
+	ctx context.Context,
+	service *health.Service,
+	pinger databasePinger,
+	timeout time.Duration,
+	now func() time.Time,
+) bool {
+	if ctx == nil || service == nil || pinger == nil || now == nil {
+		return false
+	}
+	startedAt := now()
+	pingCtx, cancel := context.WithTimeout(ctx, timeout)
+	err := pinger.PingContext(pingCtx)
+	cancel()
+	if ctx.Err() != nil {
+		return false
+	}
+	checkedAt := now()
+	latency := checkedAt.Sub(startedAt)
+	if latency < 0 {
+		latency = 0
+	}
+	previous := service.Snapshot().Database
+	status := health.ComponentStatus{
+		CheckedAt: checkedAt.UTC(), Latency: latency,
+		LastSuccessAt: previous.LastSuccessAt, LastErrorAt: previous.LastErrorAt,
+	}
+	if err == nil {
+		status.Available = true
+		status.Code = "available"
+		status.LastSuccessAt = status.CheckedAt
+	} else {
+		status.Code = "unavailable"
+		if errors.Is(err, context.DeadlineExceeded) {
+			status.Code = "timeout"
+		}
+		status.LastErrorAt = status.CheckedAt
+	}
+	service.SetDatabase(status)
+	return true
 }
 
 func hasAIModelConfig(cfg config.AIConfig) bool {

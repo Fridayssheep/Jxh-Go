@@ -5,13 +5,135 @@ import (
 	"errors"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/config"
 	"github.com/zjutjh/jxh-go/internal/health"
 	"github.com/zjutjh/jxh-go/internal/telemetry"
+	"gorm.io/gorm"
 )
+
+func TestRunWithDependenciesClosesDatabaseAfterInitializationFailure(t *testing.T) {
+	closer := &botDatabaseCloser{}
+	want := errors.New("initialize later component")
+	err := runWithDependencies(t.Context(), config.Default(), runtimeDependencies{
+		openDatabase: func(context.Context, config.DatabaseConfig) (databaseResources, error) {
+			return databaseResources{ORM: &gorm.DB{}, Pinger: botDatabasePinger{}, Closer: closer}, nil
+		},
+		buildApplication: func(context.Context, config.Config, databaseResources) (applicationRunner, error) {
+			return nil, want
+		},
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("runWithDependencies() error=%v, want %v", err, want)
+	}
+	if closer.calls != 1 {
+		t.Fatalf("database close calls=%d, want 1", closer.calls)
+	}
+}
+
+func TestRunWithDependenciesClosesDatabaseAfterApplicationStops(t *testing.T) {
+	closer := &botDatabaseCloser{}
+	runner := &botApplicationRunner{}
+	err := runWithDependencies(t.Context(), config.Default(), runtimeDependencies{
+		openDatabase: func(context.Context, config.DatabaseConfig) (databaseResources, error) {
+			return databaseResources{ORM: &gorm.DB{}, Pinger: botDatabasePinger{}, Closer: closer}, nil
+		},
+		buildApplication: func(context.Context, config.Config, databaseResources) (applicationRunner, error) {
+			if closer.calls != 0 {
+				t.Fatal("database closed before application run")
+			}
+			return runner, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls != 1 || closer.calls != 1 {
+		t.Fatalf("runner calls=%d database close calls=%d, want 1 and 1", runner.calls, closer.calls)
+	}
+}
+
+func TestRunWithDependenciesSanitizesDatabaseCloseFailure(t *testing.T) {
+	secret := "database-password"
+	err := runWithDependencies(t.Context(), config.Default(), runtimeDependencies{
+		openDatabase: func(context.Context, config.DatabaseConfig) (databaseResources, error) {
+			return databaseResources{
+				ORM: &gorm.DB{}, Pinger: botDatabasePinger{},
+				Closer: &botDatabaseCloser{err: errors.New(secret)},
+			}, nil
+		},
+		buildApplication: func(context.Context, config.Config, databaseResources) (applicationRunner, error) {
+			return &botApplicationRunner{}, nil
+		},
+	})
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("runWithDependencies() error=%v", err)
+	}
+}
+
+func TestCheckDatabaseHealthTracksOutageAndRecovery(t *testing.T) {
+	service := health.NewService()
+	initialSuccess := time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC)
+	service.SetDatabase(health.ComponentStatus{
+		Available: true, Code: "available", CheckedAt: initialSuccess, LastSuccessAt: initialSuccess,
+	})
+	outageStart := initialSuccess.Add(time.Minute)
+	outageChecked := outageStart.Add(25 * time.Millisecond)
+	clock := botHealthClock(outageStart, outageChecked)
+	if !checkDatabaseHealth(t.Context(), service, botDatabasePinger{err: errors.New("connection lost")}, time.Second, clock) {
+		t.Fatal("checkDatabaseHealth()=false")
+	}
+	status := service.Snapshot().Database
+	if status.Available || status.Code != "unavailable" || status.CheckedAt != outageChecked ||
+		status.LastSuccessAt != initialSuccess || status.LastErrorAt != outageChecked || status.Latency != 25*time.Millisecond {
+		t.Fatalf("outage status=%+v", status)
+	}
+
+	recoveryStart := outageChecked.Add(time.Minute)
+	recoveryChecked := recoveryStart.Add(10 * time.Millisecond)
+	clock = botHealthClock(recoveryStart, recoveryChecked)
+	if !checkDatabaseHealth(t.Context(), service, botDatabasePinger{}, time.Second, clock) {
+		t.Fatal("checkDatabaseHealth() recovery=false")
+	}
+	status = service.Snapshot().Database
+	if !status.Available || status.Code != "available" || status.LastSuccessAt != recoveryChecked ||
+		status.LastErrorAt != outageChecked || status.Latency != 10*time.Millisecond {
+		t.Fatalf("recovery status=%+v", status)
+	}
+}
+
+func TestCheckDatabaseHealthDoesNotPublishShutdownAsOutage(t *testing.T) {
+	service := health.NewService()
+	want := health.ComponentStatus{Available: true, Code: "available", CheckedAt: time.Unix(1, 0)}
+	service.SetDatabase(want)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if checkDatabaseHealth(ctx, service, botDatabasePinger{err: context.Canceled}, time.Second, time.Now) {
+		t.Fatal("checkDatabaseHealth()=true after shutdown")
+	}
+	if got := service.Snapshot().Database; got != want {
+		t.Fatalf("database status=%+v, want unchanged %+v", got, want)
+	}
+}
+
+func TestCheckDatabaseHealthMapsDeadlineToSafeCode(t *testing.T) {
+	service := health.NewService()
+	checkedAt := time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC)
+	clock := botHealthClock(checkedAt, checkedAt)
+	if !checkDatabaseHealth(
+		t.Context(), service, botDatabasePinger{err: context.DeadlineExceeded}, time.Second, clock,
+	) {
+		t.Fatal("checkDatabaseHealth()=false")
+	}
+	status := service.Snapshot().Database
+	if status.Available || status.Code != "timeout" || status.LastErrorAt != checkedAt {
+		t.Fatalf("database status=%+v", status)
+	}
+}
 
 func TestRunTelemetryPublishesLifecycleAndFlushesOnShutdown(t *testing.T) {
 	store := &botTelemetryStore{}
@@ -104,4 +226,42 @@ func (s *botTelemetryStore) eventCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.events)
+}
+
+type botDatabasePinger struct {
+	err error
+}
+
+func (p botDatabasePinger) PingContext(context.Context) error { return p.err }
+
+type botDatabaseCloser struct {
+	calls int
+	err   error
+}
+
+func (c *botDatabaseCloser) Close() error {
+	c.calls++
+	return c.err
+}
+
+type botApplicationRunner struct {
+	calls int
+	err   error
+}
+
+func (r *botApplicationRunner) Run(context.Context) error {
+	r.calls++
+	return r.err
+}
+
+func botHealthClock(values ...time.Time) func() time.Time {
+	index := 0
+	return func() time.Time {
+		if index >= len(values) {
+			return values[len(values)-1]
+		}
+		value := values[index]
+		index++
+		return value
+	}
 }

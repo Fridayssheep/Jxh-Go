@@ -14,7 +14,7 @@
 
 Jxh-Go 是精弘 QQ 群助手的 Go 重构版本，面向浙江工业大学相关 QQ 群的自动问答、知识库回复和群管理场景。
 
-它通过 NapCat 接入 OneBot 11，以 WPS 回复表作为知识唯一真源，在内存中同时支持关键词回复和 AI 搜索；MySQL 只保存群申请、定时任务和词条触发日志。`/ai` 使用 Eino ReAct Agent 自主选择关键词并调用内存搜索工具。
+它通过 NapCat 接入 OneBot 11，以 WPS 回复表作为知识唯一真源，在内存中同时支持关键词回复和 AI 搜索；MySQL 保存管理账号、会话、审计、群申请、功能设置、定时任务、自定义命令和运营统计。`/ai` 使用 Eino ReAct Agent 自主选择关键词并调用内存搜索工具。
 
 ## 主要能力
 
@@ -46,6 +46,7 @@ cp config.example.yaml config.yaml
 - `wps.sid`：受保护 WPS 文档需要填写，也可用 `JXH_WPS_SID` 注入。
 - `database.password`：默认匹配 compose 的 `jxh_password`。
 - `ai.api_key`、`ai.model`：配置完整且 `ai.enabled` 开启时才启用 `/ai`。
+- `admin.public_origin`、`admin.session_secret`：管理面板的唯一浏览器 Origin 和至少 32 字节随机主密钥；生产环境必须使用 HTTPS 并保持 `cookie_secure: true`。
 
 ### 3. 启动全部服务
 
@@ -60,6 +61,15 @@ NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up -d --build
 ```
 
 compose 会同时启动 MySQL、NapCat、quote 和 bot。
+
+管理 API 默认监听 `http://127.0.0.1:8090/api/admin/v1`。首次使用前执行迁移并创建唯一的首个超级管理员：
+
+```bash
+make migrate
+printf '%s\n' 'replace-with-a-strong-password' | go run ./cmd/admin-bootstrap -config config.yaml -username admin -display-name 管理员 -password-stdin
+```
+
+密码不会出现在命令参数中；生产环境优先直接运行命令并通过终端隐藏输入。创建成功后该命令会拒绝再次引导，后续账号统一由管理 API 创建。
 
 持久化数据默认放在仓库根目录的 `./data/` 下，便于直接打包备份和迁移。
 

@@ -257,6 +257,7 @@ func (h *UsersHandlers) listSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, _ := AuthFromContext(r.Context())
+	query.CurrentSessionID = identity.Session.ID
 	page, err := h.service.ListSessions(r.Context(), principalFromAuth(identity), query)
 	if err != nil {
 		h.writeServiceError(w, r, err)

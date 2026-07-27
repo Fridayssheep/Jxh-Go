@@ -118,6 +118,20 @@ func TestUserAndSessionQueriesRejectInvalidValuesBeforeService(t *testing.T) {
 	}
 }
 
+func TestSessionCurrentFilterUsesAuthenticatedSession(t *testing.T) {
+	current := true
+	service := &fakeAdminUserService{}
+	router := newUsersHTTPFixture(t, service, nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/sessions?current=true", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.sessionQuery.Current == nil || *service.sessionQuery.Current != current ||
+		service.sessionQuery.CurrentSessionID != "ses_1" {
+		t.Fatalf("status=%d query=%+v body=%s", response.Code, service.sessionQuery, response.Body.String())
+	}
+}
+
 func newUsersHTTPFixture(t *testing.T, service AdminUserService, sink SessionEventSink) *Router {
 	t.Helper()
 	handlers, err := NewUsersHandlers(service, sink, true)
@@ -157,17 +171,18 @@ func testAdminUser() auth.User {
 }
 
 type fakeAdminUserService struct {
-	user     auth.User
-	userPage auth.UserPage
-	sessions auth.SessionPage
-	reset    auth.PasswordResetResult
-	revoke   auth.SessionRevokeResult
-	err      error
-	calls    int
-	create   auth.CreateUserInput
-	patch    auth.UserPatch
-	revision uint64
-	mutation auth.MutationContext
+	user         auth.User
+	userPage     auth.UserPage
+	sessions     auth.SessionPage
+	reset        auth.PasswordResetResult
+	revoke       auth.SessionRevokeResult
+	err          error
+	calls        int
+	create       auth.CreateUserInput
+	patch        auth.UserPatch
+	revision     uint64
+	mutation     auth.MutationContext
+	sessionQuery auth.SessionListQuery
 }
 
 func (s *fakeAdminUserService) CreateUser(_ context.Context, _ auth.Principal, input auth.CreateUserInput, request auth.MutationContext) (auth.User, error) {
@@ -206,8 +221,9 @@ func (s *fakeAdminUserService) RevokeUserSessions(context.Context, auth.Principa
 	return s.revoke, s.err
 }
 
-func (s *fakeAdminUserService) ListSessions(context.Context, auth.Principal, auth.SessionListQuery) (auth.SessionPage, error) {
+func (s *fakeAdminUserService) ListSessions(_ context.Context, _ auth.Principal, query auth.SessionListQuery) (auth.SessionPage, error) {
 	s.calls++
+	s.sessionQuery = query
 	return s.sessions, s.err
 }
 

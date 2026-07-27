@@ -2,9 +2,13 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,6 +26,8 @@ var (
 )
 
 var adminUsernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{2,31}$`)
+
+const passwordResetRequestDomain = "jxh-admin/password-reset-request/v1"
 
 type MutationContext struct {
 	RequestID string
@@ -59,11 +65,12 @@ type UserPage struct {
 }
 
 type SessionListQuery struct {
-	UserID  string
-	Status  SessionStatus
-	Current *bool
-	Cursor  string
-	Limit   int
+	UserID           string
+	Status           SessionStatus
+	Current          *bool
+	CurrentSessionID string
+	Cursor           string
+	Limit            int
 }
 
 type SessionPage struct {
@@ -98,6 +105,7 @@ type ResetPasswordMutation struct {
 	UserID           string
 	ExpectedRevision uint64
 	PasswordHash     string
+	RequestHash      string
 	IdempotencyKey   string
 	OccurredAt       time.Time
 }
@@ -138,22 +146,27 @@ type AdminStore interface {
 }
 
 type AdminServiceOptions struct {
-	Store     AdminStore
-	Passwords PasswordEngine
-	Now       func() time.Time
+	Store             AdminStore
+	Passwords         PasswordEngine
+	RequestHashSecret []byte
+	Now               func() time.Time
 }
 
 type AdminService struct {
-	store     AdminStore
-	passwords PasswordEngine
-	now       func() time.Time
+	store             AdminStore
+	passwords         PasswordEngine
+	requestHashSecret []byte
+	now               func() time.Time
 }
 
 func NewAdminService(options AdminServiceOptions) (*AdminService, error) {
-	if options.Store == nil || options.Passwords == nil || options.Now == nil {
+	if options.Store == nil || options.Passwords == nil || len(options.RequestHashSecret) < 32 || options.Now == nil {
 		return nil, ErrInvalidAuthConfig
 	}
-	return &AdminService{store: options.Store, passwords: options.Passwords, now: options.Now}, nil
+	return &AdminService{
+		store: options.Store, passwords: options.Passwords,
+		requestHashSecret: append([]byte(nil), options.RequestHashSecret...), now: options.Now,
+	}, nil
 }
 
 func (s *AdminService) CreateUser(ctx context.Context, principal Principal, input CreateUserInput, request MutationContext) (User, error) {
@@ -241,6 +254,7 @@ func (s *AdminService) ResetPassword(ctx context.Context, principal Principal, u
 		!validIdempotencyKey(idempotencyKey) || !validMutationContext(mutationContext) {
 		return PasswordResetResult{}, ErrInvalidAdminInput
 	}
+	requestHash := s.passwordResetRequestHash(principal.UserID, userID, expectedRevision, newPassword)
 	password := []byte(newPassword)
 	defer clear(password)
 	passwordHash, err := s.passwords.Hash(password)
@@ -249,7 +263,7 @@ func (s *AdminService) ResetPassword(ctx context.Context, principal Principal, u
 	}
 	result, err := s.store.ResetAdminUserPassword(ctx, ResetPasswordMutation{
 		Actor: principal, Context: mutationContext, UserID: userID, ExpectedRevision: expectedRevision,
-		PasswordHash: passwordHash, IdempotencyKey: idempotencyKey, OccurredAt: s.now(),
+		PasswordHash: passwordHash, RequestHash: requestHash, IdempotencyKey: idempotencyKey, OccurredAt: s.now(),
 	})
 	if err != nil {
 		return PasswordResetResult{}, fmt.Errorf("reset admin password: %w", err)
@@ -278,6 +292,7 @@ func (s *AdminService) ListSessions(ctx context.Context, principal Principal, qu
 	if !principal.Has(PermissionSessionsManage) {
 		return SessionPage{}, ErrAdminForbidden
 	}
+	query.CurrentSessionID = principal.SessionID
 	if query.Limit == 0 {
 		query.Limit = 50
 	}
@@ -335,8 +350,19 @@ func validUserListQuery(query UserListQuery) bool {
 func validSessionListQuery(query SessionListQuery) bool {
 	return query.Limit >= 1 && query.Limit <= 100 &&
 		(query.UserID == "" || validAdminText(query.UserID, 256)) &&
+		(query.Current == nil || validAdminText(query.CurrentSessionID, 256)) &&
 		(query.Cursor == "" || validAdminText(query.Cursor, 256)) &&
 		(query.Status == "" || query.Status == SessionStatusActive || query.Status == SessionStatusExpired || query.Status == SessionStatusRevoked)
+}
+
+func (s *AdminService) passwordResetRequestHash(actorUserID, userID string, expectedRevision uint64, password string) string {
+	mac := hmac.New(sha256.New, s.requestHashSecret)
+	writeHMACPart(mac, passwordResetRequestDomain)
+	writeHMACPart(mac, actorUserID)
+	writeHMACPart(mac, userID)
+	writeHMACPart(mac, strconv.FormatUint(expectedRevision, 10))
+	writeHMACPart(mac, password)
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func validRole(role Role) bool {

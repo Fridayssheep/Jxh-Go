@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,6 +19,15 @@ func TestAdminServiceAuthorizesBeforeStoreAndHasher(t *testing.T) {
 	}
 	if store.calls != 0 || passwords.hashCalls != 0 {
 		t.Fatalf("store calls=%d hash calls=%d", store.calls, passwords.hashCalls)
+	}
+}
+
+func TestPasswordResetRequestHashBindsPasswordAndRevision(t *testing.T) {
+	service := newAdminServiceFixture(t, &fakeAdminStore{}, &fakeAdminPasswords{})
+	first := service.passwordResetRequestHash("usr_actor", "usr_target", 2, "first-valid-password")
+	if first == service.passwordResetRequestHash("usr_actor", "usr_target", 2, "second-valid-password") ||
+		first == service.passwordResetRequestHash("usr_actor", "usr_target", 3, "first-valid-password") {
+		t.Fatal("password reset request hash did not bind all request fields")
 	}
 }
 
@@ -68,6 +78,9 @@ func TestResetPasswordUsesRevisionAndRevokesAllSessions(t *testing.T) {
 	if result.RevokedSessionCount != 2 || store.reset.ExpectedRevision != 2 || store.reset.IdempotencyKey != "idem-reset-1" || store.reset.PasswordHash != "new-phc" {
 		t.Fatalf("result=%+v mutation=%+v", result, store.reset)
 	}
+	if len(store.reset.RequestHash) != 64 || strings.Contains(store.reset.RequestHash, "new-valid-password") {
+		t.Fatalf("unsafe password reset request hash %q", store.reset.RequestHash)
+	}
 }
 
 func TestUpdateUserCopiesPatchAndPropagatesTypedConflict(t *testing.T) {
@@ -95,7 +108,7 @@ func TestListSessionsMarksOnlyCallingSessionCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Items[0].Current || !page.Items[1].Current || store.sessionQuery.Limit != 50 {
+	if page.Items[0].Current || !page.Items[1].Current || store.sessionQuery.Limit != 50 || store.sessionQuery.CurrentSessionID != "ses_2" {
 		t.Fatalf("page=%+v query=%+v", page, store.sessionQuery)
 	}
 }
@@ -118,7 +131,10 @@ func TestAdminServiceValidatesQueriesAndIdempotencyBeforeStore(t *testing.T) {
 
 func newAdminServiceFixture(t *testing.T, store AdminStore, passwords PasswordEngine) *AdminService {
 	t.Helper()
-	service, err := NewAdminService(AdminServiceOptions{Store: store, Passwords: passwords, Now: func() time.Time { return time.Unix(100, 0) }})
+	service, err := NewAdminService(AdminServiceOptions{
+		Store: store, Passwords: passwords, RequestHashSecret: []byte("0123456789abcdef0123456789abcdef"),
+		Now: func() time.Time { return time.Unix(100, 0) },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

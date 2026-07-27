@@ -13,6 +13,7 @@ const minimumMasterSecretBytes = 32
 type Secrets struct {
 	SessionToken    []byte
 	LoginLimiter    []byte
+	AdminMutation   []byte
 	SystemOperation []byte
 	CommandArgument []byte
 	TelemetryUser   []byte
@@ -25,6 +26,7 @@ func DeriveSecrets(master []byte) (Secrets, error) {
 	return Secrets{
 		SessionToken:    derive(master, "session-token"),
 		LoginLimiter:    derive(master, "login-limiter"),
+		AdminMutation:   derive(master, "admin-mutation"),
 		SystemOperation: derive(master, "system-operation"),
 		CommandArgument: derive(master, "command-argument"),
 		TelemetryUser:   derive(master, "telemetry-user"),

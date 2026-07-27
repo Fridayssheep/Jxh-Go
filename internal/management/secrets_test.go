@@ -16,7 +16,10 @@ func TestDeriveSecretsSeparatesPurposesAndCopiesOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	values := [][]byte{first.SessionToken, first.LoginLimiter, first.SystemOperation, first.CommandArgument, first.TelemetryUser}
+	values := [][]byte{
+		first.SessionToken, first.LoginLimiter, first.AdminMutation,
+		first.SystemOperation, first.CommandArgument, first.TelemetryUser,
+	}
 	for index, value := range values {
 		if len(value) != 32 {
 			t.Fatalf("derived secret %d length=%d", index, len(value))

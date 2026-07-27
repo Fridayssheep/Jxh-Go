@@ -67,6 +67,7 @@ func runWithDeps(
 
 	flags := flag.NewFlagSet("admin-bootstrap", flag.ContinueOnError)
 	flags.SetOutput(stdout)
+	flags.String("config", "config.yaml", "path to config file")
 	username := flags.String("username", "", "username for the first super administrator")
 	displayName := flags.String("display-name", "", "display name for the first super administrator")
 	passwordStdin := flags.Bool("password-stdin", false, "read the password from stdin")

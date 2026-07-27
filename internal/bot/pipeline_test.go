@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/settings"
+	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"github.com/zjutjh/napcat-sdk/message"
 )
 
@@ -189,6 +192,34 @@ func TestPipelineStopsAfterCustomCommandResolverFailure(t *testing.T) {
 	}
 }
 
+func TestPipelineRecordsOnlyStructuredTelemetry(t *testing.T) {
+	recorder := &telemetryRecorderFake{}
+	executor := &customCommandExecutorFake{
+		matched: true, handled: true, permission: customcommand.TriggerEveryone,
+		run: customcommand.Run{CommandID: "cmd_1", Result: customcommand.RunSuccess, Duration: time.Second},
+	}
+	pipeline := NewPipeline(Options{Sender: &botSenderFake{}, CustomCommands: executor, Telemetry: recorder})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{
+		GroupID: 123, UserID: 456, MessageID: 789, Text: "/hello private words",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.observations) != 2 {
+		t.Fatalf("observations=%+v", recorder.observations)
+	}
+	messageEvent, commandEvent := recorder.observations[0], recorder.observations[1]
+	if messageEvent.Kind != telemetry.EventGroupMessage || commandEvent.Kind != telemetry.EventCommandRun ||
+		commandEvent.CommandID != "cmd_1" || commandEvent.Result != telemetry.ResultSuccess ||
+		commandEvent.FeatureKey != string(settings.FeatureCustomCommand) {
+		t.Fatalf("observations=%+v", recorder.observations)
+	}
+	for _, observation := range recorder.observations {
+		if strings.Contains(fmt.Sprintf("%+v", observation), "private words") {
+			t.Fatalf("telemetry retained message body: %+v", observation)
+		}
+	}
+}
+
 type botSenderFake struct {
 	texts      []string
 	messages   []message.Chain
@@ -243,6 +274,7 @@ type customCommandExecutorFake struct {
 	probeCalls   int
 	executeCalls int
 	input        customcommand.ExecuteInput
+	run          customcommand.Run
 }
 
 func (f *customCommandExecutorFake) Probe(string, string) (customcommand.TriggerPermission, bool) {
@@ -253,7 +285,16 @@ func (f *customCommandExecutorFake) Probe(string, string) (customcommand.Trigger
 func (f *customCommandExecutorFake) Execute(_ context.Context, input customcommand.ExecuteInput) (customcommand.Run, bool, error) {
 	f.executeCalls++
 	f.input = input
-	return customcommand.Run{}, f.handled, nil
+	return f.run, f.handled, nil
+}
+
+type telemetryRecorderFake struct {
+	observations []telemetry.Observation
+}
+
+func (f *telemetryRecorderFake) Record(observation telemetry.Observation) bool {
+	f.observations = append(f.observations, observation)
+	return true
 }
 
 type maintenanceAllowlistFake struct {

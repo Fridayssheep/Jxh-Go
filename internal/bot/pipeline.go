@@ -17,6 +17,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/settings"
+	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"github.com/zjutjh/napcat-sdk/message"
 )
@@ -55,6 +56,7 @@ type Options struct {
 	Settings             *settings.Runtime
 	CustomCommands       CustomCommandExecutor
 	MaintenanceAllowlist MaintenanceAllowlist
+	Telemetry            TelemetryRecorder
 }
 
 type KnowledgeReloader interface {
@@ -73,6 +75,10 @@ type MaintenanceAllowlist interface {
 	Contains(ctx context.Context, groupID, userID int64) (bool, error)
 }
 
+type TelemetryRecorder interface {
+	Record(telemetry.Observation) bool
+}
+
 type Pipeline struct {
 	mu                   sync.RWMutex
 	knowledge            *knowledge.IndexRef
@@ -83,6 +89,7 @@ type Pipeline struct {
 	settings             *settings.Runtime
 	customCommands       CustomCommandExecutor
 	maintenanceAllowlist MaintenanceAllowlist
+	telemetry            TelemetryRecorder
 	commandRouter        *GroupCommandRouter
 }
 
@@ -114,6 +121,7 @@ func NewPipeline(opts Options) *Pipeline {
 		settings:             opts.Settings,
 		customCommands:       opts.CustomCommands,
 		maintenanceAllowlist: opts.MaintenanceAllowlist,
+		telemetry:            opts.Telemetry,
 		commandRouter:        NewGroupCommandRouter(opts),
 	}
 	pipeline.SetSender(opts.Sender)
@@ -125,6 +133,9 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	if sender == nil || msg.IsSelf {
 		return nil
 	}
+	p.recordTelemetry(telemetry.Observation{
+		Kind: telemetry.EventGroupMessage, GroupID: msg.GroupID, UserID: msg.UserID, Result: telemetry.ResultSuccess,
+	})
 	text := strings.TrimSpace(msg.Text)
 	handled, err := p.commandRouter.Handle(ctx, msg, sender)
 	if handled || err != nil {
@@ -137,12 +148,31 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 	}
 	if p.linkCleaner != nil && p.featureEnabled(msg.GroupID, settings.FeatureLinkCleaner) {
+		startedAt := time.Now()
 		cleaned, err := p.linkCleaner.CleanMessage(ctx, msg.Text, msg.Segments)
 		if err != nil {
 			log.Printf("clean tracked links failed: %v", err)
 		}
+		if err != nil && len(cleaned) == 0 {
+			p.recordTelemetry(telemetry.Observation{
+				Kind: telemetry.EventLinkClean, GroupID: msg.GroupID, UserID: msg.UserID,
+				FeatureKey: string(settings.FeatureLinkCleaner), Result: telemetry.ResultFailed, Duration: time.Since(startedAt),
+			})
+		}
 		if len(cleaned) > 0 {
-			return sender.SendGroupText(ctx, msg.GroupID, trackedLinkReplyPrefix+"\n"+strings.Join(cleaned, "\n"))
+			sendErr := sender.SendGroupText(ctx, msg.GroupID, trackedLinkReplyPrefix+"\n"+strings.Join(cleaned, "\n"))
+			result := telemetry.ResultSuccess
+			if err != nil {
+				result = telemetry.ResultPartial
+			}
+			if sendErr != nil {
+				result = telemetry.ResultFailed
+			}
+			p.recordTelemetry(telemetry.Observation{
+				Kind: telemetry.EventLinkClean, GroupID: msg.GroupID, UserID: msg.UserID,
+				FeatureKey: string(settings.FeatureLinkCleaner), Result: result, Duration: time.Since(startedAt),
+			})
+			return sendErr
 		}
 	}
 	if text == "" {
@@ -150,9 +180,20 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 	}
 	if p.knowledge != nil && p.featureEnabled(msg.GroupID, settings.FeatureKeywordReply) {
 		if entry, ok := p.knowledge.Lookup(text); ok {
+			startedAt := time.Now()
 			if err := sendKeywordReply(ctx, sender, msg.GroupID, entry.SourceKey, entry.Answer); err != nil {
+				p.recordTelemetry(telemetry.Observation{
+					Kind: telemetry.EventKeywordReply, GroupID: msg.GroupID, UserID: msg.UserID,
+					FeatureKey: string(settings.FeatureKeywordReply), Result: telemetry.ResultFailed,
+					Duration: time.Since(startedAt), KnowledgeKey: entry.ID,
+				})
 				return err
 			}
+			p.recordTelemetry(telemetry.Observation{
+				Kind: telemetry.EventKeywordReply, GroupID: msg.GroupID, UserID: msg.UserID,
+				FeatureKey: string(settings.FeatureKeywordReply), Result: telemetry.ResultSuccess,
+				Duration: time.Since(startedAt), KnowledgeKey: entry.ID,
+			})
 			if p.stats != nil {
 				if err := p.stats.RecordKeywordReply(ctx, entry.SourceKey, msg.GroupID); err != nil {
 					// 统计是附加能力，失败时不能阻断原本的关键词回复。
@@ -199,8 +240,42 @@ func (p *Pipeline) handleCustomCommand(ctx context.Context, msg GroupMessage, te
 			input.MaintenanceAllowlisted = allowed
 		}
 	}
-	_, handled, err := p.customCommands.Execute(ctx, input)
+	run, handled, err := p.customCommands.Execute(ctx, input)
+	if handled {
+		result := customCommandTelemetryResult(run.Result)
+		if err != nil {
+			result = telemetry.ResultFailed
+		}
+		p.recordTelemetry(telemetry.Observation{
+			Kind: telemetry.EventCommandRun, GroupID: msg.GroupID, UserID: msg.UserID,
+			FeatureKey: string(settings.FeatureCustomCommand), Result: result,
+			Duration: run.Duration, CommandID: run.CommandID,
+		})
+	}
 	return handled, err
+}
+
+func customCommandTelemetryResult(result customcommand.RunResult) telemetry.Result {
+	switch result {
+	case customcommand.RunSuccess:
+		return telemetry.ResultSuccess
+	case customcommand.RunDenied:
+		return telemetry.ResultDenied
+	case customcommand.RunParseError:
+		return telemetry.ResultParseFailed
+	case customcommand.RunPartial:
+		return telemetry.ResultPartial
+	case customcommand.RunUnknown:
+		return telemetry.ResultUnknown
+	default:
+		return telemetry.ResultFailed
+	}
+}
+
+func (p *Pipeline) recordTelemetry(observation telemetry.Observation) {
+	if p.telemetry != nil {
+		p.telemetry.Record(observation)
+	}
 }
 
 func customCommandSenderRole(value string) (customcommand.SenderRole, bool) {
@@ -245,7 +320,15 @@ func (p *Pipeline) HandleGroupJoinRequest(ctx context.Context, record groupreque
 	if p.groupRequests == nil {
 		return fmt.Errorf("group request service is not initialized")
 	}
-	return p.groupRequests.Record(ctx, record)
+	err := p.groupRequests.Record(ctx, record)
+	result := telemetry.ResultSuccess
+	if err != nil {
+		result = telemetry.ResultFailed
+	}
+	p.recordTelemetry(telemetry.Observation{
+		Kind: telemetry.EventJoinRequest, GroupID: record.GroupID, UserID: record.UserID, Result: result,
+	})
+	return err
 }
 
 func (p *Pipeline) ReconcileGroupJoinRequests(ctx context.Context, records []grouprequest.Record) error {

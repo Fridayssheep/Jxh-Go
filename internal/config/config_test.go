@@ -27,6 +27,9 @@ func TestDefaultIncludesAdminAndDatabasePool(t *testing.T) {
 	if cfg.Admin.MaxRequestBodyBytes != 1<<20 {
 		t.Fatalf("max request body = %d, want %d", cfg.Admin.MaxRequestBodyBytes, 1<<20)
 	}
+	if cfg.Admin.MaxConcurrentRequests != 128 {
+		t.Fatalf("max concurrent requests = %d, want 128", cfg.Admin.MaxConcurrentRequests)
+	}
 	if cfg.Database.MaxOpenConns != 20 || cfg.Database.MaxIdleConns != 10 {
 		t.Fatalf("unexpected database pool defaults: %+v", cfg.Database)
 	}
@@ -45,6 +48,7 @@ func TestLoadAppliesAdminAndDatabaseEnvironment(t *testing.T) {
 	t.Setenv("JXH_ADMIN_COOKIE_SECURE", "false")
 	t.Setenv("JXH_ADMIN_TRUSTED_PROXIES", "127.0.0.1/32, 10.0.0.0/8")
 	t.Setenv("JXH_ADMIN_SESSION_TTL_SECONDS", "7200")
+	t.Setenv("JXH_ADMIN_MAX_CONCURRENT_REQUESTS", "17")
 	t.Setenv("JXH_DATABASE_MAX_OPEN_CONNS", "31")
 	t.Setenv("JXH_DATABASE_PING_TIMEOUT_SECONDS", "9")
 
@@ -63,6 +67,9 @@ func TestLoadAppliesAdminAndDatabaseEnvironment(t *testing.T) {
 	}
 	if cfg.Admin.SessionTTLSeconds != 7200 {
 		t.Fatalf("session ttl = %d, want 7200", cfg.Admin.SessionTTLSeconds)
+	}
+	if cfg.Admin.MaxConcurrentRequests != 17 {
+		t.Fatalf("max concurrent requests = %d, want 17", cfg.Admin.MaxConcurrentRequests)
 	}
 	if cfg.Database.MaxOpenConns != 31 || cfg.Database.PingTimeoutSeconds != 9 {
 		t.Fatalf("max open conns/ping timeout = %d/%d", cfg.Database.MaxOpenConns, cfg.Database.PingTimeoutSeconds)
@@ -102,6 +109,7 @@ func TestLoadRedactsInvalidAdminEnvironmentValue(t *testing.T) {
 
 func TestLoadNormalizesNonPositiveRuntimeLimits(t *testing.T) {
 	t.Setenv("JXH_ADMIN_SESSION_TTL_SECONDS", "0")
+	t.Setenv("JXH_ADMIN_MAX_CONCURRENT_REQUESTS", "-1")
 	t.Setenv("JXH_DATABASE_MAX_OPEN_CONNS", "-1")
 	t.Setenv("JXH_DATABASE_MAX_IDLE_CONNS", "0")
 
@@ -111,6 +119,9 @@ func TestLoadNormalizesNonPositiveRuntimeLimits(t *testing.T) {
 	}
 	if cfg.Admin.SessionTTLSeconds != 12*60*60 {
 		t.Fatalf("session ttl = %d, want default", cfg.Admin.SessionTTLSeconds)
+	}
+	if cfg.Admin.MaxConcurrentRequests != 128 {
+		t.Fatalf("max concurrent requests = %d, want default", cfg.Admin.MaxConcurrentRequests)
 	}
 	if cfg.Database.MaxOpenConns != 20 {
 		t.Fatalf("max open conns = %d, want default", cfg.Database.MaxOpenConns)

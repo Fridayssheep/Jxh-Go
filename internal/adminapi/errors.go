@@ -16,6 +16,7 @@ const (
 	CodeUnsupportedMediaType = "unsupported_media_type"
 	CodeInternal             = "internal_error"
 	CodeRateLimited          = "rate_limited"
+	CodeServerBusy           = "server_busy"
 )
 
 type Error struct {

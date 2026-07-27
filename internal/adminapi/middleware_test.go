@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zjutjh/jxh-go/internal/auth"
 )
@@ -76,6 +77,64 @@ func TestAdminMiddlewareRejectsOversizedAndWrongContentType(t *testing.T) {
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assertErrorCode(t, response, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType)
+}
+
+func TestAdminMiddlewareRejectsExcessConcurrencyWithoutBlocking(t *testing.T) {
+	router, err := NewRouter(MiddlewareOptions{
+		PublicOrigin: "https://manager.example", MaxBodyBytes: 64, MaxConcurrentRequests: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	if err := router.HandleFunc(http.MethodGet, "/limited", RouteOptions{Public: true}, func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDone := make(chan int, 1)
+	go func() {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/limited", nil))
+		firstDone <- response.Code
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not reach handler")
+	}
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/limited", nil))
+	assertErrorCode(t, response, http.StatusServiceUnavailable, CodeServerBusy)
+	if response.Header().Get("Retry-After") != "1" || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("headers=%v", response.Header())
+	}
+	var envelope ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || !envelope.Error.Retryable {
+		t.Fatalf("busy response=%+v error=%v", envelope, err)
+	}
+
+	close(release)
+	select {
+	case status := <-firstDone:
+		if status != http.StatusNoContent {
+			t.Fatalf("first request status=%d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete after release")
+	}
 }
 
 func TestAdminMiddlewareUsesTrustedProxyChain(t *testing.T) {

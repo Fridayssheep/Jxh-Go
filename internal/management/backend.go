@@ -240,7 +240,9 @@ func NewBackend(options Options) (*Backend, error) {
 	router, err := adminapi.NewManagementRouter(adminapi.ManagementOptions{
 		Middleware: adminapi.MiddlewareOptions{
 			PublicOrigin: options.Config.Admin.PublicOrigin, TrustedProxies: options.Config.Admin.TrustedProxies,
-			MaxBodyBytes: options.Config.Admin.MaxRequestBodyBytes, Random: random, Logger: options.Logger,
+			MaxBodyBytes:          options.Config.Admin.MaxRequestBodyBytes,
+			MaxConcurrentRequests: options.Config.Admin.MaxConcurrentRequests,
+			Random:                random, Logger: options.Logger,
 		},
 		CookieSecure: options.Config.Admin.CookieSecure,
 		Auth:         authService, Users: adminService, Audit: auditService, Overview: overviewService,

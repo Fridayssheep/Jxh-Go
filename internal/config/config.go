@@ -40,6 +40,7 @@ type AdminConfig struct {
 	IdleTimeoutSeconds        int      `yaml:"idle_timeout_seconds"`
 	ShutdownTimeoutSeconds    int      `yaml:"shutdown_timeout_seconds"`
 	MaxRequestBodyBytes       int64    `yaml:"max_request_body_bytes"`
+	MaxConcurrentRequests     int      `yaml:"max_concurrent_requests"`
 }
 
 type OneBotConfig struct {
@@ -130,6 +131,7 @@ func Default() Config {
 			IdleTimeoutSeconds:        60,
 			ShutdownTimeoutSeconds:    10,
 			MaxRequestBodyBytes:       1 << 20,
+			MaxConcurrentRequests:     128,
 		},
 		OneBot: OneBotConfig{
 			WSURL:                "ws://127.0.0.1:3001",
@@ -232,6 +234,7 @@ func applyEnv(cfg *Config) error {
 		{"JXH_ADMIN_WRITE_TIMEOUT_SECONDS", func(v int) { cfg.Admin.WriteTimeoutSeconds = v }},
 		{"JXH_ADMIN_IDLE_TIMEOUT_SECONDS", func(v int) { cfg.Admin.IdleTimeoutSeconds = v }},
 		{"JXH_ADMIN_SHUTDOWN_TIMEOUT_SECONDS", func(v int) { cfg.Admin.ShutdownTimeoutSeconds = v }},
+		{"JXH_ADMIN_MAX_CONCURRENT_REQUESTS", func(v int) { cfg.Admin.MaxConcurrentRequests = v }},
 	}
 	for _, item := range adminInts {
 		if err := overrideInt(item.key, item.set); err != nil {
@@ -318,6 +321,9 @@ func normalize(cfg *Config) {
 	}
 	if cfg.Admin.MaxRequestBodyBytes <= 0 {
 		cfg.Admin.MaxRequestBodyBytes = defaults.Admin.MaxRequestBodyBytes
+	}
+	if cfg.Admin.MaxConcurrentRequests <= 0 {
+		cfg.Admin.MaxConcurrentRequests = defaults.Admin.MaxConcurrentRequests
 	}
 	if cfg.Database.MaxOpenConns <= 0 {
 		cfg.Database.MaxOpenConns = defaults.Database.MaxOpenConns

@@ -31,6 +31,9 @@ admin:
   shutdown_timeout_seconds: 10
   # 单个 JSON 请求体上限，单位字节；JXH_ADMIN_MAX_REQUEST_BODY_BYTES 可覆盖，非正值恢复为 1 MiB。
   max_request_body_bytes: 1048576
+  # 同时处理的管理请求上限；超出时立即返回可重试的 503，不阻塞 Bot 事件处理。
+  # JXH_ADMIN_MAX_CONCURRENT_REQUESTS 可覆盖，非正值恢复为 128。
+  max_concurrent_requests: 128
 
 onebot:
   # NapCat OneBot 11 正向 WebSocket 地址。

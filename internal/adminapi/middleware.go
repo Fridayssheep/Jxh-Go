@@ -20,6 +20,8 @@ import (
 
 const SessionCookieName = "jxh_admin_session"
 
+const defaultMaxConcurrentRequests = 128
+
 type Authenticator interface {
 	Authenticate(ctx context.Context, credential string) (auth.AuthContext, error)
 }
@@ -29,18 +31,20 @@ type ReplacementAuthenticator interface {
 }
 
 type MiddlewareOptions struct {
-	PublicOrigin   string
-	TrustedProxies []string
-	MaxBodyBytes   int64
-	Random         io.Reader
-	Logger         *log.Logger
-	Authenticator  Authenticator
+	PublicOrigin          string
+	TrustedProxies        []string
+	MaxBodyBytes          int64
+	MaxConcurrentRequests int
+	Random                io.Reader
+	Logger                *log.Logger
+	Authenticator         Authenticator
 }
 
 type middleware struct {
 	publicOrigin  string
 	trusted       []netip.Prefix
 	maxBodyBytes  int64
+	requestSlots  chan struct{}
 	random        io.Reader
 	logger        *log.Logger
 	authenticator Authenticator
@@ -58,6 +62,12 @@ func newMiddleware(options MiddlewareOptions) (*middleware, error) {
 	if options.MaxBodyBytes <= 0 {
 		return nil, fmt.Errorf("admin max body bytes must be positive")
 	}
+	if options.MaxConcurrentRequests == 0 {
+		options.MaxConcurrentRequests = defaultMaxConcurrentRequests
+	}
+	if options.MaxConcurrentRequests < 0 {
+		return nil, fmt.Errorf("admin max concurrent requests must be positive")
+	}
 	if options.Random == nil {
 		options.Random = rand.Reader
 	}
@@ -66,12 +76,26 @@ func newMiddleware(options MiddlewareOptions) (*middleware, error) {
 	}
 	return &middleware{
 		publicOrigin: origin, trusted: trusted, maxBodyBytes: options.MaxBodyBytes,
-		random: options.Random, logger: options.Logger, authenticator: options.Authenticator,
+		requestSlots: make(chan struct{}, options.MaxConcurrentRequests),
+		random:       options.Random, logger: options.Logger, authenticator: options.Authenticator,
 	}, nil
 }
 
 func (m *middleware) base(next http.Handler) http.Handler {
-	return m.recoverPanic(m.requestID(m.securityHeaders(m.bodyBoundary(m.clientIP(next)))))
+	return m.recoverPanic(m.requestID(m.securityHeaders(m.limitConcurrency(m.bodyBoundary(m.clientIP(next))))))
+}
+
+func (m *middleware) limitConcurrency(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case m.requestSlots <- struct{}{}:
+			defer func() { <-m.requestSlots }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeAPIError(w, r, http.StatusServiceUnavailable, CodeServerBusy, "管理服务当前繁忙", nil, true)
+		}
+	})
 }
 
 func (m *middleware) route(options RouteOptions, next http.Handler) http.Handler {

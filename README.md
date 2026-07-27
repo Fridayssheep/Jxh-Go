@@ -47,6 +47,7 @@ cp config.example.yaml config.yaml
 - `database.password`：默认匹配 compose 的 `jxh_password`。
 - `ai.api_key`、`ai.model`：配置完整且 `ai.enabled` 开启时才启用 `/ai`。
 - `admin.public_origin`、`admin.session_secret`：管理面板的唯一浏览器 Origin 和至少 32 字节随机主密钥；生产环境必须使用 HTTPS 并保持 `cookie_secure: true`。
+- `admin.max_concurrent_requests`：管理 API 同时处理的请求上限，超限立即返回可重试的 503，避免管理流量占满 Bot 进程资源。
 
 ### 3. 启动全部服务
 

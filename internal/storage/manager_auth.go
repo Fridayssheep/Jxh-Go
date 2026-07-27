@@ -529,7 +529,8 @@ func (s *Store) ListAdminUsers(ctx context.Context, query auth.UserListQuery) (a
 	request := db.Model(&managerAdminUser{}).Select(managerUserPublicColumns()).Where("deleted_at IS NULL")
 	if value := strings.TrimSpace(query.Query); value != "" {
 		pattern := "%" + escapeManagerAuthLike(strings.ToLower(value)) + "%"
-		request = request.Where("(LOWER(username) LIKE ? ESCAPE '=' OR LOWER(display_name) LIKE ? ESCAPE '=')", pattern, pattern)
+		request = request.Where("(LOWER(username) LIKE ? ESCAPE '=' OR LOWER(display_name) LIKE ? ESCAPE '=' OR qq_user_id = ?)",
+			pattern, pattern, value)
 	}
 	if query.Role != "" {
 		request = request.Where("role = ?", query.Role)
@@ -542,10 +543,10 @@ func (s *Store) ListAdminUsers(ctx context.Context, query auth.UserListQuery) (a
 		if err != nil {
 			return auth.UserPage{}, auth.ErrInvalidAdminInput
 		}
-		request = request.Where("(updated_at < ? OR (updated_at = ? AND user_id < ?))", cursor.time(), cursor.time(), cursor.ID)
+		request = request.Where("(created_at < ? OR (created_at = ? AND user_id < ?))", cursor.time(), cursor.time(), cursor.ID)
 	}
 	var rows []managerAdminUser
-	if err := request.Order("updated_at DESC").Order("user_id DESC").Limit(query.Limit + 1).Find(&rows).Error; err != nil {
+	if err := request.Order("created_at DESC").Order("user_id DESC").Limit(query.Limit + 1).Find(&rows).Error; err != nil {
 		return auth.UserPage{}, managerFailure("list admin users", err)
 	}
 	hasMore := len(rows) > query.Limit
@@ -557,7 +558,7 @@ func (s *Store) ListAdminUsers(ctx context.Context, query auth.UserListQuery) (a
 		page.Items[index] = userFromManagerRow(rows[index])
 	}
 	if hasMore && len(rows) > 0 {
-		page.NextCursor, err = encodeManagerAuthCursor("users", rows[len(rows)-1].UpdatedAt, rows[len(rows)-1].UserID, fingerprint)
+		page.NextCursor, err = encodeManagerAuthCursor("users", rows[len(rows)-1].CreatedAt, rows[len(rows)-1].UserID, fingerprint)
 		if err != nil {
 			return auth.UserPage{}, err
 		}
@@ -816,12 +817,19 @@ func (s *Store) revokeManagerSessions(ctx context.Context, mutation auth.RevokeS
 }
 
 func (s *Store) ListAdminSessions(ctx context.Context, query auth.SessionListQuery) (auth.SessionPage, error) {
-	if query.CurrentSessionID != "" && len(query.CurrentSessionID) > 64 {
+	if (query.CurrentSessionID != "" && len(query.CurrentSessionID) > 64) || query.AsOf.IsZero() {
 		return auth.SessionPage{}, auth.ErrInvalidAdminInput
 	}
 	db, err := s.managerDB(ctx)
 	if err != nil {
 		return auth.SessionPage{}, err
+	}
+	asOf := normalizedManagerTime(query.AsOf)
+	expired := db.Model(&managerAdminSession{}).
+		Where("status = ? AND (expires_at <= ? OR absolute_expires_at <= ?)", auth.SessionStatusActive, asOf, asOf).
+		Update("status", auth.SessionStatusExpired)
+	if expired.Error != nil {
+		return auth.SessionPage{}, managerFailure("expire admin sessions", expired.Error)
 	}
 	fingerprint := managerSessionFilterFingerprint(query)
 	request := db.Model(&managerAdminSession{}).Select(managerSessionPublicColumns())

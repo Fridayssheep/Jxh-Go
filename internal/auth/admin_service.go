@@ -69,6 +69,7 @@ type SessionListQuery struct {
 	Status           SessionStatus
 	Current          *bool
 	CurrentSessionID string
+	AsOf             time.Time
 	Cursor           string
 	Limit            int
 }
@@ -299,6 +300,7 @@ func (s *AdminService) ListSessions(ctx context.Context, principal Principal, qu
 	if !validSessionListQuery(query) {
 		return SessionPage{}, ErrInvalidAdminInput
 	}
+	query.AsOf = s.now().UTC()
 	page, err := s.store.ListAdminSessions(ctx, query)
 	if err != nil {
 		return SessionPage{}, fmt.Errorf("list admin sessions: %w", err)

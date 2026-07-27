@@ -111,6 +111,9 @@ func TestListSessionsMarksOnlyCallingSessionCurrent(t *testing.T) {
 	if page.Items[0].Current || !page.Items[1].Current || store.sessionQuery.Limit != 50 || store.sessionQuery.CurrentSessionID != "ses_2" {
 		t.Fatalf("page=%+v query=%+v", page, store.sessionQuery)
 	}
+	if !store.sessionQuery.AsOf.Equal(time.Unix(100, 0)) {
+		t.Fatalf("session query as-of = %v", store.sessionQuery.AsOf)
+	}
 }
 
 func TestAdminServiceValidatesQueriesAndIdempotencyBeforeStore(t *testing.T) {

@@ -293,7 +293,7 @@ VALUES (?, ?, 'system', 'test.action', 'admin_user', ?, 'success', ?, 'system', 
 		t.Fatalf("user pagination order = %s", got)
 	}
 
-	query := auth.SessionListQuery{CurrentSessionID: "ses_c", Limit: 2}
+	query := auth.SessionListQuery{CurrentSessionID: "ses_c", AsOf: now, Limit: 2}
 	first, err := store.ListAdminSessions(t.Context(), query)
 	if err != nil {
 		t.Fatal(err)
@@ -315,12 +315,12 @@ VALUES (?, ?, 'system', 'test.action', 'admin_user', ?, 'success', ?, 'system', 
 		t.Fatalf("session cursor with changed caller error = %v", err)
 	}
 	current := true
-	currentPage, err := store.ListAdminSessions(t.Context(), auth.SessionListQuery{Current: &current, CurrentSessionID: "ses_c", Limit: 10})
+	currentPage, err := store.ListAdminSessions(t.Context(), auth.SessionListQuery{Current: &current, CurrentSessionID: "ses_c", AsOf: now, Limit: 10})
 	if err != nil || len(currentPage.Items) != 1 || currentPage.Items[0].ID != "ses_c" || !currentPage.Items[0].Current {
 		t.Fatalf("current session page = %+v, error = %v", currentPage, err)
 	}
 	current = false
-	otherPage, err := store.ListAdminSessions(t.Context(), auth.SessionListQuery{Current: &current, CurrentSessionID: "ses_c", Limit: 10})
+	otherPage, err := store.ListAdminSessions(t.Context(), auth.SessionListQuery{Current: &current, CurrentSessionID: "ses_c", AsOf: now, Limit: 10})
 	if err != nil || len(otherPage.Items) != 3 {
 		t.Fatalf("non-current session page = %+v, error = %v", otherPage, err)
 	}
@@ -329,6 +329,83 @@ VALUES (?, ?, 'system', 'test.action', 'admin_user', ?, 'success', ?, 'system', 
 	if got := strings.Join(auditIDs, ","); got != "aud_4,aud_3,aud_2,aud_1" {
 		t.Fatalf("audit pagination order = %s", got)
 	}
+}
+
+func TestManagerAuthMySQLUserPaginationSurvivesUpdatesAndMatchesExactQQ(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	createdAt := time.Date(2026, time.July, 28, 7, 30, 0, 0, time.UTC)
+	for _, suffix := range []string{"1", "2", "3", "4"} {
+		insertManagerAuthTestUser(t, sqlDB, "usr_"+suffix, "observer-"+suffix, auth.RoleObserver, createdAt)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), "UPDATE admin_users SET qq_user_id = ? WHERE user_id = ?", "123456789", "usr_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	query := auth.UserListQuery{Role: auth.RoleObserver, Limit: 2}
+	first, err := store.ListAdminUsers(t.Context(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 2 || first.Items[0].ID != "usr_4" || first.Items[1].ID != "usr_3" || !first.HasMore {
+		t.Fatalf("first user page = %+v", first)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), "UPDATE admin_users SET updated_at = ? WHERE user_id = ?", createdAt.Add(24*time.Hour), "usr_2"); err != nil {
+		t.Fatal(err)
+	}
+	query.Cursor = first.NextCursor
+	second, err := store.ListAdminUsers(t.Context(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 2 || second.Items[0].ID != "usr_2" || second.Items[1].ID != "usr_1" || second.HasMore {
+		t.Fatalf("second user page after update = %+v", second)
+	}
+
+	matched, err := store.ListAdminUsers(t.Context(), auth.UserListQuery{Query: "123456789", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched.Items) != 1 || matched.Items[0].ID != "usr_1" {
+		t.Fatalf("exact QQ user match = %+v", matched)
+	}
+}
+
+func TestManagerAuthMySQLMaterializesAndFiltersExpiredSessions(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	asOf := time.Date(2026, time.July, 28, 8, 0, 0, 0, time.UTC)
+	insertManagerAuthTestUser(t, sqlDB, "usr_root", "root-admin", auth.RoleSuperAdmin, asOf.Add(-time.Hour))
+	for _, sessionID := range []string{"ses_active", "ses_idle_expired", "ses_absolute_expired", "ses_revoked"} {
+		insertManagerAuthTestSession(t, sqlDB, sessionID, "usr_root", 0, asOf.Add(-time.Hour))
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `UPDATE admin_sessions SET expires_at = ?, absolute_expires_at = ? WHERE session_id = ?`,
+		asOf.Add(time.Hour), asOf.Add(2*time.Hour), "ses_active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `UPDATE admin_sessions SET expires_at = ?, absolute_expires_at = ? WHERE session_id = ?`,
+		asOf.Add(-time.Millisecond), asOf.Add(time.Hour), "ses_idle_expired"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `UPDATE admin_sessions SET expires_at = ?, absolute_expires_at = ? WHERE session_id = ?`,
+		asOf.Add(time.Hour), asOf.Add(-time.Millisecond), "ses_absolute_expired"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `UPDATE admin_sessions SET status = 'revoked', revoked_at = ? WHERE session_id = ?`,
+		asOf.Add(-time.Minute), "ses_revoked"); err != nil {
+		t.Fatal(err)
+	}
+
+	expired, err := store.ListAdminSessions(t.Context(), auth.SessionListQuery{Status: auth.SessionStatusExpired, AsOf: asOf, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired.Items) != 2 || expired.Items[0].Status != auth.SessionStatusExpired || expired.Items[1].Status != auth.SessionStatusExpired {
+		t.Fatalf("expired session page = %+v", expired)
+	}
+	active, err := store.ListAdminSessions(t.Context(), auth.SessionListQuery{Status: auth.SessionStatusActive, AsOf: asOf, Limit: 10})
+	if err != nil || len(active.Items) != 1 || active.Items[0].ID != "ses_active" {
+		t.Fatalf("active session page = %+v, error = %v", active, err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_sessions WHERE status = 'expired'", 2)
 }
 
 func TestManagerAuthMySQLSessionReplacementChains(t *testing.T) {

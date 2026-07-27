@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zjutjh/jxh-go/internal/flashfile"
+	"github.com/zjutjh/jxh-go/internal/joinrequests"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
 )
@@ -309,6 +310,43 @@ func (g *Gateway) SetGroupAddRequest(ctx context.Context, flag string, approve b
 		return safeOperationError("set_group_add_request", err)
 	}
 	return nil
+}
+
+func (g *Gateway) JoinRequestDecisionAvailable() bool {
+	return g.Snapshot().Connected
+}
+
+func (g *Gateway) DecideJoinRequest(ctx context.Context, flag string, approve bool, reason string) joinrequests.ExternalResult {
+	return classifyJoinDecisionError(g.SetGroupAddRequest(ctx, flag, approve, reason))
+}
+
+func classifyJoinDecisionError(err error) joinrequests.ExternalResult {
+	if err == nil {
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalConfirmed}
+	}
+	if errors.Is(err, ErrUnavailable) {
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnavailable, ErrorCode: "dependency_unavailable"}
+	}
+	var operationError *OperationError
+	if !errors.As(err, &operationError) {
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalFailed, ErrorCode: "invalid_request"}
+	}
+	switch operationError.Code {
+	case FailureUpstreamRejected:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalFailed, ErrorCode: "upstream_rejected"}
+	case FailureTimeout:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "upstream_timeout"}
+	case FailureDisconnected:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "upstream_disconnected"}
+	case FailureTransport:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "transport_error"}
+	case FailureInvalidResponse:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "invalid_response"}
+	case FailureCanceled:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "request_canceled"}
+	default:
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "upstream_error"}
+	}
 }
 
 func positiveInteger(value float64, field string) (int64, error) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/joinrequests"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
 )
@@ -17,6 +18,30 @@ import (
 type gatewayCall struct {
 	action string
 	params any
+}
+
+func TestClassifyJoinDecisionErrorPreservesUnknownOutcomes(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		outcome joinrequests.ExternalOutcome
+		code    string
+	}{
+		{name: "confirmed", outcome: joinrequests.ExternalConfirmed},
+		{name: "unavailable", err: ErrUnavailable, outcome: joinrequests.ExternalUnavailable, code: "dependency_unavailable"},
+		{name: "rejected", err: operationFailure("set_group_add_request", FailureUpstreamRejected), outcome: joinrequests.ExternalFailed, code: "upstream_rejected"},
+		{name: "timeout", err: operationFailure("set_group_add_request", FailureTimeout), outcome: joinrequests.ExternalUnknown, code: "upstream_timeout"},
+		{name: "disconnected", err: operationFailure("set_group_add_request", FailureDisconnected), outcome: joinrequests.ExternalUnknown, code: "upstream_disconnected"},
+		{name: "invalid response", err: operationFailure("set_group_add_request", FailureInvalidResponse), outcome: joinrequests.ExternalUnknown, code: "invalid_response"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := classifyJoinDecisionError(test.err)
+			if result.Outcome != test.outcome || result.ErrorCode != test.code {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
 }
 
 type fakeGatewayCaller struct {

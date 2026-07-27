@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -434,7 +435,25 @@ func validResource(resource *Resource) bool {
 	default:
 		return false
 	}
-	return resource.ID == "" || validOpaqueValue(resource.ID, 256)
+	if resource.ID == "" {
+		return true
+	}
+	if resource.Type == ResourceJoinRequest {
+		return validJoinRequestID(resource.ID)
+	}
+	return validOpaqueValue(resource.ID, 256)
+}
+
+func validJoinRequestID(value string) bool {
+	if !utf8.ValidString(value) || utf8.RuneCountInString(value) > 512 {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return value != ""
 }
 
 func validReason(reason string) bool {

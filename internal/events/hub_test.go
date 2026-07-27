@@ -3,6 +3,7 @@ package events
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -182,6 +183,26 @@ func TestHubSerializesInjectedIDSource(t *testing.T) {
 		}()
 	}
 	workers.Wait()
+}
+
+func TestHubAllowsExactJoinRequestFlagsWithoutRelaxingOtherResources(t *testing.T) {
+	hub := newTestHub(t, Options{Capacity: 8, Retention: time.Hour, SubscriberBuffer: 2})
+	flag := strings.Repeat("申请/", 100)
+	if _, err := hub.Publish(Draft{
+		Type: EventJoinRequestUpdated, Resource: &Resource{Type: ResourceJoinRequest, ID: flag, Version: 2}, Reason: "updated",
+	}); err != nil {
+		t.Fatalf("publish exact join request flag: %v", err)
+	}
+	if _, err := hub.Publish(Draft{
+		Type: EventGroupUpdated, Resource: &Resource{Type: ResourceGroup, ID: flag, Version: 2}, Reason: "updated",
+	}); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("non-join resource error = %v", err)
+	}
+	if _, err := hub.Publish(Draft{
+		Type: EventJoinRequestUpdated, Resource: &Resource{Type: ResourceJoinRequest, ID: "unsafe\nflag", Version: 2}, Reason: "updated",
+	}); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("control character error = %v", err)
+	}
 }
 
 func newTestHub(t *testing.T, options Options) *Hub {

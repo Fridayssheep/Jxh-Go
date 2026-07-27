@@ -89,6 +89,37 @@ func TestRecordRejectsInvalidOrFreeFormLikeFields(t *testing.T) {
 	if service.Record(Observation{Kind: EventCommandRun, GroupID: 1, Result: ResultSuccess, CommandID: strings.Repeat("x", 257)}) {
 		t.Fatal("Record() accepted oversized identifier")
 	}
+	if service.Record(Observation{Kind: EventCommandRun, GroupID: 1, Result: ResultSuccess, CommandID: " secret text "}) {
+		t.Fatal("Record() accepted free-form identifier")
+	}
+	if service.Record(Observation{Kind: EventGroupMessage, GroupID: 1, Result: ResultSuccess, FeatureKey: "unknown_feature"}) {
+		t.Fatal("Record() accepted unknown feature")
+	}
+	if service.Record(Observation{Kind: EventGroupMessage, GroupID: 1, Result: ResultSuccess, KnowledgeKey: "entry_1"}) {
+		t.Fatal("Record() accepted incompatible knowledge key")
+	}
+}
+
+func TestRecordRejectsEventsAfterShutdownAndCountsDiscardedOnce(t *testing.T) {
+	store := &storeFake{err: errors.New("unavailable")}
+	service := newTestService(t, store, 4, 4)
+	if !service.Record(Observation{Kind: EventGroupMessage, GroupID: 1, Result: ResultSuccess}) {
+		t.Fatal("initial Record() = false")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := service.Run(ctx); !errors.Is(err, ErrFlushFailed) {
+		t.Fatalf("Run() error=%v", err)
+	}
+	if service.Record(Observation{Kind: EventGroupMessage, GroupID: 1, Result: ResultSuccess}) {
+		t.Fatal("Record() accepted event after shutdown")
+	}
+	if service.Dropped() != 2 || service.Pending() != 0 {
+		t.Fatalf("dropped=%d pending=%d", service.Dropped(), service.Pending())
+	}
+	if err := service.Run(t.Context()); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second Run() error=%v", err)
+	}
 }
 
 func newTestService(t *testing.T, store Store, capacity, batchSize int) *Service {

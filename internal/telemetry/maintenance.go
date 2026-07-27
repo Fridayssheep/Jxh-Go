@@ -67,6 +67,7 @@ func (m *Maintenance) runOnce(ctx context.Context) {
 	completedBefore := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, m.location).UTC()
 	if err := m.store.AggregateTelemetryDaily(ctx, completedBefore); err != nil {
 		m.logger.Printf("telemetry daily aggregation failed")
+		return
 	}
 	retentionCutoff := now.AddDate(0, 0, -m.retentionDays).UTC()
 	if _, err := m.store.PurgeTelemetryEvents(ctx, retentionCutoff); err != nil {

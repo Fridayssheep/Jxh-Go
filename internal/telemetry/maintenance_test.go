@@ -29,7 +29,7 @@ func TestMaintenanceUsesCompletedLocalDayAndRetentionCutoff(t *testing.T) {
 	}
 }
 
-func TestMaintenanceStoreFailuresDoNotStopWorker(t *testing.T) {
+func TestMaintenanceAggregationFailureSkipsPurgeWithoutStoppingWorker(t *testing.T) {
 	store := &maintenanceStoreFake{err: errors.New("unavailable")}
 	maintenance, err := NewMaintenance(MaintenanceOptions{
 		Store: store, Location: time.UTC, RetentionDays: 7, Interval: time.Millisecond,
@@ -43,7 +43,7 @@ func TestMaintenanceStoreFailuresDoNotStopWorker(t *testing.T) {
 	if err := maintenance.Run(ctx); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if store.aggregateCalls < 2 || store.purgeCalls < 2 {
+	if store.aggregateCalls < 2 || store.purgeCalls != 0 {
 		t.Fatalf("calls = aggregate %d purge %d", store.aggregateCalls, store.purgeCalls)
 	}
 }

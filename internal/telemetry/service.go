@@ -11,6 +11,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -107,7 +108,10 @@ type Service struct {
 	now           func() time.Time
 	logger        *log.Logger
 	dropped       atomic.Uint64
+	buffered      atomic.Int64
 	running       atomic.Bool
+	acceptMu      sync.RWMutex
+	accepting     bool
 }
 
 func NewService(options Options) (*Service, error) {
@@ -123,7 +127,7 @@ func NewService(options Options) (*Service, error) {
 		store: options.Store, secret: append([]byte(nil), options.HMACSecret...),
 		queue: make(chan Event, options.Capacity), batchSize: options.BatchSize,
 		flushInterval: options.FlushInterval, flushTimeout: options.FlushTimeout,
-		now: options.Now, logger: options.Logger,
+		now: options.Now, logger: options.Logger, accepting: true,
 	}, nil
 }
 
@@ -132,6 +136,12 @@ func NewService(options Options) (*Service, error) {
 func (s *Service) Record(observation Observation) bool {
 	event, ok := s.eventFromObservation(observation)
 	if !ok {
+		s.dropped.Add(1)
+		return false
+	}
+	s.acceptMu.RLock()
+	defer s.acceptMu.RUnlock()
+	if !s.accepting {
 		s.dropped.Add(1)
 		return false
 	}
@@ -146,7 +156,7 @@ func (s *Service) Record(observation Observation) bool {
 
 func (s *Service) Dropped() uint64 { return s.dropped.Load() }
 
-func (s *Service) Pending() int { return len(s.queue) }
+func (s *Service) Pending() int { return len(s.queue) + int(s.buffered.Load()) }
 
 func (s *Service) Run(ctx context.Context) error {
 	if ctx == nil {
@@ -156,6 +166,12 @@ func (s *Service) Run(ctx context.Context) error {
 		return ErrAlreadyRunning
 	}
 	defer s.running.Store(false)
+	s.acceptMu.RLock()
+	accepting := s.accepting
+	s.acceptMu.RUnlock()
+	if !accepting {
+		return ErrAlreadyRunning
+	}
 
 	ticker := time.NewTicker(s.flushInterval)
 	defer ticker.Stop()
@@ -168,18 +184,22 @@ func (s *Service) Run(ctx context.Context) error {
 		select {
 		case event := <-input:
 			batch = append(batch, event)
+			s.buffered.Store(int64(len(batch)))
 			if len(batch) == s.batchSize {
 				if err := s.flush(ctx, batch); err == nil {
 					batch = batch[:0]
+					s.buffered.Store(0)
 				}
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
 				if err := s.flush(ctx, batch); err == nil {
 					batch = batch[:0]
+					s.buffered.Store(0)
 				}
 			}
 		case <-ctx.Done():
+			s.stopAccepting()
 			return s.flushOnShutdown(batch)
 		}
 	}
@@ -187,9 +207,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 func (s *Service) eventFromObservation(value Observation) (Event, bool) {
 	if !validKind(value.Kind) || !validResult(value.Result) || value.GroupID <= 0 || value.UserID < 0 ||
-		value.Duration < 0 || value.Duration > time.Hour || value.Count < 0 ||
-		!validBounded(value.FeatureKey, 64) || !validBounded(value.CommandID, 256) ||
-		!validBounded(value.KnowledgeKey, 256) {
+		value.Duration < 0 || value.Duration > time.Hour || value.Count < 0 || value.Count > 1_000_000_000 ||
+		!validFeatureKey(value.FeatureKey) || !validSafeKey(value.CommandID, 256) ||
+		!validSafeKey(value.KnowledgeKey, 256) || !validObservationShape(value) {
 		return Event{}, false
 	}
 	if value.OccurredAt.IsZero() {
@@ -227,6 +247,7 @@ func (s *Service) flush(ctx context.Context, batch []Event) error {
 
 func (s *Service) flushOnShutdown(batch []Event) error {
 	remaining := append([]Event(nil), batch...)
+	s.buffered.Store(int64(len(remaining)))
 	for {
 		for len(remaining) < s.batchSize {
 			select {
@@ -244,18 +265,62 @@ func (s *Service) flushOnShutdown(batch []Event) error {
 		err := s.flush(ctx, remaining)
 		cancel()
 		if err != nil {
-			s.dropped.Add(uint64(len(remaining) + len(s.queue)))
-			return err
+			discarded := len(remaining)
+			for {
+				select {
+				case <-s.queue:
+					discarded++
+				default:
+					s.dropped.Add(uint64(discarded))
+					s.buffered.Store(0)
+					return err
+				}
+			}
 		}
 		remaining = remaining[:0]
+		s.buffered.Store(0)
 		if len(s.queue) == 0 {
 			return nil
 		}
 	}
 }
 
-func validBounded(value string, maximum int) bool {
-	return utf8.ValidString(value) && utf8.RuneCountInString(strings.TrimSpace(value)) <= maximum
+func (s *Service) stopAccepting() {
+	s.acceptMu.Lock()
+	s.accepting = false
+	s.acceptMu.Unlock()
+}
+
+func validSafeKey(value string, maximum int) bool {
+	if !utf8.ValidString(value) || value != strings.TrimSpace(value) || utf8.RuneCountInString(value) > maximum {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '.' && character != '_' && character != ':' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validFeatureKey(value string) bool {
+	switch value {
+	case "", "keyword_reply", "ai_qa", "quote", "link_cleaner", "welcome", "custom_commands":
+		return true
+	default:
+		return false
+	}
+}
+
+func validObservationShape(value Observation) bool {
+	if value.CommandID != "" && value.Kind != EventCommandRun {
+		return false
+	}
+	if value.KnowledgeKey != "" && value.Kind != EventKeywordReply && value.Kind != EventAIRequest {
+		return false
+	}
+	return true
 }
 
 func validKind(value EventKind) bool {

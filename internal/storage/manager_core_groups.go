@@ -11,6 +11,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/audit"
 	"github.com/zjutjh/jxh-go/internal/groups"
+	"github.com/zjutjh/jxh-go/internal/joinrequests"
 	"github.com/zjutjh/jxh-go/internal/settings"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -264,6 +265,9 @@ func (s *Store) CompleteGroupSync(ctx context.Context, completion groups.Complet
 				if createErr := tx.Create(&model).Error; createErr != nil {
 					return createErr
 				}
+				if policyErr := ensureManagerJoinPolicy(tx, group.ID, completedAt); policyErr != nil {
+					return policyErr
+				}
 				result.AddedCount++
 				continue
 			}
@@ -287,6 +291,9 @@ func (s *Store) CompleteGroupSync(ctx context.Context, completion groups.Complet
 			}
 			if update.RowsAffected != 1 {
 				return groups.ErrConflict
+			}
+			if policyErr := ensureManagerJoinPolicy(tx, group.ID, completedAt); policyErr != nil {
+				return policyErr
 			}
 		}
 		for _, prior := range existingModels {
@@ -334,6 +341,22 @@ func (s *Store) CompleteGroupSync(ctx context.Context, completion groups.Complet
 		return nil
 	})
 	return result, err
+}
+
+func ensureManagerJoinPolicy(tx *gorm.DB, groupID int64, createdAt time.Time) error {
+	requiredFields, err := json.Marshal(joinrequests.PolicyRequiredFields())
+	if err != nil {
+		return err
+	}
+	return tx.Exec(`INSERT INTO group_join_policies
+(group_id, enabled, mode, required_fields, auto_reject, revision,
+ updated_by_type, updated_by_user_id, updated_by_qq_user_id, updated_by_display_name, updated_by_role,
+ created_at, updated_at)
+VALUES (?, FALSE, ?, ?, FALSE, 1, ?, NULL, NULL, 'system', NULL, ?, ?)
+ON DUPLICATE KEY UPDATE group_id = group_join_policies.group_id`,
+		groupID, joinrequests.PolicyModeAIFieldsComplete, requiredFields, string(audit.ActorSystem),
+		createdAt.UTC(), createdAt.UTC(),
+	).Error
 }
 
 func (s *Store) FailGroupSync(ctx context.Context, failure groups.FailSync) error {

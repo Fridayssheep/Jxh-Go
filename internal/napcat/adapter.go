@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/bot"
@@ -80,22 +81,22 @@ const (
 )
 
 func (s Server) consume(ctx context.Context, client *napcatsdk.Client) (sessionErr error) {
-	sessionCtx, cancel := context.WithCancel(ctx)
+	session := newSessionWorkers(ctx)
 	generation := s.Gateway.Attach(client.API(), time.Now())
 	defer func() {
-		cancel()
+		session.Close()
 		s.Gateway.Detach(generation, sessionErr, time.Now())
 	}()
 	if s.Handler == nil {
 		return fmt.Errorf("napcat event handler is required")
 	}
-	go s.syncGroupJoinRequests(sessionCtx, s.Gateway)
+	session.Start(func(ctx context.Context) { s.syncGroupJoinRequests(ctx, s.Gateway) })
 	slots := make(chan struct{}, maxConcurrentEvents)
 	events := client.Events()
 	for {
 		select {
-		case <-sessionCtx.Done():
-			return sessionCtx.Err()
+		case <-session.Context().Done():
+			return session.Context().Err()
 		case ev, ok := <-events:
 			if !ok {
 				return fmt.Errorf("napcat event stream closed")
@@ -106,19 +107,48 @@ func (s Server) consume(ctx context.Context, client *napcatsdk.Client) (sessionE
 			// spawning unbounded goroutines.
 			select {
 			case slots <- struct{}{}:
-			case <-sessionCtx.Done():
-				return sessionCtx.Err()
+			case <-session.Context().Done():
+				return session.Context().Err()
 			}
-			go func(evt event.Event) {
+			eventValue := ev
+			session.Start(func(sessionCtx context.Context) {
 				defer func() { <-slots }()
 				// 事件处理链全程处理外部可控输入，未恢复的 panic 会终止整个进程。
 				defer safego.Recover("napcat event")
-				if err := s.handleEvent(sessionCtx, client, evt); err != nil {
+				if err := s.handleEvent(sessionCtx, client, eventValue); err != nil {
 					log.Printf("handle napcat event failed: %v", err)
 				}
-			}(ev)
+			})
 		}
 	}
+}
+
+type sessionWorkers struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	wait   sync.WaitGroup
+}
+
+func newSessionWorkers(parent context.Context) *sessionWorkers {
+	ctx, cancel := context.WithCancel(parent)
+	return &sessionWorkers{ctx: ctx, cancel: cancel}
+}
+
+func (s *sessionWorkers) Context() context.Context {
+	return s.ctx
+}
+
+func (s *sessionWorkers) Start(worker func(context.Context)) {
+	s.wait.Add(1)
+	go func() {
+		defer s.wait.Done()
+		worker(s.ctx)
+	}()
+}
+
+func (s *sessionWorkers) Close() {
+	s.cancel()
+	s.wait.Wait()
 }
 
 func (s Server) syncGroupJoinRequests(ctx context.Context, gateway *Gateway) {

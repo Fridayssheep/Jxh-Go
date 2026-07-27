@@ -130,6 +130,7 @@ func (s *Service) persistRun(ctx context.Context, run Run, startedAt time.Time) 
 	if err != nil {
 		return Run{}, true, fmt.Errorf("record custom command run: %w", err)
 	}
+	s.publishRunCompleted(stored)
 	return cloneRun(stored), true, nil
 }
 

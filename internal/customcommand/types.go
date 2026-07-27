@@ -7,6 +7,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/audit"
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/events"
 )
 
 var (
@@ -314,6 +315,10 @@ type Gateway interface {
 	Mention(context.Context, string, string) error
 	MuteMember(context.Context, string, string, time.Duration) error
 	SendGroupText(context.Context, string, string) error
+}
+
+type EventPublisher interface {
+	Publish(draft events.Draft) (events.Event, error)
 }
 
 type ExecuteInput struct {

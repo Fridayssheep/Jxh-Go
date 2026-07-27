@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/events"
 )
 
 const defaultExecutionTimeout = 30 * time.Second
@@ -18,6 +19,7 @@ type Options struct {
 	BuiltinNames       []string
 	ExecutionTimeout   time.Duration
 	ArgumentSummaryKey []byte
+	Events             EventPublisher
 }
 
 type Service struct {
@@ -27,6 +29,7 @@ type Service struct {
 	now              func() time.Time
 	executionTimeout time.Duration
 	summaryKey       []byte
+	events           EventPublisher
 }
 
 func NewService(options Options) (*Service, error) {
@@ -50,7 +53,7 @@ func NewService(options Options) (*Service, error) {
 	}
 	return &Service{
 		store: options.Store, gateway: options.Gateway, registry: registry, now: options.Now,
-		executionTimeout: timeout, summaryKey: append([]byte(nil), options.ArgumentSummaryKey...),
+		executionTimeout: timeout, summaryKey: append([]byte(nil), options.ArgumentSummaryKey...), events: options.Events,
 	}, nil
 }
 
@@ -138,6 +141,7 @@ func (s *Service) Create(ctx context.Context, principal auth.Principal, definiti
 	if err := s.registry.Upsert(command); err != nil {
 		return Command{}, fmt.Errorf("publish custom command: %w", err)
 	}
+	s.publishCommandUpdated(command, "created")
 	return cloneCommand(command), nil
 }
 
@@ -221,6 +225,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 	if err := s.registry.Upsert(command); err != nil {
 		return Command{}, fmt.Errorf("publish custom command: %w", err)
 	}
+	s.publishCommandUpdated(command, "updated")
 	return cloneCommand(command), nil
 }
 
@@ -237,7 +242,30 @@ func (s *Service) Archive(ctx context.Context, principal auth.Principal, id stri
 		return fmt.Errorf("archive custom command: %w", err)
 	}
 	s.registry.Remove(id)
+	s.publishCommandUpdated(Command{ID: id, Version: revision}, "archived")
 	return nil
+}
+
+func (s *Service) publishCommandUpdated(command Command, reason string) {
+	if s.events == nil {
+		return
+	}
+	_, _ = s.events.Publish(events.Draft{
+		Type: events.EventCommandUpdated, OccurredAt: s.now().UTC(),
+		Resource: &events.Resource{Type: events.ResourceCommand, ID: command.ID, Version: command.Version},
+		Reason:   reason,
+	})
+}
+
+func (s *Service) publishRunCompleted(run Run) {
+	if s.events == nil {
+		return
+	}
+	_, _ = s.events.Publish(events.Draft{
+		Type: events.EventCommandRunCompleted, OccurredAt: s.now().UTC(),
+		Resource: &events.Resource{Type: events.ResourceCommand, ID: run.CommandID},
+		Reason:   string(run.Result),
+	})
 }
 
 func (s *Service) ValidateDraft(_ context.Context, principal auth.Principal, definition Definition, sample ValidationSample) (ValidationResult, error) {

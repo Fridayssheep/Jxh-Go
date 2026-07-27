@@ -10,6 +10,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/audit"
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/events"
 )
 
 func TestDefinitionRejectsPrivilegeEscalationAndDynamicTargets(t *testing.T) {
@@ -151,6 +152,34 @@ func TestLoadRegistryRejectsCursorCyclesWithoutReplacingSnapshot(t *testing.T) {
 	}
 }
 
+func TestServicePublishesSanitizedDefinitionAndRunEvents(t *testing.T) {
+	store := &fakeStore{}
+	eventSink := &commandEventSinkFake{}
+	service := newServiceFixtureWithEvents(t, store, &fakeGateway{available: true}, eventSink)
+	definition := validDefinition()
+	created, err := service.Create(t.Context(), auth.Principal{UserID: "usr_root", SessionID: "ses_root", Role: auth.RoleSuperAdmin}, definition, validMutationRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Enabled = true
+	created.Status = StatusActive
+	if err := service.Registry().Upsert(created); err != nil {
+		t.Fatal(err)
+	}
+	if _, handled, err := service.Execute(t.Context(), ExecuteInput{
+		GroupID: "123", SenderQQ: "9988", SenderRole: SenderAdmin, Message: `/welcome 7788 "private words" 60`,
+	}); err != nil || !handled {
+		t.Fatalf("handled=%t err=%v", handled, err)
+	}
+	if len(eventSink.drafts) != 2 || eventSink.drafts[0].Type != events.EventCommandUpdated ||
+		eventSink.drafts[1].Type != events.EventCommandRunCompleted || eventSink.drafts[1].Reason != string(RunSuccess) {
+		t.Fatalf("drafts=%+v", eventSink.drafts)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", eventSink.drafts), "private words") {
+		t.Fatalf("events retained command arguments: %+v", eventSink.drafts)
+	}
+}
+
 func TestDefinitionAcceptsOpaqueGroupIdentifiersAndRejectsRequiredAfterOptional(t *testing.T) {
 	definition := validDefinition()
 	definition.Scope.GroupIDs = []string{"group:east-campus"}
@@ -200,15 +229,28 @@ func validMutationRequest() auth.MutationContext {
 }
 
 func newServiceFixture(t *testing.T, store Store, gateway Gateway) *Service {
+	return newServiceFixtureWithEvents(t, store, gateway, nil)
+}
+
+func newServiceFixtureWithEvents(t *testing.T, store Store, gateway Gateway, eventSink EventPublisher) *Service {
 	t.Helper()
 	service, err := NewService(Options{
 		Store: store, Gateway: gateway, Now: func() time.Time { return time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC) },
-		ArgumentSummaryKey: []byte("0123456789abcdef0123456789abcdef"),
+		ArgumentSummaryKey: []byte("0123456789abcdef0123456789abcdef"), Events: eventSink,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service
+}
+
+type commandEventSinkFake struct {
+	drafts []events.Draft
+}
+
+func (f *commandEventSinkFake) Publish(draft events.Draft) (events.Event, error) {
+	f.drafts = append(f.drafts, draft)
+	return events.Event{}, nil
 }
 
 func hasIssue(issues []ValidationIssue, code string) bool {

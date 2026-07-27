@@ -49,6 +49,8 @@ cp config.example.yaml config.yaml
 - `admin.public_origin`、`admin.session_secret`：管理面板的唯一浏览器 Origin 和至少 32 字节随机主密钥；生产环境必须使用 HTTPS 并保持 `cookie_secure: true`。
 - `admin.max_concurrent_requests`：管理 API 同时处理的请求上限，超限立即返回可重试的 503，避免管理流量占满 Bot 进程资源。
 
+`admin.public_origin` 为空或 `admin.session_secret` 不足 32 字节时，进程会把 Admin 标记为 `misconfigured`，不启动管理 API、管理端自定义命令、遥测和管理 worker；原 QQ Bot、`/healthz`、NapCat、原定时任务和申请处理继续运行。
+
 ### 3. 启动全部服务
 
 ```bash

@@ -76,6 +76,26 @@ func TestRunWithDependenciesSanitizesDatabaseCloseFailure(t *testing.T) {
 	}
 }
 
+func TestAdminHTTPRequiresCompleteSecureConfiguration(t *testing.T) {
+	configuration := config.Default().Admin
+	if adminHTTPConfigured(configuration) {
+		t.Fatal("default incomplete admin configuration was enabled")
+	}
+	configuration.PublicOrigin = "https://manager.example"
+	configuration.SessionSecret = strings.Repeat("x", 31)
+	if adminHTTPConfigured(configuration) {
+		t.Fatal("short admin session secret was accepted")
+	}
+	configuration.SessionSecret += "x"
+	if !adminHTTPConfigured(configuration) {
+		t.Fatal("complete secure admin configuration was disabled")
+	}
+	configuration.PublicOrigin = "  "
+	if adminHTTPConfigured(configuration) {
+		t.Fatal("blank admin origin was accepted")
+	}
+}
+
 func TestCheckDatabaseHealthTracksOutageAndRecovery(t *testing.T) {
 	service := health.NewService()
 	initialSuccess := time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC)

@@ -206,20 +206,34 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 		ExtractApplicant: extractApplicant,
 	})
 	napcatGateway := napcat.NewGateway(flashfile.NewStager("./data/flash", "/app/data/flash"))
-	managementBackend, err := management.NewBackend(management.Options{
-		Context: ctx, Config: cfg, Store: store, Gateway: napcatGateway, Health: healthService,
-		SettingsRuntime: settingsRuntime, KnowledgeStore: knowledgeRuntime, KnowledgeReloader: knowledgeRuntime,
-		Location: location, Now: now, Logger: log.Default(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("initialize management backend: %w", err)
+	var managementBackend *management.Backend
+	if adminHTTPConfigured(cfg.Admin) {
+		managementBackend, err = management.NewBackend(management.Options{
+			Context: ctx, Config: cfg, Store: store, Gateway: napcatGateway, Health: healthService,
+			SettingsRuntime: settingsRuntime, KnowledgeStore: knowledgeRuntime, KnowledgeReloader: knowledgeRuntime,
+			Location: location, Now: now, Logger: log.Default(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("initialize management backend: %w", err)
+		}
+	} else {
+		checkedAt := time.Now().UTC()
+		healthService.SetAdmin(health.ComponentStatus{Code: "misconfigured", CheckedAt: checkedAt, LastErrorAt: checkedAt})
+		healthService.SetTelemetry(health.ComponentStatus{Code: "not_configured", CheckedAt: checkedAt})
+		log.Print("admin API disabled: secure configuration is incomplete")
 	}
-	backendOwned := true
+	backendOwned := managementBackend != nil
 	defer func() {
 		if err != nil && backendOwned {
 			managementBackend.Close()
 		}
 	}()
+	var customCommands bot.CustomCommandExecutor
+	var telemetryRecorder bot.TelemetryRecorder
+	if managementBackend != nil {
+		customCommands = managementBackend.CustomCommands
+		telemetryRecorder = managementBackend.Telemetry
+	}
 	quoteClient := quote.NewClient(
 		cfg.Quote.BaseURL,
 		&http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second},
@@ -240,8 +254,8 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 		TriggerStats:   triggerStats,
 		LinkCleaner:    linkcleaner.NewService(),
 		Settings:       settingsRuntime,
-		CustomCommands: managementBackend.CustomCommands,
-		Telemetry:      managementBackend.Telemetry,
+		CustomCommands: customCommands,
+		Telemetry:      telemetryRecorder,
 	})
 	schedulerRuntime := scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,
@@ -275,32 +289,46 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	if err != nil {
 		return nil, fmt.Errorf("create health component: %w", err)
 	}
-	adminComponent, err := app.HTTPComponent("admin-http", managementBackend.AdminServer, false)
-	if err != nil {
-		return nil, fmt.Errorf("create admin component: %w", err)
-	}
-	adminHealth := newRuntimeHealthGroup(1, healthService.SetAdmin, time.Now)
-	adminComponent.Run = adminHealth.Wrap(adminComponent.Run)
 	schedulerHealth := newRuntimeHealthGroup(1, healthService.SetScheduler, time.Now)
-	workerCount := 3
+	workerCount := 1
+	if managementBackend != nil {
+		workerCount += 2
+	}
 	if cfg.Database.TriggerLogRetentionDays > 0 {
 		workerCount++
 	}
 	workerHealth := newRuntimeHealthGroup(workerCount, healthService.SetWorkers, time.Now)
-	components := []app.Component{
-		healthComponent,
-		adminComponent,
-		{Name: "napcat", Critical: true, Run: napcatServer.Serve},
-		{Name: "scheduler", Run: schedulerHealth.Wrap(func(ctx context.Context) error { schedulerRuntime.Run(ctx); return nil })},
-		{Name: "group-request-ai", Run: workerHealth.Wrap(func(ctx context.Context) error { groupRequests.RunAIParser(ctx); return nil })},
-		{Name: "join-request-auto-approver", Run: workerHealth.Wrap(func(ctx context.Context) error { managementBackend.JoinRequests.RunAutoApprover(ctx); return nil })},
-		{Name: "telemetry", Run: func(ctx context.Context) error { return runTelemetry(ctx, healthService, managementBackend.Telemetry) }},
-		{Name: "telemetry-maintenance", Run: workerHealth.Wrap(managementBackend.Maintenance.Run)},
-		{Name: "health-monitor", Run: func(ctx context.Context) error { runHealthMonitor(ctx, healthService, napcatGateway); return nil }},
-		{Name: "database-health-monitor", Run: func(ctx context.Context) error {
+	components := []app.Component{healthComponent}
+	if managementBackend != nil {
+		adminComponent, err := app.HTTPComponent("admin-http", managementBackend.AdminServer, false)
+		if err != nil {
+			return nil, fmt.Errorf("create admin component: %w", err)
+		}
+		adminHealth := newRuntimeHealthGroup(1, healthService.SetAdmin, time.Now)
+		adminComponent.Run = adminHealth.Wrap(adminComponent.Run)
+		components = append(components, adminComponent)
+	}
+	components = append(components,
+		app.Component{Name: "napcat", Critical: true, Run: napcatServer.Serve},
+		app.Component{Name: "scheduler", Run: schedulerHealth.Wrap(func(ctx context.Context) error { schedulerRuntime.Run(ctx); return nil })},
+		app.Component{Name: "group-request-ai", Run: workerHealth.Wrap(func(ctx context.Context) error { groupRequests.RunAIParser(ctx); return nil })},
+		app.Component{Name: "health-monitor", Run: func(ctx context.Context) error { runHealthMonitor(ctx, healthService, napcatGateway); return nil }},
+		app.Component{Name: "database-health-monitor", Run: func(ctx context.Context) error {
 			runDatabaseHealthMonitor(ctx, healthService, sqlDB, 5*time.Second, time.Duration(cfg.Database.PingTimeoutSeconds)*time.Second)
 			return nil
 		}},
+	)
+	if managementBackend != nil {
+		components = append(components,
+			app.Component{Name: "join-request-auto-approver", Run: workerHealth.Wrap(func(ctx context.Context) error {
+				managementBackend.JoinRequests.RunAutoApprover(ctx)
+				return nil
+			})},
+			app.Component{Name: "telemetry", Run: func(ctx context.Context) error {
+				return runTelemetry(ctx, healthService, managementBackend.Telemetry)
+			}},
+			app.Component{Name: "telemetry-maintenance", Run: workerHealth.Wrap(managementBackend.Maintenance.Run)},
+		)
 	}
 	if cfg.Database.TriggerLogRetentionDays > 0 {
 		components = append(components, app.Component{
@@ -311,8 +339,12 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 			}),
 		})
 	}
+	var closers []io.Closer
+	if managementBackend != nil {
+		closers = append(closers, closeFunc(func() error { managementBackend.Close(); return nil }))
+	}
 	application, err := app.New(app.Options{
-		Components: components, Closers: []io.Closer{closeFunc(func() error { managementBackend.Close(); return nil })},
+		Components: components, Closers: closers,
 		ShutdownTimeout: time.Duration(cfg.Admin.ShutdownTimeoutSeconds) * time.Second, Logger: log.Default(),
 	})
 	if err != nil {
@@ -320,6 +352,10 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	}
 	backendOwned = false
 	return application, nil
+}
+
+func adminHTTPConfigured(configuration config.AdminConfig) bool {
+	return strings.TrimSpace(configuration.PublicOrigin) != "" && len([]byte(configuration.SessionSecret)) >= 32
 }
 
 type closeFunc func() error

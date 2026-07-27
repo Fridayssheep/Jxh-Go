@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -30,13 +31,17 @@ func TestClientObservesPNGFallbackWithoutRawFailure(t *testing.T) {
 
 func TestClientObservesCompleteFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "sensitive upstream response", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 	observed := make(chan Observation, 1)
 	client := NewClient(server.URL, server.Client(), func(value Observation) { observed <- value })
-	if _, err := client.Generate(context.Background(), Payload{}); err == nil {
+	_, err := client.Generate(context.Background(), Payload{})
+	if err == nil {
 		t.Fatal("Generate() unexpectedly succeeded")
+	}
+	if message := err.Error(); strings.Contains(message, "sensitive upstream response") || !strings.Contains(message, "HTTP 503") {
+		t.Fatalf("Generate() error = %q", message)
 	}
 	if observation := <-observed; observation.Outcome != OutcomeFailure {
 		t.Fatalf("observation=%+v", observation)

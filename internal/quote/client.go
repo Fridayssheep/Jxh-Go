@@ -104,12 +104,15 @@ func (c *Client) generate(ctx context.Context, payload []byte, path string) (str
 		return "", fmt.Errorf("request quote image: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// The upstream body may contain request data or implementation details.
+		// Drain only a bounded prefix for connection reuse and keep it out of errors.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 32<<10))
+		return "", fmt.Errorf("quote server returned HTTP %d", resp.StatusCode)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read quote response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("quote server returned %s: %s", resp.Status, string(body))
 	}
 	return string(body), nil
 }

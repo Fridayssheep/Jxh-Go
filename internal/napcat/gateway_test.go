@@ -231,6 +231,31 @@ func TestGatewayRejectsGroupIDsOutsideJSONSafeIntegerRange(t *testing.T) {
 	}
 }
 
+func TestGatewayReturnsValidatedLoginUserID(t *testing.T) {
+	caller := &fakeGatewayCaller{handler: func(action string, _, result any) error {
+		if api.Action(action) != api.ActionGetLoginInfo {
+			return fmt.Errorf("unexpected action %q", action)
+		}
+		response := result.(*api.GetLoginInfoResponse)
+		response.UserID = 123456789
+		return nil
+	}}
+	gateway := NewGateway()
+	gateway.Attach(api.NewClient(caller), time.Unix(10, 0))
+	userID, err := gateway.GetLoginUserID(context.Background())
+	if err != nil || userID != 123456789 {
+		t.Fatalf("GetLoginUserID() = %d, %v", userID, err)
+	}
+
+	caller.handler = func(_ string, _, result any) error {
+		result.(*api.GetLoginInfoResponse).UserID = 1 << 53
+		return nil
+	}
+	if _, err := gateway.GetLoginUserID(context.Background()); err == nil || strings.Contains(err.Error(), "9.007") {
+		t.Fatalf("GetLoginUserID() error = %v", err)
+	}
+}
+
 func TestGatewayOperationErrorHidesUpstreamDetails(t *testing.T) {
 	const secret = "access_token=do-not-log"
 	caller := &fakeGatewayCaller{

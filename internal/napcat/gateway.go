@@ -262,6 +262,22 @@ func (g *Gateway) GetGroupList(ctx context.Context) ([]GroupInfo, error) {
 	return groups, nil
 }
 
+func (g *Gateway) GetLoginUserID(ctx context.Context) (int64, error) {
+	client, err := g.client()
+	if err != nil {
+		return 0, err
+	}
+	response, err := client.GetLoginInfo(ctx, api.GetLoginInfoRequest{})
+	if err != nil {
+		return 0, safeOperationError("get_login_info", err)
+	}
+	userID, err := positiveInteger(response.UserID, "user_id")
+	if err != nil {
+		return 0, operationFailure("get_login_info", FailureInvalidResponse)
+	}
+	return userID, nil
+}
+
 func (g *Gateway) SetGroupAddRequest(ctx context.Context, flag string, approve bool, reason string) error {
 	client, err := g.client()
 	if err != nil {

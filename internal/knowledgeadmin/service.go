@@ -19,9 +19,11 @@ import (
 )
 
 const (
-	defaultLimit         = 50
-	defaultReloadTimeout = 2 * time.Minute
-	minimumSecretBytes   = 32
+	defaultLimit                 = 50
+	defaultReloadTimeout         = 2 * time.Minute
+	defaultPersistenceRetryDelay = time.Second
+	persistenceAttemptTimeout    = 5 * time.Second
+	minimumSecretBytes           = 32
 )
 
 var (
@@ -45,8 +47,15 @@ type Service struct {
 	events         EventSink
 	secret         []byte
 	reloadTimeout  time.Duration
+	retryDelay     time.Duration
 	now            func() time.Time
 	newOperationID func() string
+	workerCtx      context.Context
+	cancel         context.CancelFunc
+
+	lifecycleMu sync.Mutex
+	closed      bool
+	wait        sync.WaitGroup
 
 	mu     sync.RWMutex
 	latest *reloadOverlay
@@ -68,13 +77,22 @@ func NewService(options Options) (*Service, error) {
 	if options.ReloadTimeout < time.Millisecond || options.ReloadTimeout > 10*time.Minute {
 		return nil, ErrInvalidInput
 	}
+	if options.PersistenceRetryDelay <= 0 {
+		options.PersistenceRetryDelay = defaultPersistenceRetryDelay
+	}
 	if options.NewOperationID == nil {
 		options.NewOperationID = randomOperationID
 	}
+	workerContext := options.WorkerContext
+	if workerContext == nil {
+		workerContext = context.Background()
+	}
+	workerContext, cancel := context.WithCancel(workerContext)
 	return &Service{
 		store: options.Store, operations: options.Operations, reloader: options.Reloader, events: options.Events,
 		secret:        append([]byte(nil), options.IdempotencySecret...),
-		reloadTimeout: options.ReloadTimeout, now: options.Now, newOperationID: options.NewOperationID,
+		reloadTimeout: options.ReloadTimeout, retryDelay: options.PersistenceRetryDelay,
+		now: options.Now, newOperationID: options.NewOperationID, workerCtx: workerContext, cancel: cancel,
 	}, nil
 }
 
@@ -127,11 +145,17 @@ func (s *Service) StartReload(
 	if !validIdentifier(operationID) || requestedAt.IsZero() {
 		return ReloadOperation{}, ErrInvalidData
 	}
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return ReloadOperation{}, ErrReloaderUnavailable
+	}
 	operation, fresh, err := s.operations.BeginKnowledgeReload(ctx, BeginReload{
 		Actor: principal, Context: requestContext, OperationID: operationID,
 		IdempotencyKey: idempotencyKey, RequestHash: s.requestHash(), RequestedAt: requestedAt,
 	})
 	if err != nil {
+		s.lifecycleMu.Unlock()
 		switch {
 		case errors.Is(err, ErrReloadInProgress):
 			return ReloadOperation{}, ErrReloadInProgress
@@ -142,13 +166,19 @@ func (s *Service) StartReload(
 		}
 	}
 	if err := validateOperation(operation); err != nil || (fresh && operation.Status != OperationAccepted) {
+		s.lifecycleMu.Unlock()
 		return ReloadOperation{}, ErrInvalidData
 	}
+	if fresh {
+		s.wait.Add(1)
+	}
+	s.lifecycleMu.Unlock()
 	s.setLatest(operation, nil)
 
 	if fresh {
 		go func() {
-			reloadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reloadTimeout)
+			defer s.wait.Done()
+			reloadCtx, cancel := context.WithTimeout(s.workerCtx, s.reloadTimeout)
 			defer cancel()
 			s.runReload(reloadCtx, operation)
 		}()
@@ -157,11 +187,10 @@ func (s *Service) StartReload(
 }
 
 func (s *Service) runReload(ctx context.Context, operation ReloadOperation) {
-	running, err := s.operations.TransitionKnowledgeReload(ctx, ReloadTransition{
+	running, ok := s.persistTransition(ReloadTransition{
 		OperationID: operation.ID, From: OperationAccepted, To: OperationRunning, At: s.now().UTC(),
 	})
-	if err != nil {
-		s.finishReload(operation, OperationAccepted, "operation_state_unknown", true)
+	if !ok {
 		return
 	}
 	s.setLatest(running, nil)
@@ -174,31 +203,65 @@ func (s *Service) runReload(ctx context.Context, operation ReloadOperation) {
 	if err != nil {
 		code := safeReloadErrorCode(err)
 		unknown := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
-		s.finishReload(running, OperationRunning, code, unknown)
+		s.finishReload(running, code, unknown)
 		return
 	}
-	completed, transitionErr := s.operations.TransitionKnowledgeReload(ctx, ReloadTransition{
+	completed, ok := s.persistTransition(ReloadTransition{
 		OperationID: operation.ID, From: OperationRunning, To: OperationSucceeded, At: completedAt,
 	})
-	if transitionErr != nil {
+	if !ok {
 		return
 	}
 	s.setLatest(completed, &result)
 	s.publishCompletion(completed)
 }
 
-func (s *Service) finishReload(operation ReloadOperation, from OperationStatus, code string, unknown bool) {
-	transitionContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	completed, err := s.operations.TransitionKnowledgeReload(transitionContext, ReloadTransition{
-		OperationID: operation.ID, From: from, To: OperationFailed, At: s.now().UTC(),
+func (s *Service) finishReload(operation ReloadOperation, code string, unknown bool) {
+	completed, ok := s.persistTransition(ReloadTransition{
+		OperationID: operation.ID, From: OperationRunning, To: OperationFailed, At: s.now().UTC(),
 		ErrorCode: code, OutcomeUnknown: unknown,
 	})
-	if err != nil {
+	if !ok {
 		return
 	}
 	s.setLatest(completed, nil)
 	s.publishCompletion(completed)
+}
+
+func (s *Service) persistTransition(transition ReloadTransition) (ReloadOperation, bool) {
+	for {
+		if s.workerCtx.Err() != nil {
+			return ReloadOperation{}, false
+		}
+		attemptContext, cancel := context.WithTimeout(s.workerCtx, persistenceAttemptTimeout)
+		operation, err := s.operations.TransitionKnowledgeReload(attemptContext, transition)
+		cancel()
+		if err == nil {
+			return operation, true
+		}
+		timer := time.NewTimer(s.retryDelay)
+		select {
+		case <-s.workerCtx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ReloadOperation{}, false
+		case <-timer.C:
+		}
+	}
+}
+
+func (s *Service) Close() {
+	if s == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	if !s.closed {
+		s.closed = true
+		s.cancel()
+	}
+	s.lifecycleMu.Unlock()
+	s.wait.Wait()
 }
 
 func (s *Service) requestHash() string {

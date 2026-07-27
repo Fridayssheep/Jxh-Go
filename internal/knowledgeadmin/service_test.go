@@ -155,6 +155,78 @@ func TestKnowledgeReloadIsBoundedAndPublishesSafeCompletionEvent(t *testing.T) {
 	}
 }
 
+func TestKnowledgeReloadRetriesTerminalPersistence(t *testing.T) {
+	reloader := &blockingKnowledgeReloader{
+		started: make(chan struct{}), release: make(chan struct{}),
+		result: ReloadResult{ActiveIndexVersion: "idx_retry", EntryCount: 3, ConflictCount: 1},
+	}
+	operations := &flakyKnowledgeOperationStore{
+		knowledgeOperationStoreFake: newKnowledgeOperationStoreFake(), terminalFailures: 2,
+	}
+	sink := &knowledgeEventSink{}
+	service, err := NewService(Options{
+		Store:      &knowledgeStoreFake{status: Status{State: StateReady, SourceConfigured: true}},
+		Operations: operations, Reloader: reloader, Events: sink,
+		IdempotencySecret:     []byte("01234567890123456789012345678901"),
+		PersistenceRetryDelay: time.Millisecond, Now: func() time.Time { return time.Now().UTC() },
+		NewOperationID: func() string { return "kop_retry_1" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if _, err := service.StartReload(t.Context(), knowledgeMaintainer(), "reload-retry-key"); err != nil {
+		t.Fatal(err)
+	}
+	<-reloader.started
+	close(reloader.release)
+	status := waitForKnowledgeStatus(t, service, OperationSucceeded)
+	if status.ActiveIndexVersion == nil || *status.ActiveIndexVersion != "idx_retry" {
+		t.Fatalf("status=%+v", status)
+	}
+	if got := operations.terminalAttempts.Load(); got != 3 {
+		t.Fatalf("terminal persistence attempts=%d, want 3", got)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.drafts) != 1 || sink.drafts[0].Reason != "succeeded" {
+		t.Fatalf("drafts=%+v", sink.drafts)
+	}
+}
+
+func TestKnowledgeCloseCancelsAndWaitsForReloadWorker(t *testing.T) {
+	reloader := contextKnowledgeReloader{started: make(chan struct{})}
+	operations := newKnowledgeOperationStoreFake()
+	service, err := NewService(Options{
+		Store:      &knowledgeStoreFake{status: Status{State: StateReady, SourceConfigured: true}},
+		Operations: operations, Reloader: reloader,
+		IdempotencySecret: []byte("01234567890123456789012345678901"), ReloadTimeout: time.Minute,
+		PersistenceRetryDelay: time.Millisecond, Now: func() time.Time { return time.Now().UTC() },
+		NewOperationID: func() string { return "kop_close_1" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartReload(t.Context(), knowledgeMaintainer(), "reload-close-key"); err != nil {
+		t.Fatal(err)
+	}
+	<-reloader.started
+	done := make(chan struct{})
+	go func() {
+		service.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not wait for and cancel the reload worker")
+	}
+	service.Close()
+	if _, err := service.StartReload(t.Context(), knowledgeMaintainer(), "reload-after-close"); !errors.Is(err, ErrReloaderUnavailable) {
+		t.Fatalf("StartReload after Close error=%v", err)
+	}
+}
+
 func TestKnowledgeReloaderUnavailableAndAuthorizationPrecedeDependencies(t *testing.T) {
 	store := &knowledgeStoreFake{status: Status{State: StateReady}}
 	service := newKnowledgeService(t, store, nil)
@@ -350,6 +422,25 @@ type knowledgeOperationStoreFake struct {
 	operations map[string]ReloadOperation
 	keys       map[string]string
 	recovered  []ReloadOperation
+}
+
+type flakyKnowledgeOperationStore struct {
+	*knowledgeOperationStoreFake
+	terminalFailures int64
+	terminalAttempts atomic.Int64
+}
+
+func (s *flakyKnowledgeOperationStore) TransitionKnowledgeReload(
+	ctx context.Context,
+	transition ReloadTransition,
+) (ReloadOperation, error) {
+	if managerKnowledgeTestTerminal(transition.To) {
+		attempt := s.terminalAttempts.Add(1)
+		if attempt <= s.terminalFailures {
+			return ReloadOperation{}, errors.New("transient persistence failure")
+		}
+	}
+	return s.knowledgeOperationStoreFake.TransitionKnowledgeReload(ctx, transition)
 }
 
 func newKnowledgeOperationStoreFake() *knowledgeOperationStoreFake {

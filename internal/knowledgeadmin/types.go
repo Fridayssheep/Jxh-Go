@@ -192,12 +192,14 @@ type EventSink interface {
 }
 
 type Options struct {
-	Store             Store
-	Operations        OperationStore
-	Reloader          Reloader
-	Events            EventSink
-	IdempotencySecret []byte
-	ReloadTimeout     time.Duration
-	Now               func() time.Time
-	NewOperationID    func() string
+	Store                 Store
+	Operations            OperationStore
+	Reloader              Reloader
+	Events                EventSink
+	IdempotencySecret     []byte
+	ReloadTimeout         time.Duration
+	WorkerContext         context.Context
+	PersistenceRetryDelay time.Duration
+	Now                   func() time.Time
+	NewOperationID        func() string
 }

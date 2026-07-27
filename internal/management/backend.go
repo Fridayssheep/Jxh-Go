@@ -84,12 +84,16 @@ type Backend struct {
 	Telemetry      *telemetry.Service
 	Maintenance    *telemetry.Maintenance
 	Groups         *groups.Service
+	Knowledge      *knowledgeadmin.Service
 	System         *system.Service
 }
 
 func (b *Backend) Close() {
 	if b == nil {
 		return
+	}
+	if b.Knowledge != nil {
+		b.Knowledge.Close()
 	}
 	if b.Groups != nil {
 		b.Groups.Close()
@@ -161,7 +165,11 @@ func NewBackend(options Options) (*Backend, error) {
 		return nil, fmt.Errorf("create system service: %w", err)
 	}
 	var groupService *groups.Service
+	var knowledgeService *knowledgeadmin.Service
 	fail := func(err error) (*Backend, error) {
+		if knowledgeService != nil {
+			knowledgeService.Close()
+		}
 		if groupService != nil {
 			groupService.Close()
 		}
@@ -208,9 +216,9 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create scheduled job service: %w", err))
 	}
-	knowledgeService, err := knowledgeadmin.NewService(knowledgeadmin.Options{
+	knowledgeService, err = knowledgeadmin.NewService(knowledgeadmin.Options{
 		Store: options.KnowledgeStore, Operations: options.Store, Reloader: options.KnowledgeReloader,
-		Events: hub, IdempotencySecret: secrets.KnowledgeOperation, Now: options.Now,
+		Events: hub, IdempotencySecret: secrets.KnowledgeOperation, Now: options.Now, WorkerContext: options.Context,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create knowledge service: %w", err))
@@ -260,7 +268,8 @@ func NewBackend(options Options) (*Backend, error) {
 	return &Backend{
 		AdminServer: server, Events: hub, Settings: settingsService, JoinRequests: joinRequestService,
 		ScheduledJobs: scheduledJobService, CustomCommands: customCommandService,
-		Telemetry: telemetryService, Maintenance: maintenance, Groups: groupService, System: systemService,
+		Telemetry: telemetryService, Maintenance: maintenance, Groups: groupService,
+		Knowledge: knowledgeService, System: systemService,
 	}, nil
 }
 

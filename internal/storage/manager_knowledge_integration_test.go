@@ -62,11 +62,39 @@ func TestManagerKnowledgeMySQLPersistsReplayAndRecovery(t *testing.T) {
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_idempotency_keys WHERE operation = 'knowledge.reload' AND state = 'completed' AND result_status = 'unknown'", 1)
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action = 'knowledge.reload' AND result = 'unknown'", 1)
 
+	if _, err := sqlDB.ExecContext(t.Context(), `UPDATE admin_idempotency_keys
+SET expires_at = ?
+WHERE operation = 'knowledge.reload' AND idempotency_key = ?`, failedAt.Add(-time.Hour), begin.IdempotencyKey); err != nil {
+		t.Fatalf("expire completed reload idempotency: %v", err)
+	}
+	reused := begin
+	reused.OperationID = "kop_reload_4"
+	reused.Context.RequestID = "req_reload_4"
+	reused.RequestedAt = failedAt.Add(time.Hour)
+	reusedOperation, fresh, err := store.BeginKnowledgeReload(t.Context(), reused)
+	if err != nil || !fresh || reusedOperation.ID != reused.OperationID {
+		t.Fatalf("reuse expired reload key: operation=%+v fresh=%t error=%v", reusedOperation, fresh, err)
+	}
+	if _, err := store.TransitionKnowledgeReload(t.Context(), knowledgeadmin.ReloadTransition{
+		OperationID: reused.OperationID, From: knowledgeadmin.OperationAccepted, To: knowledgeadmin.OperationRunning,
+		At: reused.RequestedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("run reused reload: %v", err)
+	}
+	if _, err := store.TransitionKnowledgeReload(t.Context(), knowledgeadmin.ReloadTransition{
+		OperationID: reused.OperationID, From: knowledgeadmin.OperationRunning, To: knowledgeadmin.OperationSucceeded,
+		At: reused.RequestedAt.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("complete reused reload: %v", err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM system_operations WHERE operation_id = 'kop_reload_1' AND idempotency_id IS NULL", 1)
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_idempotency_keys WHERE operation = 'knowledge.reload' AND idempotency_key = 'reload-key-1'", 1)
+
 	interrupted := begin
 	interrupted.OperationID = "kop_reload_3"
 	interrupted.IdempotencyKey = "reload-key-3"
 	interrupted.Context.RequestID = "req_reload_3"
-	interrupted.RequestedAt = requestedAt.Add(time.Minute)
+	interrupted.RequestedAt = reused.RequestedAt.Add(time.Minute)
 	if _, fresh, err := store.BeginKnowledgeReload(t.Context(), interrupted); err != nil || !fresh {
 		t.Fatalf("begin interrupted reload: fresh=%t error=%v", fresh, err)
 	}

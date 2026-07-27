@@ -43,19 +43,26 @@ func (s *Store) BeginKnowledgeReload(ctx context.Context, begin knowledgeadmin.B
 			managerActorAdminUser, begin.Actor.UserID, managerKnowledgeReloadOperation, begin.IdempotencyKey,
 		).Take(&existing).Error
 		if findErr == nil {
-			if existing.RequestHash != begin.RequestHash {
-				return knowledgeadmin.ErrIdempotencyConflict
+			if !existing.ExpiresAt.After(requestedAt) && existing.State == managerIdempotencyCompleted {
+				if deleteErr := tx.Delete(&existing).Error; deleteErr != nil {
+					return deleteErr
+				}
+				findErr = gorm.ErrRecordNotFound
+			} else {
+				if existing.RequestHash != begin.RequestHash {
+					return knowledgeadmin.ErrIdempotencyConflict
+				}
+				if existing.ResourceID == nil || *existing.ResourceID == "" {
+					return errManagerInvalidState
+				}
+				var model managerSystemOperation
+				if loadErr := tx.Where("operation_id = ? AND idempotency_id = ? AND type = ?",
+					*existing.ResourceID, existing.ID, "knowledge_reload").Take(&model).Error; loadErr != nil {
+					return loadErr
+				}
+				operation = managerKnowledgeOperationValue(model)
+				return nil
 			}
-			if existing.ResourceID == nil || *existing.ResourceID == "" {
-				return errManagerInvalidState
-			}
-			var model managerSystemOperation
-			if loadErr := tx.Where("operation_id = ? AND idempotency_id = ? AND type = ?",
-				*existing.ResourceID, existing.ID, "knowledge_reload").Take(&model).Error; loadErr != nil {
-				return loadErr
-			}
-			operation = managerKnowledgeOperationValue(model)
-			return nil
 		}
 		if !errors.Is(findErr, gorm.ErrRecordNotFound) {
 			return findErr

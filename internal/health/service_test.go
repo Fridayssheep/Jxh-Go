@@ -12,13 +12,17 @@ func TestReadinessSeparatesLivenessFromDependencies(t *testing.T) {
 	service.SetNapCat(ComponentStatus{Available: false, Code: "napcat_unavailable", CheckedAt: time.Unix(2, 0)})
 
 	snapshot := service.Snapshot()
-	if !snapshot.Live || snapshot.Ready {
-		t.Fatalf("Snapshot() = %+v, want live but not ready", snapshot)
+	if !snapshot.Live || !snapshot.Ready {
+		t.Fatalf("Snapshot() = %+v, want management ready despite NapCat outage", snapshot)
 	}
 
 	service.SetNapCat(ComponentStatus{Available: true, CheckedAt: time.Unix(3, 0)})
 	if snapshot := service.Snapshot(); !snapshot.Live || !snapshot.Ready {
 		t.Fatalf("Snapshot() = %+v, want live and ready", snapshot)
+	}
+	service.SetDatabase(ComponentStatus{Available: false, CheckedAt: time.Unix(4, 0)})
+	if snapshot := service.Snapshot(); !snapshot.Live || snapshot.Ready {
+		t.Fatalf("Snapshot() = %+v, want live but database-unready", snapshot)
 	}
 
 	service.SetLive(false)

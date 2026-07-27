@@ -94,7 +94,7 @@ func (s *Service) update(change func(*Snapshot)) {
 		current := s.load()
 		next := *current
 		change(&next)
-		next.Ready = next.Live && next.Database.Available && next.NapCat.Available
+		next.Ready = next.Live && next.Database.Available
 		if s.state.CompareAndSwap(current, &next) {
 			return
 		}

@@ -11,7 +11,6 @@ import (
 	"github.com/zjutjh/jxh-go/internal/ai"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
-	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/safego"
 	"github.com/zjutjh/jxh-go/internal/settings"
@@ -22,7 +21,7 @@ import (
 type GroupCommandRouter struct {
 	ai            *ai.Service
 	aiSlots       chan struct{}
-	reloader      *knowledge.Syncer
+	reloader      KnowledgeReloader
 	admin         *commands.AdminHandler
 	quote         *quote.Client
 	groupRequests *grouprequest.Service
@@ -120,6 +119,9 @@ func (r *GroupCommandRouter) handleReload(ctx context.Context, msg GroupMessage,
 	authorized, err := authorizeNativeAdmin(ctx, msg, sender)
 	if err != nil || !authorized {
 		return err
+	}
+	if r.reloader == nil {
+		return sender.SendGroupText(ctx, msg.GroupID, "知识库重载服务暂不可用")
 	}
 	if err := r.reloader.Sync(ctx); err != nil {
 		// 底层 *url.Error 会带上完整的 WPS 分享地址（含 query 参数），不能进群。

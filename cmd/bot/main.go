@@ -21,11 +21,13 @@ import (
 	"github.com/zjutjh/jxh-go/internal/flashfile"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
+	"github.com/zjutjh/jxh-go/internal/knowledgeadmin"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/napcat"
 	"github.com/zjutjh/jxh-go/internal/quote"
 	"github.com/zjutjh/jxh-go/internal/safego"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
+	"github.com/zjutjh/jxh-go/internal/settings"
 	"github.com/zjutjh/jxh-go/internal/storage"
 	"github.com/zjutjh/jxh-go/internal/triggerstats"
 	"gorm.io/driver/mysql"
@@ -75,6 +77,13 @@ func main() {
 	}
 	location := applicationLocation(cfg)
 	now := func() time.Time { return time.Now().In(location) }
+	knowledgeRuntime, err := knowledgeadmin.NewRuntimeStore(knowledgeadmin.RuntimeStoreOptions{
+		Index: knowledgeIndex, Syncer: knowledgeSync, SourceConfigured: strings.TrimSpace(cfg.WPS.ShareURL) != "", Now: now,
+	})
+	if err != nil {
+		log.Fatalf("initialize knowledge runtime: %v", err)
+	}
+	settingsRuntime := settings.NewDefaultRuntime()
 	scheduleLocation := schedulerLocation(cfg)
 	triggerStats := triggerstats.NewService(store, triggerstats.Options{
 		Now:            now,
@@ -102,12 +111,13 @@ func main() {
 		Sender:        napcatGateway,
 		Knowledge:     knowledgeIndex,
 		AI:            aiSvc,
-		Reloader:      knowledgeSync,
+		Reloader:      knowledgeRuntime,
 		Admin:         commands.NewAdminHandler(store, scheduleLocation),
 		Quote:         quote.NewClient(cfg.Quote.BaseURL, &http.Client{Timeout: time.Duration(cfg.Quote.TimeoutSec) * time.Second}),
 		GroupRequests: groupRequests,
 		TriggerStats:  triggerStats,
 		LinkCleaner:   linkcleaner.NewService(),
+		Settings:      settingsRuntime,
 	})
 	go scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,

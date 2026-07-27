@@ -46,7 +46,7 @@ type Options struct {
 	Sender               Sender
 	Knowledge            *knowledge.IndexRef
 	AI                   *ai.Service
-	Reloader             *knowledge.Syncer
+	Reloader             KnowledgeReloader
 	Admin                *commands.AdminHandler
 	Quote                *quote.Client
 	GroupRequests        *grouprequest.Service
@@ -55,6 +55,10 @@ type Options struct {
 	Settings             *settings.Runtime
 	CustomCommands       CustomCommandExecutor
 	MaintenanceAllowlist MaintenanceAllowlist
+}
+
+type KnowledgeReloader interface {
+	Sync(context.Context) error
 }
 
 type CustomCommandExecutor interface {

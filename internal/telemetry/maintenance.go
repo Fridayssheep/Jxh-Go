@@ -9,7 +9,7 @@ import (
 )
 
 type MaintenanceStore interface {
-	AggregateTelemetryDaily(ctx context.Context, completedBefore time.Time) error
+	AggregateTelemetryDaily(ctx context.Context, completedBefore time.Time, timezone string) error
 	PurgeTelemetryEvents(ctx context.Context, occurredBefore time.Time) (int64, error)
 }
 
@@ -65,7 +65,7 @@ func (m *Maintenance) Run(ctx context.Context) error {
 func (m *Maintenance) runOnce(ctx context.Context) {
 	now := m.now().In(m.location)
 	completedBefore := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, m.location).UTC()
-	if err := m.store.AggregateTelemetryDaily(ctx, completedBefore); err != nil {
+	if err := m.store.AggregateTelemetryDaily(ctx, completedBefore, m.location.String()); err != nil {
 		m.logger.Printf("telemetry daily aggregation failed")
 		return
 	}

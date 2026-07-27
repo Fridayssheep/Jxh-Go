@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/knowledgeadmin"
 	managersystem "github.com/zjutjh/jxh-go/internal/system"
 )
 
@@ -93,6 +94,10 @@ type HealthProvider interface {
 	Health(ctx context.Context, principal auth.Principal) (managersystem.Health, error)
 }
 
+type KnowledgeProvider interface {
+	Status(ctx context.Context) (knowledgeadmin.Status, error)
+}
+
 type Metric struct {
 	Key           MetricKey
 	Label         string
@@ -125,17 +130,19 @@ type Snapshot struct {
 }
 
 type Options struct {
-	Store    Store
-	Health   HealthProvider
-	Now      func() time.Time
-	Location *time.Location
+	Store     Store
+	Health    HealthProvider
+	Knowledge KnowledgeProvider
+	Now       func() time.Time
+	Location  *time.Location
 }
 
 type Service struct {
-	store    Store
-	health   HealthProvider
-	now      func() time.Time
-	location *time.Location
+	store     Store
+	health    HealthProvider
+	knowledge KnowledgeProvider
+	now       func() time.Time
+	location  *time.Location
 }
 
 var trendKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
@@ -162,10 +169,13 @@ var pendingOrder = []struct {
 }
 
 func NewService(options Options) (*Service, error) {
-	if options.Store == nil || options.Health == nil || options.Now == nil || options.Location == nil {
+	if options.Store == nil || options.Health == nil || options.Knowledge == nil || options.Now == nil || options.Location == nil {
 		return nil, ErrInvalidInput
 	}
-	return &Service{store: options.Store, health: options.Health, now: options.Now, location: options.Location}, nil
+	return &Service{
+		store: options.Store, health: options.Health, knowledge: options.Knowledge,
+		now: options.Now, location: options.Location,
+	}, nil
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, query Query) (Snapshot, error) {
@@ -187,6 +197,17 @@ func (s *Service) Get(ctx context.Context, principal auth.Principal, query Query
 	if err := validateData(data, storeQuery); err != nil {
 		return Snapshot{}, err
 	}
+	knowledgeStatus, err := s.knowledge.Status(ctx)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("load overview knowledge status: %w", err)
+	}
+	if knowledgeStatus.ConflictCount < 0 {
+		return Snapshot{}, ErrInvalidData
+	}
+	if data.Pending == nil {
+		data.Pending = make(map[PendingKey]uint64)
+	}
+	data.Pending[PendingKnowledgeConflicts] = uint64(knowledgeStatus.ConflictCount)
 	health, err := s.health.Health(ctx, principal)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("load overview health: %w", err)
@@ -252,6 +273,9 @@ func mapDependencies(values []managersystem.DependencyHealth) ([]Dependency, int
 		}
 		if value.Status == managersystem.DependencyHealthy {
 			healthyCount++
+			continue
+		}
+		if value.Status == managersystem.DependencyNotConfigured && !value.Required {
 			continue
 		}
 		degradedCount++

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/knowledgeadmin"
 	managersystem "github.com/zjutjh/jxh-go/internal/system"
 )
 
@@ -31,8 +32,9 @@ func TestGetBuildsNaturalDayWindowAndStableMetricSet(t *testing.T) {
 	health := &fakeHealth{snapshot: managersystem.Health{Dependencies: []managersystem.DependencyHealth{
 		{Key: managersystem.DependencyMySQL, Status: managersystem.DependencyHealthy, Required: true},
 		{Key: managersystem.DependencyNapCat, Status: managersystem.DependencyUnavailable, Required: false},
+		{Key: managersystem.DependencyWPS, Status: managersystem.DependencyNotConfigured, Required: false},
 	}}}
-	service := newService(t, store, health, location)
+	service := newService(t, store, health, &fakeKnowledge{status: knowledgeadmin.Status{ConflictCount: 2}}, location)
 	snapshot, err := service.Get(t.Context(), observer(), Query{Range: Range7Days, GroupID: "00123"})
 	if err != nil {
 		t.Fatal(err)
@@ -45,8 +47,10 @@ func TestGetBuildsNaturalDayWindowAndStableMetricSet(t *testing.T) {
 		!snapshot.Metrics[0].Available || snapshot.Metrics[1].Available || snapshot.Metrics[5].Value == nil || *snapshot.Metrics[5].Value != 1 {
 		t.Fatalf("metrics=%+v", snapshot.Metrics)
 	}
-	if len(snapshot.PendingItems) != 3 || snapshot.PendingItems[0].Severity != SeverityWarning ||
-		snapshot.PendingItems[2].Key != PendingDegradedDependencies || snapshot.PendingItems[2].Severity != SeverityWarning {
+	if len(snapshot.PendingItems) != 4 || snapshot.PendingItems[0].Severity != SeverityWarning ||
+		snapshot.PendingItems[2].Key != PendingKnowledgeConflicts || snapshot.PendingItems[2].Count != 2 ||
+		snapshot.PendingItems[3].Key != PendingDegradedDependencies || snapshot.PendingItems[3].Count != 1 ||
+		snapshot.PendingItems[3].Severity != SeverityWarning {
 		t.Fatalf("pending=%+v", snapshot.PendingItems)
 	}
 }
@@ -56,7 +60,7 @@ func TestGetMarksRequiredDependencyFailureCritical(t *testing.T) {
 	health := &fakeHealth{snapshot: managersystem.Health{Dependencies: []managersystem.DependencyHealth{
 		{Key: managersystem.DependencyMySQL, Status: managersystem.DependencyUnavailable, Required: true},
 	}}}
-	service := newService(t, store, health, time.UTC)
+	service := newService(t, store, health, &fakeKnowledge{}, time.UTC)
 	snapshot, err := service.Get(t.Context(), observer(), Query{})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +74,7 @@ func TestGetMarksRequiredDependencyFailureCritical(t *testing.T) {
 func TestGetAuthorizesAndValidatesBeforeProviders(t *testing.T) {
 	store := &fakeStore{}
 	health := &fakeHealth{}
-	service := newService(t, store, health, time.UTC)
+	service := newService(t, store, health, &fakeKnowledge{}, time.UTC)
 	if _, err := service.Get(t.Context(), auth.Principal{Role: "invalid"}, Query{}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("error=%v", err)
 	}
@@ -87,7 +91,7 @@ func TestGetRejectsInvalidAggregateData(t *testing.T) {
 	store := &fakeStore{data: Data{Metrics: map[MetricKey]MetricValue{
 		MetricActiveGroups: {Available: true, Value: &value},
 	}}}
-	service := newService(t, store, &fakeHealth{}, time.UTC)
+	service := newService(t, store, &fakeHealth{}, &fakeKnowledge{}, time.UTC)
 	if _, err := service.Get(t.Context(), observer(), Query{}); !errors.Is(err, ErrInvalidData) {
 		t.Fatalf("error=%v", err)
 	}
@@ -99,7 +103,7 @@ func TestGetReturnsIndependentSnapshot(t *testing.T) {
 		Metrics: map[MetricKey]MetricValue{MetricActiveGroups: {Available: true, Value: &value}},
 		Trend:   []TrendPoint{{BucketStart: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC), Values: map[string]float64{"group_message_count": 3}}},
 	}}
-	service := newService(t, store, &fakeHealth{}, time.UTC)
+	service := newService(t, store, &fakeHealth{}, &fakeKnowledge{}, time.UTC)
 	snapshot, err := service.Get(t.Context(), observer(), Query{})
 	if err != nil {
 		t.Fatal(err)
@@ -111,10 +115,10 @@ func TestGetReturnsIndependentSnapshot(t *testing.T) {
 	}
 }
 
-func newService(t *testing.T, store Store, health HealthProvider, location *time.Location) *Service {
+func newService(t *testing.T, store Store, health HealthProvider, knowledge KnowledgeProvider, location *time.Location) *Service {
 	t.Helper()
 	service, err := NewService(Options{
-		Store: store, Health: health, Location: location,
+		Store: store, Health: health, Knowledge: knowledge, Location: location,
 		Now: func() time.Time { return time.Date(2026, 7, 28, 3, 4, 5, 0, time.UTC) },
 	})
 	if err != nil {
@@ -144,6 +148,15 @@ type fakeHealth struct {
 	snapshot managersystem.Health
 	err      error
 	calls    int
+}
+
+type fakeKnowledge struct {
+	status knowledgeadmin.Status
+	err    error
+}
+
+func (k *fakeKnowledge) Status(context.Context) (knowledgeadmin.Status, error) {
+	return k.status, k.err
 }
 
 func (h *fakeHealth) Health(context.Context, auth.Principal) (managersystem.Health, error) {

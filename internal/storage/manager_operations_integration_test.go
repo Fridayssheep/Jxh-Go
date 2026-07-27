@@ -137,6 +137,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	}); err != nil {
 		t.Fatalf("append telemetry: %v", err)
 	}
+	if err := store.AggregateTelemetryDaily(t.Context(), now.AddDate(0, 0, 1), "UTC"); err != nil {
+		t.Fatalf("aggregate UTC telemetry: %v", err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM bot_operation_daily WHERE timezone = 'UTC'", 40)
 	filter := analytics.Filter{
 		From: now.Add(-time.Hour), To: now.Add(time.Hour), GroupIDs: []string{"10001"}, Timezone: "Asia/Shanghai",
 	}

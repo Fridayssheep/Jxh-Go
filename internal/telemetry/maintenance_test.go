@@ -23,6 +23,9 @@ func TestMaintenanceUsesCompletedLocalDayAndRetentionCutoff(t *testing.T) {
 	if !store.completedBefore.Equal(wantCompletedBefore) {
 		t.Fatalf("completedBefore = %v, want %v", store.completedBefore, wantCompletedBefore)
 	}
+	if store.timezone != "UTC+8" {
+		t.Fatalf("timezone = %q, want UTC+8", store.timezone)
+	}
 	wantRetention := now.AddDate(0, 0, -30).UTC()
 	if !store.occurredBefore.Equal(wantRetention) {
 		t.Fatalf("occurredBefore = %v, want %v", store.occurredBefore, wantRetention)
@@ -54,11 +57,13 @@ type maintenanceStoreFake struct {
 	aggregateCalls  int
 	purgeCalls      int
 	err             error
+	timezone        string
 }
 
-func (s *maintenanceStoreFake) AggregateTelemetryDaily(_ context.Context, before time.Time) error {
+func (s *maintenanceStoreFake) AggregateTelemetryDaily(_ context.Context, before time.Time, timezone string) error {
 	s.aggregateCalls++
 	s.completedBefore = before
+	s.timezone = timezone
 	return s.err
 }
 

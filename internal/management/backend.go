@@ -170,7 +170,8 @@ func NewBackend(options Options) (*Backend, error) {
 	}
 
 	overviewService, err := overview.NewService(overview.Options{
-		Store: options.Store, Health: systemService, Now: options.Now, Location: options.Location,
+		Store: options.Store, Health: systemService, Knowledge: options.KnowledgeStore,
+		Now: options.Now, Location: options.Location,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create overview service: %w", err))

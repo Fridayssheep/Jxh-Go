@@ -144,3 +144,15 @@ func TestAnalyticsMetricNumbersCombineDailyAndRawBoundaries(t *testing.T) {
 		t.Fatalf("combined AI duration = %v, %v", value, available)
 	}
 }
+
+func TestFullAnalyticsDayRangeUsesRequestedTimezone(t *testing.T) {
+	filter := analytics.Filter{
+		From: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC),
+		To:   time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC), Timezone: "UTC",
+	}
+	start, end, ok := fullAnalyticsDayRange(filter)
+	if !ok || !start.Equal(time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)) ||
+		!end.Equal(time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("range start=%v end=%v ok=%t", start, end, ok)
+	}
+}

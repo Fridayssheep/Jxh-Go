@@ -39,7 +39,6 @@ var (
 const (
 	databaseDailyJob = "\u6bcf\u5929"
 	databaseOnceJob  = "\u5355\u6b21"
-	analyticsZone    = "Asia/Shanghai"
 )
 
 type OpsActorColumns struct {
@@ -2297,8 +2296,8 @@ func dailyAccumulatorKey(row telemetryDailyManagerRow) string {
 	return row.BucketDate.Format("2006-01-02") + "\x00" + row.MetricKey + "\x00" + strconv.FormatInt(row.GroupID, 10) + "\x00" + row.FeatureKey + "\x00" + row.Outcome
 }
 
-func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore time.Time) error {
-	location, err := time.LoadLocation(analyticsZone)
+func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore time.Time, timezone string) error {
+	location, err := time.LoadLocation(timezone)
 	if err != nil {
 		return err
 	}
@@ -2332,7 +2331,7 @@ func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore tim
 				for _, feature := range features {
 					for _, outcome := range outcomes {
 						prototype := telemetryDailyManagerRow{
-							BucketDate: date, Timezone: analyticsZone, MetricKey: string(metric),
+							BucketDate: date, Timezone: timezone, MetricKey: string(metric),
 							GroupID: groupID, FeatureKey: feature, Outcome: outcome,
 						}
 						key := dailyAccumulatorKey(prototype)
@@ -2382,7 +2381,7 @@ func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore tim
 		for _, date := range dates {
 			dateValues = append(dateValues, date)
 		}
-		if err := tx.Where("timezone = ? AND bucket_date IN ?", analyticsZone, dateValues).Delete(&telemetryDailyManagerRow{}).Error; err != nil {
+		if err := tx.Where("timezone = ? AND bucket_date IN ?", timezone, dateValues).Delete(&telemetryDailyManagerRow{}).Error; err != nil {
 			return err
 		}
 		if len(rows) == 0 {
@@ -2429,9 +2428,6 @@ func (s *Store) loadAnalyticsEvents(ctx context.Context, filter analytics.Filter
 }
 
 func fullAnalyticsDayRange(filter analytics.Filter) (time.Time, time.Time, bool) {
-	if filter.Timezone != analyticsZone {
-		return time.Time{}, time.Time{}, false
-	}
 	location, err := time.LoadLocation(filter.Timezone)
 	if err != nil {
 		return time.Time{}, time.Time{}, false

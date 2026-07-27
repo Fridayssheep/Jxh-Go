@@ -76,6 +76,84 @@ func TestSyncReplaysTerminalResultWithoutGatewayCall(t *testing.T) {
 	}
 }
 
+func TestSyncRetriesSuccessfulTerminalPersistenceWithoutRepeatingGatewayCalls(t *testing.T) {
+	base := &fakeStore{
+		reservation: SyncReservation{ExecutionID: "sync_1", Fresh: true},
+		result:      SyncResult{SyncedAt: time.Unix(101, 0).UTC(), AddedCount: 1, TotalCount: 1},
+	}
+	store := newFlakyTerminalStore(base)
+	store.completionFailures = 2
+	gateway := &fakeGateway{
+		snapshot: napcat.Snapshot{Connected: true}, groups: []napcat.GroupInfo{{ID: 123, Name: "Alpha"}},
+	}
+	service, err := NewService(Options{
+		Store: store, Gateway: gateway, Now: func() time.Time { return time.Unix(101, 0) },
+		SyncTimeout: time.Second, PersistenceRetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if _, err := service.Sync(t.Context(), writer(), "sync-key-1", auth.MutationContext{RequestID: "req_1"}); err == nil {
+		t.Fatal("initial completion persistence unexpectedly succeeded")
+	}
+	waitForTerminalRetry(t, store.completionDone)
+	if store.completeCallCount() != 3 || gateway.listCalls != 1 {
+		t.Fatalf("completion calls=%d gateway calls=%d", store.completeCallCount(), gateway.listCalls)
+	}
+}
+
+func TestSyncRetriesFailedTerminalPersistenceWithoutRepeatingGatewayCalls(t *testing.T) {
+	base := &fakeStore{reservation: SyncReservation{ExecutionID: "sync_1", Fresh: true}}
+	store := newFlakyTerminalStore(base)
+	store.failureFailures = 2
+	gateway := &fakeGateway{snapshot: napcat.Snapshot{Connected: false}}
+	service, err := NewService(Options{
+		Store: store, Gateway: gateway, Now: func() time.Time { return time.Unix(101, 0) },
+		SyncTimeout: time.Second, PersistenceRetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if _, err := service.Sync(t.Context(), writer(), "sync-key-1", auth.MutationContext{RequestID: "req_1"}); err == nil {
+		t.Fatal("initial failure persistence unexpectedly succeeded")
+	}
+	waitForTerminalRetry(t, store.failureDone)
+	if store.failureCallCount() != 3 || gateway.listCalls != 0 {
+		t.Fatalf("failure calls=%d gateway calls=%d", store.failureCallCount(), gateway.listCalls)
+	}
+}
+
+func TestCloseStopsPendingTerminalPersistenceRetry(t *testing.T) {
+	base := &fakeStore{
+		reservation: SyncReservation{ExecutionID: "sync_1", Fresh: true},
+		result:      SyncResult{SyncedAt: time.Unix(101, 0).UTC(), AddedCount: 1, TotalCount: 1},
+	}
+	store := newFlakyTerminalStore(base)
+	store.completionFailures = 1000
+	gateway := &fakeGateway{
+		snapshot: napcat.Snapshot{Connected: true}, groups: []napcat.GroupInfo{{ID: 123, Name: "Alpha"}},
+	}
+	service, err := NewService(Options{
+		Store: store, Gateway: gateway, Now: func() time.Time { return time.Unix(101, 0) },
+		SyncTimeout: time.Second, PersistenceRetryDelay: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Sync(t.Context(), writer(), "sync-key-1", auth.MutationContext{RequestID: "req_1"}); err == nil {
+		t.Fatal("initial completion persistence unexpectedly succeeded")
+	}
+	waitForCompletionCalls(t, store, 2)
+	service.Close()
+	calls := store.completeCallCount()
+	time.Sleep(5 * time.Millisecond)
+	if store.completeCallCount() != calls {
+		t.Fatalf("persistence calls continued after close: before=%d after=%d", calls, store.completeCallCount())
+	}
+}
+
 func TestSyncRejectsDuplicateUpstreamGroupIDs(t *testing.T) {
 	service, store, gateway, _ := newFixture(t)
 	gateway.snapshot.Connected = true
@@ -160,6 +238,94 @@ type fakeStore struct {
 	failure     FailSync
 	recovered   int
 	recoveredAt time.Time
+}
+
+type flakyTerminalStore struct {
+	*fakeStore
+	mu                 sync.Mutex
+	completionFailures int
+	failureFailures    int
+	completionCalls    int
+	failureCalls       int
+	completionDone     chan struct{}
+	failureDone        chan struct{}
+	completionOnce     sync.Once
+	failureOnce        sync.Once
+}
+
+func newFlakyTerminalStore(store *fakeStore) *flakyTerminalStore {
+	return &flakyTerminalStore{
+		fakeStore: store, completionDone: make(chan struct{}), failureDone: make(chan struct{}),
+	}
+}
+
+func (s *flakyTerminalStore) CompleteGroupSync(ctx context.Context, completion CompleteSync) (SyncResult, error) {
+	s.mu.Lock()
+	s.completionCalls++
+	fail := s.completionFailures > 0
+	if fail {
+		s.completionFailures--
+	}
+	s.mu.Unlock()
+	if fail {
+		return SyncResult{}, errors.New("temporary database failure")
+	}
+	result, err := s.fakeStore.CompleteGroupSync(ctx, completion)
+	if err == nil {
+		s.completionOnce.Do(func() { close(s.completionDone) })
+	}
+	return result, err
+}
+
+func (s *flakyTerminalStore) FailGroupSync(ctx context.Context, failure FailSync) error {
+	s.mu.Lock()
+	s.failureCalls++
+	fail := s.failureFailures > 0
+	if fail {
+		s.failureFailures--
+	}
+	s.mu.Unlock()
+	if fail {
+		return errors.New("temporary database failure")
+	}
+	err := s.fakeStore.FailGroupSync(ctx, failure)
+	if err == nil {
+		s.failureOnce.Do(func() { close(s.failureDone) })
+	}
+	return err
+}
+
+func (s *flakyTerminalStore) completeCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.completionCalls
+}
+
+func (s *flakyTerminalStore) failureCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failureCalls
+}
+
+func waitForTerminalRetry(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal persistence retry did not complete")
+	}
+}
+
+func waitForCompletionCalls(t *testing.T, store *flakyTerminalStore, minimum int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if store.completeCallCount() >= minimum {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("completion calls=%d, expected at least %d", store.completeCallCount(), minimum)
 }
 
 func (s *fakeStore) ListGroups(_ context.Context, query StoreListQuery) (Page, error) {

@@ -83,7 +83,20 @@ type Backend struct {
 	CustomCommands *customcommand.Service
 	Telemetry      *telemetry.Service
 	Maintenance    *telemetry.Maintenance
+	Groups         *groups.Service
 	System         *system.Service
+}
+
+func (b *Backend) Close() {
+	if b == nil {
+		return
+	}
+	if b.Groups != nil {
+		b.Groups.Close()
+	}
+	if b.System != nil {
+		b.System.Close()
+	}
 }
 
 func NewBackend(options Options) (*Backend, error) {
@@ -147,7 +160,11 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create system service: %w", err)
 	}
+	var groupService *groups.Service
 	fail := func(err error) (*Backend, error) {
+		if groupService != nil {
+			groupService.Close()
+		}
 		systemService.Close()
 		return nil, err
 	}
@@ -158,8 +175,8 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create overview service: %w", err))
 	}
-	groupService, err := groups.NewService(groups.Options{
-		Store: options.Store, Gateway: options.Gateway, Events: hub, Now: options.Now,
+	groupService, err = groups.NewService(groups.Options{
+		Store: options.Store, Gateway: options.Gateway, Events: hub, Now: options.Now, WorkerContext: options.Context,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create group service: %w", err))
@@ -240,7 +257,7 @@ func NewBackend(options Options) (*Backend, error) {
 	return &Backend{
 		AdminServer: server, Events: hub, Settings: settingsService, JoinRequests: joinRequestService,
 		ScheduledJobs: scheduledJobService, CustomCommands: customCommandService,
-		Telemetry: telemetryService, Maintenance: maintenance, System: systemService,
+		Telemetry: telemetryService, Maintenance: maintenance, Groups: groupService, System: systemService,
 	}, nil
 }
 

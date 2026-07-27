@@ -218,7 +218,7 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	backendOwned := true
 	defer func() {
 		if err != nil && backendOwned {
-			managementBackend.System.Close()
+			managementBackend.Close()
 		}
 	}()
 	pipeline := bot.NewPipeline(bot.Options{
@@ -296,7 +296,7 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 		})
 	}
 	application, err := app.New(app.Options{
-		Components: components, Closers: []io.Closer{closeFunc(func() error { managementBackend.System.Close(); return nil })},
+		Components: components, Closers: []io.Closer{closeFunc(func() error { managementBackend.Close(); return nil })},
 		ShutdownTimeout: time.Duration(cfg.Admin.ShutdownTimeoutSeconds) * time.Second, Logger: log.Default(),
 	})
 	if err != nil {

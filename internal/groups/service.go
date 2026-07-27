@@ -173,13 +173,15 @@ type EventPublisher interface {
 }
 
 type Options struct {
-	Store          Store
-	Gateway        Gateway
-	Events         EventPublisher
-	Now            func() time.Time
-	StaleAfter     time.Duration
-	SyncTimeout    time.Duration
-	MaxRoleWorkers int
+	Store                 Store
+	Gateway               Gateway
+	Events                EventPublisher
+	Now                   func() time.Time
+	StaleAfter            time.Duration
+	SyncTimeout           time.Duration
+	MaxRoleWorkers        int
+	WorkerContext         context.Context
+	PersistenceRetryDelay time.Duration
 }
 
 type Service struct {
@@ -190,6 +192,12 @@ type Service struct {
 	staleAfter     time.Duration
 	syncTimeout    time.Duration
 	maxRoleWorkers int
+	workerCtx      context.Context
+	cancel         context.CancelFunc
+	retryDelay     time.Duration
+	lifecycleMu    sync.Mutex
+	closed         bool
+	wait           sync.WaitGroup
 }
 
 var idempotencyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
@@ -214,9 +222,18 @@ func NewService(options Options) (*Service, error) {
 	if options.MaxRoleWorkers > 32 {
 		return nil, ErrInvalidInput
 	}
+	if options.PersistenceRetryDelay <= 0 {
+		options.PersistenceRetryDelay = time.Second
+	}
+	workerContext := options.WorkerContext
+	if workerContext == nil {
+		workerContext = context.Background()
+	}
+	workerContext, cancel := context.WithCancel(workerContext)
 	return &Service{
 		store: options.Store, gateway: options.Gateway, events: options.Events, now: options.Now,
 		staleAfter: options.StaleAfter, syncTimeout: options.SyncTimeout, maxRoleWorkers: options.MaxRoleWorkers,
+		workerCtx: workerContext, cancel: cancel, retryDelay: options.PersistenceRetryDelay,
 	}, nil
 }
 
@@ -304,6 +321,9 @@ func (s *Service) Sync(ctx context.Context, principal auth.Principal, idempotenc
 	})
 	completionCancel()
 	if err != nil {
+		s.scheduleCompletionRetry(CompleteSync{
+			ExecutionID: reservation.ExecutionID, CompletedAt: completedAt, Groups: cloneRemoteGroups(remote),
+		})
 		return SyncResult{}, fmt.Errorf("complete group sync: %w", err)
 	}
 	if !validSyncResult(result) {
@@ -380,13 +400,75 @@ func (s *Service) loadRoles(ctx context.Context, values []napcat.GroupInfo, grou
 }
 
 func (s *Service) failSync(_ context.Context, executionID, code string, result error) error {
+	failure := FailSync{ExecutionID: executionID, CompletedAt: s.now().UTC(), ErrorCode: code}
 	failureContext, failureCancel := context.WithTimeout(context.Background(), s.syncTimeout)
-	err := s.store.FailGroupSync(failureContext, FailSync{ExecutionID: executionID, CompletedAt: s.now().UTC(), ErrorCode: code})
+	err := s.store.FailGroupSync(failureContext, failure)
 	failureCancel()
 	if err != nil {
+		s.scheduleFailureRetry(failure)
 		return fmt.Errorf("record group sync failure: %w", err)
 	}
 	return result
+}
+
+func (s *Service) scheduleCompletionRetry(completion CompleteSync) {
+	completion.Groups = cloneRemoteGroups(completion.Groups)
+	s.startRetryWorker(func(ctx context.Context) bool {
+		result, err := s.store.CompleteGroupSync(ctx, completion)
+		if err != nil {
+			return false
+		}
+		if validSyncResult(result) {
+			s.publishSync()
+		}
+		return true
+	})
+}
+
+func (s *Service) scheduleFailureRetry(failure FailSync) {
+	s.startRetryWorker(func(ctx context.Context) bool {
+		return s.store.FailGroupSync(ctx, failure) == nil
+	})
+}
+
+func (s *Service) startRetryWorker(attempt func(context.Context) bool) {
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.wait.Add(1)
+	s.lifecycleMu.Unlock()
+	go func() {
+		defer s.wait.Done()
+		for {
+			timer := time.NewTimer(s.retryDelay)
+			select {
+			case <-s.workerCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+			attemptContext, cancel := context.WithTimeout(s.workerCtx, s.syncTimeout)
+			completed := attempt(attemptContext)
+			cancel()
+			if completed {
+				return
+			}
+		}
+	}()
+}
+
+func (s *Service) Close() {
+	s.lifecycleMu.Lock()
+	if !s.closed {
+		s.closed = true
+		s.cancel()
+	}
+	s.lifecycleMu.Unlock()
+	s.wait.Wait()
 }
 
 func (s *Service) publishSync() {

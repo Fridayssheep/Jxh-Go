@@ -224,7 +224,16 @@ quote:
 
 项目采用 schema-first，运行时不使用 `AutoMigrate`。表结构以 `deploy/mysql/init/001_schema.sql` 为准。
 
-MySQL 首次初始化时会自动执行该 SQL。最终只包含 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests` 三张表；表默认使用 `utf8mb4_0900_ai_ci`，不透明标识符 `source_key` 和 `flag` 单独使用 `utf8mb4_bin`，避免不同大小写或重音的值被合并。已有部署按版本顺序手工执行 `deploy/mysql/migrations/` 中尚未应用的 SQL；群申请自动同步需要按顺序执行 `005_automate_group_request_processing.sql`、`006_reparse_group_request_applicants.sql` 和 `007_remove_group_request_system_request_id.sql`。初始化脚本只会在空数据目录首次启动时执行。
+MySQL 首次初始化时会自动执行该 SQL。初始化脚本只会在空数据目录首次启动时执行；已有部署由 `jxh-migrate` 按 `deploy/mysql/migrations/` 的版本顺序升级。迁移器使用数据库锁避免并发执行，并校验已应用脚本的名称和校验和。Compose 中的 `bot` 依赖一次性 `migrate` 服务成功完成，迁移失败时不会在旧 schema 上启动。
+
+本地应用迁移并查看已经记录的版本：
+
+```bash
+make migrate
+make migration-status
+```
+
+发布前先备份数据库。需要回滚时停止 bot，恢复升级前的完整备份，再部署与该 schema 匹配的旧版本；不要通过修改已经发布的 SQL 或手工删除 `schema_migrations` 记录来回滚。迁移文件发布后不可变，修正已有迁移必须追加更高版本脚本。
 
 需要重建空库时：
 
@@ -242,6 +251,8 @@ make run           # 本地运行 bot
 make build         # 构建 bin/jxh-go
 make test          # 编译检查所有 Go 包
 make fmt           # go fmt ./...
+make migrate       # 应用待执行的数据库迁移
+make migration-status # 查看已应用的数据库迁移
 make compose-up    # 启动 mysql 和 napcat
 make compose-logs  # 查看 compose 日志
 ```

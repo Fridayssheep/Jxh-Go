@@ -6,6 +6,10 @@
 !cmd/**
 !internal/
 !internal/**
+!deploy/
+!deploy/mysql/
+!deploy/mysql/migrations/
+!deploy/mysql/migrations/**
 !config.example.yaml
 !scripts/
 !scripts/**

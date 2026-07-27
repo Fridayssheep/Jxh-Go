@@ -6,7 +6,7 @@ BINARY ?= bin/jxh-go
 COMPOSE ?= docker compose
 NAPCAT_UID ?= $(shell id -u)
 NAPCAT_GID ?= $(shell id -g)
-.PHONY: help run build test fmt tidy clean compose-up compose-down compose-logs mysql napcat
+.PHONY: help run build test fmt tidy clean migrate migration-status compose-up compose-down compose-logs mysql napcat
 
 help: ## Show available targets
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -26,6 +26,12 @@ fmt: ## Format Go source files
 
 tidy: ## Tidy Go module dependencies
 	$(GO) mod tidy
+
+migrate: ## Apply pending database migrations
+	$(GO) run ./cmd/migrate -config $(CONFIG) -dir deploy/mysql/migrations
+
+migration-status: ## Show applied database migrations
+	$(COMPOSE) exec mysql sh -c 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -u"$$MYSQL_USER" "$$MYSQL_DATABASE" -e "SELECT version, name, applied_at FROM schema_migrations ORDER BY version"'
 
 clean: ## Remove build artifacts
 	rm -rf $(dir $(BINARY))

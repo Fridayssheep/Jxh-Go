@@ -49,11 +49,12 @@ func TestSnapshotTracksEveryComponentWithoutSharingMutableState(t *testing.T) {
 	service.SetQuote(status)
 	service.SetScheduler(status)
 	service.SetWorkers(status)
+	service.SetTelemetry(status)
 
 	first := service.Snapshot()
 	components := []ComponentStatus{
 		first.Database, first.NapCat, first.WPS, first.AI,
-		first.Quote, first.Scheduler, first.Workers,
+		first.Quote, first.Scheduler, first.Workers, first.Telemetry,
 	}
 	for index, component := range components {
 		if component != status {

@@ -208,7 +208,7 @@ func (s *Service) Health(_ context.Context, principal auth.Principal) (Health, e
 	}{
 		{DependencyMySQL, snapshot.Database}, {DependencyNapCat, snapshot.NapCat}, {DependencyWPS, snapshot.WPS},
 		{DependencyAI, snapshot.AI}, {DependencyQuote, snapshot.Quote}, {DependencyWorker, snapshot.Workers},
-		{DependencyScheduler, snapshot.Scheduler}, {DependencyTelemetry, health.ComponentStatus{}},
+		{DependencyScheduler, snapshot.Scheduler}, {DependencyTelemetry, snapshot.Telemetry},
 	}
 	dependencies := make([]DependencyHealth, 0, len(components))
 	for _, component := range components {

@@ -25,6 +25,7 @@ type Snapshot struct {
 	Quote     ComponentStatus
 	Scheduler ComponentStatus
 	Workers   ComponentStatus
+	Telemetry ComponentStatus
 }
 
 type Service struct {
@@ -86,6 +87,12 @@ func (s *Service) SetScheduler(status ComponentStatus) {
 func (s *Service) SetWorkers(status ComponentStatus) {
 	s.update(func(snapshot *Snapshot) {
 		snapshot.Workers = status
+	})
+}
+
+func (s *Service) SetTelemetry(status ComponentStatus) {
+	s.update(func(snapshot *Snapshot) {
+		snapshot.Telemetry = status
 	})
 }
 

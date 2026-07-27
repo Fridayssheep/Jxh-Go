@@ -56,7 +56,8 @@ func TestHealthMapsComponentsWithoutProbingDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Live || !got.Ready || len(got.Dependencies) != 8 || got.Dependencies[0].Status != DependencyHealthy || got.Dependencies[1].Status != DependencyUnavailable {
+	if !got.Live || !got.Ready || len(got.Dependencies) != 8 || got.Dependencies[0].Status != DependencyHealthy ||
+		got.Dependencies[1].Status != DependencyUnavailable || got.Dependencies[7].Status != DependencyHealthy {
 		t.Fatalf("health=%+v", got)
 	}
 }
@@ -66,12 +67,14 @@ func newSystemFixture(t *testing.T) (*Service, *fakeSystemStore, *fakeRestartGat
 	healthService := health.NewService()
 	healthService.SetDatabase(health.ComponentStatus{Available: true, Code: "available", CheckedAt: time.Unix(1, 0)})
 	healthService.SetNapCat(health.ComponentStatus{Available: false, Code: "napcat_unavailable", CheckedAt: time.Unix(1, 0)})
+	healthService.SetTelemetry(health.ComponentStatus{Available: true, Code: "available", CheckedAt: time.Unix(1, 0)})
 	store := &fakeSystemStore{operations: make(map[string]Operation)}
 	gateway := &fakeRestartGateway{connected: true}
 	service, err := NewService(Options{
 		Store: store, Health: healthService, Gateway: gateway, IdempotencySecret: []byte("01234567890123456789012345678901"),
 		Dependencies: map[DependencyKey]DependencyConfiguration{
 			DependencyMySQL: {Configured: true, Required: true}, DependencyNapCat: {Configured: true},
+			DependencyTelemetry: {Configured: true},
 		},
 		Now: func() time.Time { return time.Unix(100, 0) }, WorkerTimeout: time.Second, MaxConcurrentWorkers: 1,
 	})

@@ -2,8 +2,11 @@ package knowledgeadmin
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,7 +21,7 @@ import (
 const (
 	defaultLimit         = 50
 	defaultReloadTimeout = 2 * time.Minute
-	maxRememberedReloads = 1024
+	minimumSecretBytes   = 32
 )
 
 var (
@@ -31,27 +34,29 @@ type safeErrorCoder interface {
 }
 
 type reloadOverlay struct {
-	operation    ReloadOperation
-	operationKey string
-	result       *ReloadResult
+	operation ReloadOperation
+	result    *ReloadResult
 }
 
 type Service struct {
 	store          Store
+	operations     OperationStore
 	reloader       Reloader
 	events         EventSink
+	secret         []byte
 	reloadTimeout  time.Duration
 	now            func() time.Time
 	newOperationID func() string
 
-	mu             sync.RWMutex
-	latest         *reloadOverlay
-	operations     map[string]ReloadOperation
-	operationOrder []string
+	mu     sync.RWMutex
+	latest *reloadOverlay
 }
 
 func NewService(options Options) (*Service, error) {
 	if options.Store == nil {
+		return nil, ErrInvalidInput
+	}
+	if options.Reloader != nil && (options.Operations == nil || len(options.IdempotencySecret) < minimumSecretBytes) {
 		return nil, ErrInvalidInput
 	}
 	if options.Now == nil {
@@ -67,9 +72,9 @@ func NewService(options Options) (*Service, error) {
 		options.NewOperationID = randomOperationID
 	}
 	return &Service{
-		store: options.Store, reloader: options.Reloader, events: options.Events,
+		store: options.Store, operations: options.Operations, reloader: options.Reloader, events: options.Events,
+		secret:        append([]byte(nil), options.IdempotencySecret...),
 		reloadTimeout: options.ReloadTimeout, now: options.Now, newOperationID: options.NewOperationID,
-		operations: make(map[string]ReloadOperation),
 	}, nil
 }
 
@@ -95,99 +100,153 @@ func (s *Service) GetStatus(ctx context.Context, principal auth.Principal) (Stat
 	return status, nil
 }
 
-func (s *Service) StartReload(ctx context.Context, principal auth.Principal, idempotencyKey string) (ReloadOperation, error) {
+func (s *Service) StartReload(
+	ctx context.Context,
+	principal auth.Principal,
+	idempotencyKey string,
+	request ...auth.MutationContext,
+) (ReloadOperation, error) {
 	if !principal.Has(auth.PermissionKnowledgeReload) {
 		return ReloadOperation{}, ErrForbidden
 	}
 	if principal.UserID == "" || !idempotencyKeyPattern.MatchString(idempotencyKey) {
 		return ReloadOperation{}, ErrInvalidInput
 	}
-
-	s.mu.Lock()
-	operationKey := principal.UserID + "\x00" + idempotencyKey
-	if prior, exists := s.operations[operationKey]; exists {
-		s.mu.Unlock()
-		return cloneOperation(prior), nil
-	}
 	if s.reloader == nil {
-		s.mu.Unlock()
 		return ReloadOperation{}, ErrReloaderUnavailable
 	}
-	if s.latest != nil && operationInProgress(s.latest.operation.Status) {
-		s.mu.Unlock()
-		return ReloadOperation{}, ErrReloadInProgress
+	requestContext := auth.MutationContext{}
+	if len(request) > 0 {
+		requestContext = request[0]
 	}
-
-	operation := ReloadOperation{
-		ID: s.newOperationID(), Status: OperationAccepted, StartedAt: s.now().UTC(),
+	if !validMutationContext(requestContext) {
+		return ReloadOperation{}, ErrInvalidInput
 	}
-	if !validIdentifier(operation.ID) || operation.StartedAt.IsZero() {
-		s.mu.Unlock()
+	operationID := s.newOperationID()
+	requestedAt := s.now().UTC()
+	if !validIdentifier(operationID) || requestedAt.IsZero() {
 		return ReloadOperation{}, ErrInvalidData
 	}
-	s.latest = &reloadOverlay{operation: operation, operationKey: operationKey}
-	s.operations[operationKey] = cloneOperation(operation)
-	s.operationOrder = append(s.operationOrder, operationKey)
-	s.evictOldOperations()
-	s.mu.Unlock()
+	operation, fresh, err := s.operations.BeginKnowledgeReload(ctx, BeginReload{
+		Actor: principal, Context: requestContext, OperationID: operationID,
+		IdempotencyKey: idempotencyKey, RequestHash: s.requestHash(), RequestedAt: requestedAt,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrReloadInProgress):
+			return ReloadOperation{}, ErrReloadInProgress
+		case errors.Is(err, ErrIdempotencyConflict):
+			return ReloadOperation{}, ErrIdempotencyConflict
+		default:
+			return ReloadOperation{}, fmt.Errorf("begin knowledge reload: %w", err)
+		}
+	}
+	if err := validateOperation(operation); err != nil || (fresh && operation.Status != OperationAccepted) {
+		return ReloadOperation{}, ErrInvalidData
+	}
+	s.setLatest(operation, nil)
 
-	go func() {
-		reloadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reloadTimeout)
-		defer cancel()
-		s.runReload(reloadCtx, operation.ID)
-	}()
+	if fresh {
+		go func() {
+			reloadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.reloadTimeout)
+			defer cancel()
+			s.runReload(reloadCtx, operation)
+		}()
+	}
 	return cloneOperation(operation), nil
 }
 
-func (s *Service) runReload(ctx context.Context, operationID string) {
-	s.mu.Lock()
-	if s.latest == nil || s.latest.operation.ID != operationID {
-		s.mu.Unlock()
+func (s *Service) runReload(ctx context.Context, operation ReloadOperation) {
+	running, err := s.operations.TransitionKnowledgeReload(ctx, ReloadTransition{
+		OperationID: operation.ID, From: OperationAccepted, To: OperationRunning, At: s.now().UTC(),
+	})
+	if err != nil {
+		s.finishReload(operation, OperationAccepted, "operation_state_unknown", true)
 		return
 	}
-	s.latest.operation.Status = OperationRunning
-	s.operations[s.latest.operationKey] = cloneOperation(s.latest.operation)
-	s.mu.Unlock()
+	s.setLatest(running, nil)
 
 	result, err := s.reloader.Reload(ctx)
 	completedAt := s.now().UTC()
 	if err == nil {
 		err = validateReloadResult(result)
 	}
-
-	s.mu.Lock()
-	if s.latest == nil || s.latest.operation.ID != operationID {
-		s.mu.Unlock()
-		return
-	}
-	s.latest.operation.CompletedAt = timePointer(completedAt)
 	if err != nil {
 		code := safeReloadErrorCode(err)
-		s.latest.operation.Status = OperationFailed
-		s.latest.operation.ErrorCode = &code
-		s.latest.result = nil
-		s.operations[s.latest.operationKey] = cloneOperation(s.latest.operation)
-		operation := cloneOperation(s.latest.operation)
-		s.mu.Unlock()
-		s.publishCompletion(operation)
+		unknown := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+		s.finishReload(running, OperationRunning, code, unknown)
 		return
 	}
-	s.latest.operation.Status = OperationSucceeded
-	s.latest.operation.ErrorCode = nil
-	copy := result
-	s.latest.result = &copy
-	s.operations[s.latest.operationKey] = cloneOperation(s.latest.operation)
-	operation := cloneOperation(s.latest.operation)
-	s.mu.Unlock()
-	s.publishCompletion(operation)
+	completed, transitionErr := s.operations.TransitionKnowledgeReload(ctx, ReloadTransition{
+		OperationID: operation.ID, From: OperationRunning, To: OperationSucceeded, At: completedAt,
+	})
+	if transitionErr != nil {
+		return
+	}
+	s.setLatest(completed, &result)
+	s.publishCompletion(completed)
 }
 
-func (s *Service) evictOldOperations() {
-	for len(s.operationOrder) > maxRememberedReloads {
-		oldest := s.operationOrder[0]
-		s.operationOrder = s.operationOrder[1:]
-		delete(s.operations, oldest)
+func (s *Service) finishReload(operation ReloadOperation, from OperationStatus, code string, unknown bool) {
+	transitionContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	completed, err := s.operations.TransitionKnowledgeReload(transitionContext, ReloadTransition{
+		OperationID: operation.ID, From: from, To: OperationFailed, At: s.now().UTC(),
+		ErrorCode: code, OutcomeUnknown: unknown,
+	})
+	if err != nil {
+		return
 	}
+	s.setLatest(completed, nil)
+	s.publishCompletion(completed)
+}
+
+func (s *Service) requestHash() string {
+	mac := hmac.New(sha256.New, s.secret)
+	_, _ = mac.Write([]byte("jxh-admin/knowledge-reload/v1"))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func validMutationContext(value auth.MutationContext) bool {
+	return validOptionalBoundedText(value.RequestID, 64) && validOptionalBoundedText(value.IPAddress, 64) &&
+		validOptionalBoundedText(value.UserAgent, 300)
+}
+
+func validOptionalBoundedText(value string, maximum int) bool {
+	return utf8.ValidString(value) && utf8.RuneCountInString(value) <= maximum
+}
+
+func (s *Service) setLatest(operation ReloadOperation, result *ReloadResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.latest != nil && s.latest.operation.ID != operation.ID &&
+		(s.latest.operation.StartedAt.After(operation.StartedAt) || s.latest.operation.StartedAt.Equal(operation.StartedAt)) {
+		return
+	}
+	var copied *ReloadResult
+	if result != nil {
+		value := *result
+		copied = &value
+	}
+	s.latest = &reloadOverlay{operation: cloneOperation(operation), result: copied}
+}
+
+func (s *Service) RecoverInterrupted(ctx context.Context) (int, error) {
+	if s.operations == nil {
+		return 0, nil
+	}
+	operations, err := s.operations.RecoverInterruptedKnowledgeReloads(ctx, s.now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted knowledge reloads: %w", err)
+	}
+	for _, operation := range operations {
+		if validateOperation(operation) != nil || operation.Status != OperationFailed {
+			return 0, ErrInvalidData
+		}
+		s.setLatest(operation, nil)
+		s.publishCompletion(operation)
+	}
+	return len(operations), nil
 }
 
 func (s *Service) publishCompletion(operation ReloadOperation) {

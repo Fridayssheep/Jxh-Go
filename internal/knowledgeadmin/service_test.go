@@ -130,8 +130,9 @@ func TestKnowledgeReloadIsBoundedAndPublishesSafeCompletionEvent(t *testing.T) {
 	reloader := contextKnowledgeReloader{started: make(chan struct{})}
 	sink := &knowledgeEventSink{}
 	service, err := NewService(Options{
-		Store:    &knowledgeStoreFake{status: Status{State: StateUnavailable, SourceConfigured: true}},
-		Reloader: reloader, Events: sink, ReloadTimeout: 10 * time.Millisecond,
+		Store:      &knowledgeStoreFake{status: Status{State: StateUnavailable, SourceConfigured: true}},
+		Operations: newKnowledgeOperationStoreFake(), Reloader: reloader, Events: sink,
+		IdempotencySecret: []byte("01234567890123456789012345678901"), ReloadTimeout: 10 * time.Millisecond,
 		Now:            func() time.Time { return time.Now().UTC() },
 		NewOperationID: func() string { return "kop_timeout_1" },
 	})
@@ -297,20 +298,115 @@ func TestKnowledgeStatusIsRaceSafeDuringReload(t *testing.T) {
 	}
 }
 
+func TestKnowledgeRecoveryMarksInterruptedReloadFailed(t *testing.T) {
+	store := newKnowledgeOperationStoreFake()
+	completedAt := time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC)
+	code := "reload_interrupted"
+	store.recovered = []ReloadOperation{{
+		ID: "kop_recovered", Status: OperationFailed, StartedAt: completedAt.Add(-time.Minute),
+		CompletedAt: &completedAt, ErrorCode: &code,
+	}}
+	service, err := NewService(Options{
+		Store:      &knowledgeStoreFake{status: Status{State: StateReady, SourceConfigured: true}},
+		Operations: store, Now: func() time.Time { return completedAt },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := service.RecoverInterrupted(t.Context())
+	if err != nil || count != 1 {
+		t.Fatalf("recovery count=%d error=%v", count, err)
+	}
+	status, err := service.GetStatus(t.Context(), knowledgeObserver())
+	if err != nil || status.CurrentOperation == nil || status.CurrentOperation.Status != OperationFailed ||
+		status.LastErrorCode == nil || *status.LastErrorCode != code {
+		t.Fatalf("recovered status=%+v error=%v", status, err)
+	}
+}
+
 func newKnowledgeService(t *testing.T, store Store, reloader Reloader) *Service {
 	t.Helper()
 	var clock atomic.Int64
-	service, err := NewService(Options{
+	options := Options{
 		Store: store, Reloader: reloader,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC).Add(time.Duration(clock.Add(1)) * time.Second)
 		},
 		NewOperationID: func() string { return "kop_test_1" },
-	})
+	}
+	if reloader != nil {
+		options.Operations = newKnowledgeOperationStoreFake()
+		options.IdempotencySecret = []byte("01234567890123456789012345678901")
+	}
+	service, err := NewService(options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return service
+}
+
+type knowledgeOperationStoreFake struct {
+	mu         sync.Mutex
+	operations map[string]ReloadOperation
+	keys       map[string]string
+	recovered  []ReloadOperation
+}
+
+func newKnowledgeOperationStoreFake() *knowledgeOperationStoreFake {
+	return &knowledgeOperationStoreFake{operations: make(map[string]ReloadOperation), keys: make(map[string]string)}
+}
+
+func (s *knowledgeOperationStoreFake) BeginKnowledgeReload(_ context.Context, begin BeginReload) (ReloadOperation, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := begin.Actor.UserID + "\x00" + begin.IdempotencyKey
+	if id, exists := s.keys[key]; exists {
+		return cloneOperation(s.operations[id]), false, nil
+	}
+	for _, operation := range s.operations {
+		if operationInProgress(operation.Status) {
+			return ReloadOperation{}, false, ErrReloadInProgress
+		}
+	}
+	operation := ReloadOperation{ID: begin.OperationID, Status: OperationAccepted, StartedAt: begin.RequestedAt}
+	s.keys[key] = operation.ID
+	s.operations[operation.ID] = operation
+	return cloneOperation(operation), true, nil
+}
+
+func (s *knowledgeOperationStoreFake) TransitionKnowledgeReload(_ context.Context, transition ReloadTransition) (ReloadOperation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	operation := s.operations[transition.OperationID]
+	if operation.Status != transition.From {
+		return ReloadOperation{}, errors.New("unexpected knowledge operation state")
+	}
+	operation.Status = transition.To
+	if managerKnowledgeTestTerminal(transition.To) {
+		completedAt := transition.At
+		operation.CompletedAt = &completedAt
+		if transition.ErrorCode != "" {
+			code := transition.ErrorCode
+			operation.ErrorCode = &code
+		}
+	}
+	s.operations[operation.ID] = operation
+	return cloneOperation(operation), nil
+}
+
+func (s *knowledgeOperationStoreFake) RecoverInterruptedKnowledgeReloads(context.Context, time.Time) ([]ReloadOperation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	operations := make([]ReloadOperation, len(s.recovered))
+	for index := range s.recovered {
+		operations[index] = cloneOperation(s.recovered[index])
+	}
+	s.recovered = nil
+	return operations, nil
+}
+
+func managerKnowledgeTestTerminal(status OperationStatus) bool {
+	return status == OperationSucceeded || status == OperationFailed
 }
 
 func knowledgeObserver() auth.Principal {

@@ -18,7 +18,7 @@ func TestDeriveSecretsSeparatesPurposesAndCopiesOutput(t *testing.T) {
 	}
 	values := [][]byte{
 		first.SessionToken, first.LoginLimiter, first.AdminMutation,
-		first.SystemOperation, first.CommandArgument, first.TelemetryUser,
+		first.SystemOperation, first.KnowledgeOperation, first.CommandArgument, first.TelemetryUser,
 	}
 	for index, value := range values {
 		if len(value) != 32 {

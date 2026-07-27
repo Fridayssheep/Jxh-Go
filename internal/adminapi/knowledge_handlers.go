@@ -15,7 +15,7 @@ import (
 
 type KnowledgeOperations interface {
 	GetStatus(ctx context.Context, principal auth.Principal) (knowledgeadmin.Status, error)
-	StartReload(ctx context.Context, principal auth.Principal, idempotencyKey string) (knowledgeadmin.ReloadOperation, error)
+	StartReload(ctx context.Context, principal auth.Principal, idempotencyKey string, request ...auth.MutationContext) (knowledgeadmin.ReloadOperation, error)
 	ListEntries(ctx context.Context, principal auth.Principal, query knowledgeadmin.EntryQuery) (knowledgeadmin.EntryPage, error)
 	GetEntry(ctx context.Context, principal auth.Principal, id string) (knowledgeadmin.Entry, error)
 	ListConflicts(ctx context.Context, principal auth.Principal, query knowledgeadmin.ConflictQuery) (knowledgeadmin.ConflictPage, error)
@@ -72,7 +72,7 @@ func (h *KnowledgeHandlers) reload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, _ := AuthFromContext(r.Context())
-	operation, err := h.service.StartReload(r.Context(), principalFromAuth(identity), idempotencyKey)
+	operation, err := h.service.StartReload(r.Context(), principalFromAuth(identity), idempotencyKey, mutationContextFromRequest(r))
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
@@ -147,6 +147,8 @@ func (h *KnowledgeHandlers) writeServiceError(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, r, http.StatusNotFound, CodeNotFound, "knowledge entry does not exist", nil, false)
 	case errors.Is(err, knowledgeadmin.ErrReloadInProgress):
 		writeAPIError(w, r, http.StatusConflict, CodeConflict, "knowledge reload is already in progress", nil, false)
+	case errors.Is(err, knowledgeadmin.ErrIdempotencyConflict):
+		writeAPIError(w, r, http.StatusConflict, "idempotency_key_reused", "idempotency key was used with different input", nil, false)
 	case errors.Is(err, knowledgeadmin.ErrReloaderUnavailable):
 		w.Header().Set("Retry-After", "3")
 		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "knowledge reloader is unavailable", nil, true)

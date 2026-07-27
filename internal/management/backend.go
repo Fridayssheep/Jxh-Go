@@ -56,6 +56,7 @@ type Store interface {
 	telemetry.MaintenanceStore
 	analytics.Store
 	system.Store
+	knowledgeadmin.OperationStore
 }
 
 type Options struct {
@@ -182,7 +183,8 @@ func NewBackend(options Options) (*Backend, error) {
 		return fail(fmt.Errorf("create scheduled job service: %w", err))
 	}
 	knowledgeService, err := knowledgeadmin.NewService(knowledgeadmin.Options{
-		Store: options.KnowledgeStore, Reloader: options.KnowledgeReloader, Events: hub, Now: options.Now,
+		Store: options.KnowledgeStore, Operations: options.Store, Reloader: options.KnowledgeReloader,
+		Events: hub, IdempotencySecret: secrets.KnowledgeOperation, Now: options.Now,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create knowledge service: %w", err))
@@ -214,7 +216,7 @@ func NewBackend(options Options) (*Backend, error) {
 		return fail(fmt.Errorf("create telemetry maintenance: %w", err))
 	}
 
-	if err := loadRuntimeState(options.Context, settingsService, customCommandService, groupService, joinRequestService, scheduledJobService, systemService); err != nil {
+	if err := loadRuntimeState(options.Context, settingsService, customCommandService, groupService, joinRequestService, scheduledJobService, knowledgeService, systemService); err != nil {
 		return fail(err)
 	}
 	router, err := adminapi.NewManagementRouter(adminapi.ManagementOptions{
@@ -249,6 +251,7 @@ func loadRuntimeState(
 	groupsService *groups.Service,
 	joinRequestService *joinrequests.Service,
 	scheduledJobService *scheduledjobs.Service,
+	knowledgeService *knowledgeadmin.Service,
 	systemService *system.Service,
 ) error {
 	if err := settingsService.ReloadRuntime(ctx); err != nil {
@@ -265,6 +268,9 @@ func loadRuntimeState(
 	}
 	if _, err := scheduledJobService.RecoverInterruptedRuns(ctx); err != nil {
 		return fmt.Errorf("recover scheduled job runs: %w", err)
+	}
+	if _, err := knowledgeService.RecoverInterrupted(ctx); err != nil {
+		return fmt.Errorf("recover knowledge reloads: %w", err)
 	}
 	if _, err := systemService.RecoverInterrupted(ctx); err != nil {
 		return fmt.Errorf("recover system operations: %w", err)

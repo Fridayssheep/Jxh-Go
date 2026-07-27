@@ -181,7 +181,7 @@ func TestKnowledgeReloadHTTPRequiresPermissionCSRFAndIdempotencyKey(t *testing.T
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted || service.reloadCalls != 1 || service.idempotencyKey != "reload-key-1" ||
-		!strings.Contains(response.Body.String(), `"completed_at":null`) {
+		service.mutation.RequestID == "" || !strings.Contains(response.Body.String(), `"completed_at":null`) {
 		t.Fatalf("status=%d calls=%d key=%q body=%s", response.Code, service.reloadCalls, service.idempotencyKey, response.Body.String())
 	}
 }
@@ -197,6 +197,7 @@ func TestKnowledgeHTTPMapsServiceErrors(t *testing.T) {
 	}{
 		{"not found", "/api/admin/v1/knowledge/entries/missing", http.MethodGet, knowledgeadmin.ErrNotFound, http.StatusNotFound, CodeNotFound},
 		{"conflict", "/api/admin/v1/knowledge/reload", http.MethodPost, knowledgeadmin.ErrReloadInProgress, http.StatusConflict, CodeConflict},
+		{"idempotency conflict", "/api/admin/v1/knowledge/reload", http.MethodPost, knowledgeadmin.ErrIdempotencyConflict, http.StatusConflict, "idempotency_key_reused"},
 		{"unavailable", "/api/admin/v1/knowledge/reload", http.MethodPost, knowledgeadmin.ErrReloaderUnavailable, http.StatusServiceUnavailable, "dependency_unavailable"},
 		{"internal", "/api/admin/v1/knowledge/status", http.MethodGet, errors.New("WPS SID secret"), http.StatusInternalServerError, CodeInternal},
 	}
@@ -252,6 +253,7 @@ type knowledgeOperationsFake struct {
 	conflictListCalls int
 	principal         auth.Principal
 	idempotencyKey    string
+	mutation          auth.MutationContext
 	entryQuery        knowledgeadmin.EntryQuery
 	entryID           string
 	conflictQuery     knowledgeadmin.ConflictQuery
@@ -263,10 +265,13 @@ func (s *knowledgeOperationsFake) GetStatus(_ context.Context, principal auth.Pr
 	return s.status, s.err
 }
 
-func (s *knowledgeOperationsFake) StartReload(_ context.Context, principal auth.Principal, key string) (knowledgeadmin.ReloadOperation, error) {
+func (s *knowledgeOperationsFake) StartReload(_ context.Context, principal auth.Principal, key string, request ...auth.MutationContext) (knowledgeadmin.ReloadOperation, error) {
 	s.reloadCalls++
 	s.principal = principal
 	s.idempotencyKey = key
+	if len(request) > 0 {
+		s.mutation = request[0]
+	}
 	return s.operation, s.err
 }
 

@@ -1119,6 +1119,32 @@ CALL `jxh_guard_session_triggers_008`();
 DROP PROCEDURE `jxh_guard_session_triggers_008`;
 DROP PROCEDURE `jxh_assert_table_008`;
 
+-- 009_support_knowledge_reload_operations
+-- Knowledge reloads share the durable operation and idempotency lifecycle used
+-- by other externally visible management actions.
+DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`;
+DELIMITER $$
+CREATE PROCEDURE `jxh_extend_system_operations_009`()
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.table_constraints
+    WHERE constraint_schema = DATABASE()
+      AND BINARY table_name = BINARY 'system_operations'
+      AND BINARY constraint_name = BINARY 'chk_system_operations_type'
+      AND BINARY constraint_type = BINARY 'CHECK'
+  ) THEN
+    ALTER TABLE `system_operations` DROP CHECK `chk_system_operations_type`;
+  END IF;
+
+  ALTER TABLE `system_operations`
+    ADD CONSTRAINT `chk_system_operations_type`
+    CHECK (`type` IN ('napcat_restart', 'knowledge_reload'));
+END$$
+DELIMITER ;
+CALL `jxh_extend_system_operations_009`();
+DROP PROCEDURE `jxh_extend_system_operations_009`;
+
 CREATE TABLE IF NOT EXISTS `schema_migrations` (
   `version` int unsigned NOT NULL,
   `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
@@ -1145,4 +1171,5 @@ INSERT INTO `schema_migrations` (`version`, `name`, `checksum`, `applied_at`) VA
   (5, '005_automate_group_request_processing', 'a2239296a829056b33833806a7a064ab6db7ad677f915c723bfe21cd92f9bdae', CURRENT_TIMESTAMP(3)),
   (6, '006_reparse_group_request_applicants', '42ad208b9fcbf9990fc295979d17b037bc7050410e9440b2dcffa46fae8e6248', CURRENT_TIMESTAMP(3)),
   (7, '007_remove_group_request_system_request_id', '94c4e2d5edb46c0c920540684c63585973efa419c321cdcadc9e69e779ada971', CURRENT_TIMESTAMP(3)),
-  (8, '008_create_manager_schema', 'a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9', CURRENT_TIMESTAMP(3));
+  (8, '008_create_manager_schema', 'a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9', CURRENT_TIMESTAMP(3)),
+  (9, '009_support_knowledge_reload_operations', 'b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e', CURRENT_TIMESTAMP(3));

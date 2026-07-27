@@ -411,8 +411,8 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadMigrations(repository) error = %v", err)
 	}
-	if len(migrations) != 8 {
-		t.Fatalf("len(migrations) = %d, want 8", len(migrations))
+	if len(migrations) != 9 {
+		t.Fatalf("len(migrations) = %d, want 9", len(migrations))
 	}
 	wantChecksums := map[int]string{
 		1: "81f71d4c8db2a412f0f9b0f1d4d61d6d53ecc538b801b2c365d570f789fa66a9",
@@ -423,6 +423,7 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 		6: "42ad208b9fcbf9990fc295979d17b037bc7050410e9440b2dcffa46fae8e6248",
 		7: "94c4e2d5edb46c0c920540684c63585973efa419c321cdcadc9e69e779ada971",
 		8: "a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9",
+		9: "b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e",
 	}
 	for _, migration := range migrations {
 		if want := wantChecksums[migration.Version]; want != "" && migration.Checksum != want {
@@ -434,11 +435,11 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read init schema: %v", err)
 	}
-	if got := bytes.Count(initSQL, []byte("DELIMITER $$\n")); got != 8 {
-		t.Fatalf("init schema compound delimiter count = %d, want 8", got)
+	if got := bytes.Count(initSQL, []byte("DELIMITER $$\n")); got != 9 {
+		t.Fatalf("init schema compound delimiter count = %d, want 9", got)
 	}
-	if got := bytes.Count(initSQL, []byte("DELIMITER ;\n")); got != 8 {
-		t.Fatalf("init schema delimiter reset count = %d, want 8", got)
+	if got := bytes.Count(initSQL, []byte("DELIMITER ;\n")); got != 9 {
+		t.Fatalf("init schema delimiter reset count = %d, want 9", got)
 	}
 	const clientCharsetPrologue = "SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
 	if got := bytes.Count(initSQL, []byte(clientCharsetPrologue)); got != 1 {
@@ -450,7 +451,7 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 		t.Fatalf("render repository init: %v", err)
 	}
 	if !bytes.Equal(initSQL, []byte(wantInitSQL)) {
-		t.Fatalf("init schema is not the deterministic reversible MySQL CLI rendering of migrations 001..008")
+		t.Fatalf("init schema is not the deterministic reversible MySQL CLI rendering of migrations 001..009")
 	}
 
 	initText := string(initSQL)
@@ -495,6 +496,9 @@ func renderRepositoryMySQLCLIInit(migrations []Migration) (string, error) {
 			{kind: "trigger", name: "trg_admin_sessions_replacement_insert", after: "-- jxh:008-stage session-trigger-insert"},
 			{kind: "trigger", name: "trg_admin_sessions_replacement_update", after: "-- jxh:008-stage session-trigger-update"},
 		},
+		9: {
+			{kind: "procedure", name: "jxh_extend_system_operations_009", after: "CALL `jxh_extend_system_operations_009`();"},
+		},
 	}
 
 	const header = "-- Jxh Manager final MySQL schema.\n" +
@@ -530,8 +534,8 @@ func renderRepositoryMySQLCLIInit(migrations []Migration) (string, error) {
 		rendered.WriteString(migrationSQL)
 		rendered.WriteByte('\n')
 	}
-	if compoundCount != 8 {
-		return "", fmt.Errorf("repository compound CREATE count = %d, want 8", compoundCount)
+	if compoundCount != 9 {
+		return "", fmt.Errorf("repository compound CREATE count = %d, want 9", compoundCount)
 	}
 
 	rendered.WriteString(ledgerDDL)
@@ -1894,6 +1898,8 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 		queryStep("SELECT `version`, `name`, `checksum`, `stage`", []string{"version", "name", "checksum", "stage"}, nil),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_guard_008`"),
 		execStep("INSERT INTO `schema_migrations`"),
+		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`"),
+		execStep("INSERT INTO `schema_migrations`"),
 		queryStep("RELEASE_LOCK", []string{"released"}, [][]driver.Value{{int64(1)}}),
 	)
 	db, state := newScriptDB(t, steps...)
@@ -1902,8 +1908,8 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if len(applied) != 1 || applied[0].Version != 8 {
-		t.Fatalf("applied = %+v, want only 008", applied)
+	if len(applied) != 2 || applied[0].Version != 8 || applied[1].Version != 9 {
+		t.Fatalf("applied = %+v, want 008 through 009", applied)
 	}
 	state.assertComplete(t)
 }
@@ -1953,6 +1959,8 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_guard_008`"),
 		execStep("INSERT INTO `schema_migrations`"),
+		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`"),
+		execStep("INSERT INTO `schema_migrations`"),
 		queryStep("RELEASE_LOCK", []string{"released"}, [][]driver.Value{{int64(1)}}),
 	)
 	db, state := newScriptDB(t, steps...)
@@ -1961,8 +1969,8 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if len(applied) != 3 || applied[0].Version != 6 || applied[1].Version != 7 || applied[2].Version != 8 {
-		t.Fatalf("applied = %+v, want 006 through 008", applied)
+	if len(applied) != 4 || applied[0].Version != 6 || applied[1].Version != 7 || applied[2].Version != 8 || applied[3].Version != 9 {
+		t.Fatalf("applied = %+v, want 006 through 009", applied)
 	}
 	state.assertComplete(t)
 	state.assertSingleConnection(t)

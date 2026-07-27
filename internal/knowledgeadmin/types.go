@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/auth"
 	"github.com/zjutjh/jxh-go/internal/events"
 )
 
@@ -15,6 +16,7 @@ var (
 	ErrNotFound            = errors.New("knowledge entry not found")
 	ErrReloadInProgress    = errors.New("knowledge reload already in progress")
 	ErrReloaderUnavailable = errors.New("knowledge reloader unavailable")
+	ErrIdempotencyConflict = errors.New("knowledge reload idempotency conflict")
 )
 
 type State string
@@ -161,15 +163,41 @@ type Reloader interface {
 	Reload(ctx context.Context) (ReloadResult, error)
 }
 
+type BeginReload struct {
+	Actor          auth.Principal
+	Context        auth.MutationContext
+	OperationID    string
+	IdempotencyKey string
+	RequestHash    string
+	RequestedAt    time.Time
+}
+
+type ReloadTransition struct {
+	OperationID    string
+	From           OperationStatus
+	To             OperationStatus
+	At             time.Time
+	ErrorCode      string
+	OutcomeUnknown bool
+}
+
+type OperationStore interface {
+	BeginKnowledgeReload(ctx context.Context, begin BeginReload) (operation ReloadOperation, fresh bool, err error)
+	TransitionKnowledgeReload(ctx context.Context, transition ReloadTransition) (ReloadOperation, error)
+	RecoverInterruptedKnowledgeReloads(ctx context.Context, recoveredAt time.Time) ([]ReloadOperation, error)
+}
+
 type EventSink interface {
 	Publish(draft events.Draft) (events.Event, error)
 }
 
 type Options struct {
-	Store          Store
-	Reloader       Reloader
-	Events         EventSink
-	ReloadTimeout  time.Duration
-	Now            func() time.Time
-	NewOperationID func() string
+	Store             Store
+	Operations        OperationStore
+	Reloader          Reloader
+	Events            EventSink
+	IdempotencySecret []byte
+	ReloadTimeout     time.Duration
+	Now               func() time.Time
+	NewOperationID    func() string
 }

@@ -58,6 +58,39 @@ func TestSubscribeReplaysInOrderThenReceivesLiveWithoutGap(t *testing.T) {
 	}
 }
 
+func TestRetentionUsesPublicationTimeForBackdatedAndFutureEvents(t *testing.T) {
+	now := time.Unix(5000, 0).UTC()
+	hub := newTestHub(t, Options{Capacity: 8, Retention: time.Hour, SubscriberBuffer: 4, Now: func() time.Time { return now }})
+	first := publishTestEvent(t, hub, EventGroupUpdated, "current", now)
+	backdated := publishTestEvent(t, hub, EventGroupUpdated, "backdated", now.Add(-24*time.Hour))
+	future := publishTestEvent(t, hub, EventGroupUpdated, "future", now.Add(24*time.Hour))
+
+	subscription, state, err := hub.Subscribe(t.Context(), SubscribeOptions{
+		AllowedTopics: []Topic{TopicGroups}, LastEventID: first.ID,
+	})
+	if err != nil || state != ReplayAvailable {
+		t.Fatalf("initial replay state=%v error=%v", state, err)
+	}
+	if got := receiveEvent(t, subscription); got.ID != backdated.ID {
+		t.Fatalf("backdated replay = %+v", got)
+	}
+	if got := receiveEvent(t, subscription); got.ID != future.ID {
+		t.Fatalf("future replay = %+v", got)
+	}
+	subscription.Close()
+
+	now = now.Add(time.Hour + time.Millisecond)
+	expired, state, err := hub.Subscribe(t.Context(), SubscribeOptions{
+		AllowedTopics: []Topic{TopicGroups}, LastEventID: future.ID,
+	})
+	if err != nil || state != ReplayReset {
+		t.Fatalf("expired future cursor state=%v error=%v", state, err)
+	}
+	if reset := receiveEvent(t, expired); reset.Type != EventStreamReset {
+		t.Fatalf("expired future cursor event = %+v", reset)
+	}
+}
+
 func TestSubscribeEnforcesAllowedAndRequestedTopics(t *testing.T) {
 	hub := newTestHub(t, Options{Capacity: 8, Retention: time.Hour, SubscriberBuffer: 4})
 	if _, _, err := hub.Subscribe(t.Context(), SubscribeOptions{

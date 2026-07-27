@@ -117,9 +117,14 @@ type Hub struct {
 	subscriberBuffer int
 	idSource         func() (string, error)
 	now              func() time.Time
-	events           []Event
+	events           []retainedEvent
 	subscribers      map[uint64]*Subscription
 	nextSubscriberID uint64
+}
+
+type retainedEvent struct {
+	event       Event
+	publishedAt time.Time
 }
 
 type Subscription struct {
@@ -161,13 +166,14 @@ func (h *Hub) Publish(draft Draft) (Event, error) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	publishedAt := h.now().UTC()
 	id, err := h.idSource()
 	if err != nil || !validOpaqueValue(id, 256) {
 		return Event{}, ErrIDSource
 	}
 	occurredAt := draft.OccurredAt
 	if occurredAt.IsZero() {
-		occurredAt = h.now()
+		occurredAt = publishedAt
 	}
 	event := Event{
 		ID:         id,
@@ -177,8 +183,8 @@ func (h *Hub) Publish(draft Draft) (Event, error) {
 		Reason:     draft.Reason,
 		Topic:      topic,
 	}
-	h.pruneLocked(h.now())
-	h.events = append(h.events, event)
+	h.pruneLocked(publishedAt)
+	h.events = append(h.events, retainedEvent{event: event, publishedAt: publishedAt})
 	if overflow := len(h.events) - h.capacity; overflow > 0 {
 		copy(h.events, h.events[overflow:])
 		h.events = h.events[:h.capacity]
@@ -300,7 +306,7 @@ func (h *Hub) replayLocked(lastEventID string, topics map[Topic]struct{}) ([]Eve
 	}
 	cursor := -1
 	for index := range h.events {
-		if h.events[index].ID == lastEventID {
+		if h.events[index].event.ID == lastEventID {
 			cursor = index
 			break
 		}
@@ -313,7 +319,8 @@ func (h *Hub) replayLocked(lastEventID string, topics map[Topic]struct{}) ([]Eve
 		return []Event{reset}, ReplayReset, nil
 	}
 	replay := make([]Event, 0, len(h.events)-cursor-1)
-	for _, event := range h.events[cursor+1:] {
+	for _, retained := range h.events[cursor+1:] {
+		event := retained.event
 		if _, allowed := topics[event.Topic]; allowed {
 			replay = append(replay, event)
 		}
@@ -337,14 +344,16 @@ func (h *Hub) resetEventLocked() (Event, error) {
 
 func (h *Hub) pruneLocked(now time.Time) {
 	cutoff := now.Add(-h.retention)
-	firstRetained := 0
-	for firstRetained < len(h.events) && h.events[firstRetained].OccurredAt.Before(cutoff) {
-		firstRetained++
+	retained := h.events[:0]
+	for _, event := range h.events {
+		if !event.publishedAt.Before(cutoff) {
+			retained = append(retained, event)
+		}
 	}
-	if firstRetained > 0 {
-		copy(h.events, h.events[firstRetained:])
-		h.events = h.events[:len(h.events)-firstRetained]
+	for index := len(retained); index < len(h.events); index++ {
+		h.events[index] = retainedEvent{}
 	}
+	h.events = retained
 }
 
 func (h *Hub) closeSubscriptionLocked(id uint64, subscription *Subscription) {

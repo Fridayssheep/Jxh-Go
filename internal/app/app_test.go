@@ -74,11 +74,95 @@ func TestCriticalExitStopsApplicationAndClosesResources(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	err = application.Run(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "napcat: connection loop failed") {
+	if !errors.Is(err, ErrComponentFailed) || strings.Contains(err.Error(), "connection loop failed") {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if !closed {
 		t.Fatal("resource was not closed")
+	}
+}
+
+func TestRunWaitsForWorkerBeforeClosingResources(t *testing.T) {
+	workerExited := make(chan struct{})
+	application, err := New(Options{
+		ShutdownTimeout: time.Second,
+		Components: []Component{{
+			Name: "worker", Critical: true,
+			Run: func(ctx context.Context) error {
+				<-ctx.Done()
+				time.Sleep(10 * time.Millisecond)
+				close(workerExited)
+				return nil
+			},
+		}},
+		Closers: []io.Closer{closerFunc(func() error {
+			select {
+			case <-workerExited:
+				return nil
+			default:
+				return errors.New("closed before worker exit")
+			}
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := application.Run(ctx); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRunReturnsSanitizedWorkerShutdownFailure(t *testing.T) {
+	application, err := New(Options{
+		ShutdownTimeout: time.Second,
+		Components: []Component{{
+			Name: "telemetry", Critical: true,
+			Run: func(ctx context.Context) error {
+				<-ctx.Done()
+				return errors.New("dsn password secret")
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = application.Run(ctx)
+	if !errors.Is(err, ErrComponentFailed) || strings.Contains(err.Error(), "password") {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRunBoundsComponentAndCloserShutdown(t *testing.T) {
+	block := make(chan struct{})
+	application, err := New(Options{
+		ShutdownTimeout: 20 * time.Millisecond,
+		Components: []Component{{
+			Name: "stuck", Critical: true,
+			Run: func(context.Context) error {
+				<-block
+				return nil
+			},
+			Shutdown: func(context.Context) error {
+				<-block
+				return nil
+			},
+		}},
+		Closers: []io.Closer{closerFunc(func() error { <-block; return nil })},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	started := time.Now()
+	err = application.Run(ctx)
+	close(block)
+	if !errors.Is(err, ErrShutdownTimeout) || time.Since(started) > 200*time.Millisecond {
+		t.Fatalf("Run() error=%v duration=%s", err, time.Since(started))
 	}
 }
 

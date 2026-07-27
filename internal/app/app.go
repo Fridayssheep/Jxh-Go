@@ -12,6 +12,14 @@ import (
 
 var ErrAlreadyRun = errors.New("app has already been run")
 
+var (
+	ErrComponentFailed = errors.New("application component failed")
+	ErrShutdownFailed  = errors.New("application shutdown failed")
+	ErrShutdownTimeout = errors.New("application shutdown timed out")
+)
+
+var errComponentPanic = errors.New("component panic")
+
 // Component is a long-running process owned by App. Critical components stop
 // the whole application when they exit unexpectedly; degradable components
 // are reported and leave the remaining message path running.
@@ -89,37 +97,37 @@ func (a *App) Run(ctx context.Context) error {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	results := make(chan componentResult, len(a.components))
-	var workers sync.WaitGroup
 	for index := range a.components {
 		component := a.components[index]
-		workers.Add(1)
 		go func() {
-			defer workers.Done()
 			results <- componentResult{index: index, err: runComponent(runCtx, component)}
 		}()
 	}
 
 	var runErr error
-	remaining := len(a.components)
-	for remaining > 0 && runErr == nil {
+	completed := make([]bool, len(a.components))
+	completedCount := 0
+	for completedCount < len(a.components) && runErr == nil {
 		select {
 		case <-ctx.Done():
 			runErr = context.Cause(ctx)
 		case result := <-results:
-			remaining--
-			component := a.components[result.index]
-			if runCtx.Err() != nil {
+			if completed[result.index] {
 				continue
 			}
+			completed[result.index] = true
+			completedCount++
+			if ctx.Err() != nil {
+				runErr = context.Cause(ctx)
+				continue
+			}
+			component := a.components[result.index]
 			if component.Critical {
-				if result.err == nil {
-					result.err = errors.New("component exited unexpectedly")
-				}
-				runErr = fmt.Errorf("%s: %w", component.Name, result.err)
+				runErr = componentFailure(component.Name, result.err)
 				continue
 			}
 			if result.err != nil {
-				a.logger.Printf("degradable component stopped name=%s error=%v", component.Name, result.err)
+				a.logger.Printf("degradable component stopped name=%s status=failed", component.Name)
 			} else {
 				a.logger.Printf("degradable component stopped name=%s", component.Name)
 			}
@@ -127,24 +135,33 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	cancel()
-	shutdownErr := a.shutdown()
-	workers.Wait()
+	shutdownErr := a.shutdownComponents()
+	waitErr := a.waitForComponents(results, completed, completedCount)
+	closeErr := a.closeResources()
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return errors.Join(runErr, shutdownErr)
+		return errors.Join(runErr, shutdownErr, waitErr, closeErr)
 	}
-	return shutdownErr
+	return errors.Join(shutdownErr, waitErr, closeErr)
 }
 
 func runComponent(ctx context.Context, component Component) (err error) {
 	defer func() {
 		if recover() != nil {
-			err = errors.New("component panic")
+			err = errComponentPanic
 		}
 	}()
 	return component.Run(ctx)
 }
 
-func (a *App) shutdown() error {
+func componentFailure(name string, err error) error {
+	reason := ErrComponentFailed
+	if errors.Is(err, errComponentPanic) {
+		reason = errComponentPanic
+	}
+	return fmt.Errorf("component %s stopped: %w", name, reason)
+}
+
+func (a *App) shutdownComponents() error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 	defer cancel()
 
@@ -153,14 +170,60 @@ func (a *App) shutdown() error {
 		if component.Shutdown == nil {
 			continue
 		}
-		if err := component.Shutdown(ctx); err != nil {
-			joined = errors.Join(joined, fmt.Errorf("shutdown %s: %w", component.Name, err))
-		}
-	}
-	for index := len(a.closers) - 1; index >= 0; index-- {
-		if err := a.closers[index].Close(); err != nil {
-			joined = errors.Join(joined, fmt.Errorf("close resource %d: %w", index, err))
+		if err := runBounded(ctx, component.Shutdown); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(joined, fmt.Errorf("shutdown component %s: %w", component.Name, ErrShutdownTimeout))
+			}
+			joined = errors.Join(joined, fmt.Errorf("shutdown component %s: %w", component.Name, ErrShutdownFailed))
 		}
 	}
 	return joined
+}
+
+func (a *App) waitForComponents(results <-chan componentResult, completed []bool, completedCount int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+	defer cancel()
+	var joined error
+	for completedCount < len(a.components) {
+		select {
+		case result := <-results:
+			if completed[result.index] {
+				continue
+			}
+			completed[result.index] = true
+			completedCount++
+			if result.err != nil && !errors.Is(result.err, context.Canceled) && !errors.Is(result.err, context.DeadlineExceeded) {
+				joined = errors.Join(joined, componentFailure(a.components[result.index].Name, result.err))
+			}
+		case <-ctx.Done():
+			return errors.Join(joined, ErrShutdownTimeout)
+		}
+	}
+	return joined
+}
+
+func (a *App) closeResources() error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
+	defer cancel()
+	var joined error
+	for index := len(a.closers) - 1; index >= 0; index-- {
+		if err := runBounded(ctx, func(context.Context) error { return a.closers[index].Close() }); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return errors.Join(joined, fmt.Errorf("close resource %d: %w", index, ErrShutdownTimeout))
+			}
+			joined = errors.Join(joined, fmt.Errorf("close resource %d: %w", index, ErrShutdownFailed))
+		}
+	}
+	return joined
+}
+
+func runBounded(ctx context.Context, operation func(context.Context) error) error {
+	result := make(chan error, 1)
+	go func() { result <- operation(ctx) }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }

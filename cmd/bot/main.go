@@ -257,12 +257,14 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 		CustomCommands: customCommands,
 		Telemetry:      telemetryRecorder,
 	})
-	schedulerRuntime := scheduler.NewRuntime(scheduler.RuntimeOptions{
-		Store:    store,
-		Send:     pipeline.SendGroupText,
-		Location: scheduleLocation,
-		Logf:     log.Printf,
-	})
+	schedulerOptions := scheduler.RuntimeOptions{
+		Store: store, Send: pipeline.SendGroupText, Location: scheduleLocation, Logf: log.Printf,
+	}
+	if managementBackend != nil {
+		schedulerOptions.Events = managementBackend.Events
+		schedulerOptions.Telemetry = managementBackend.Telemetry
+	}
+	schedulerRuntime := scheduler.NewRuntime(schedulerOptions)
 
 	healthAddr := strings.TrimSpace(os.Getenv("JXH_HEALTH_ADDR"))
 	if healthAddr == "" {

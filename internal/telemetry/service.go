@@ -66,6 +66,7 @@ type Observation struct {
 	Result       Result
 	Duration     time.Duration
 	CommandID    string
+	JobID        string
 	KnowledgeKey string
 	Count        int64
 }
@@ -79,6 +80,7 @@ type Event struct {
 	Result       Result
 	DurationMS   int64
 	CommandID    string
+	JobID        string
 	KnowledgeKey string
 	Count        int64
 }
@@ -208,7 +210,7 @@ func (s *Service) Run(ctx context.Context) error {
 func (s *Service) eventFromObservation(value Observation) (Event, bool) {
 	if !validKind(value.Kind) || !validResult(value.Result) || value.GroupID <= 0 || value.UserID < 0 ||
 		value.Duration < 0 || value.Duration > time.Hour || value.Count < 0 || value.Count > 1_000_000_000 ||
-		!validFeatureKey(value.FeatureKey) || !validSafeKey(value.CommandID, 256) ||
+		!validFeatureKey(value.FeatureKey) || !validSafeKey(value.CommandID, 256) || !validSafeKey(value.JobID, 256) ||
 		!validSafeKey(value.KnowledgeKey, 256) || !validObservationShape(value) {
 		return Event{}, false
 	}
@@ -229,7 +231,7 @@ func (s *Service) eventFromObservation(value Observation) (Event, bool) {
 		Kind: value.Kind, OccurredAt: value.OccurredAt.UTC(), GroupID: strconv.FormatInt(value.GroupID, 10),
 		UserKey: userKey, FeatureKey: value.FeatureKey, Result: value.Result,
 		DurationMS: value.Duration.Milliseconds(), CommandID: value.CommandID,
-		KnowledgeKey: value.KnowledgeKey, Count: count,
+		JobID: value.JobID, KnowledgeKey: value.KnowledgeKey, Count: count,
 	}, true
 }
 
@@ -315,6 +317,9 @@ func validFeatureKey(value string) bool {
 
 func validObservationShape(value Observation) bool {
 	if value.CommandID != "" && value.Kind != EventCommandRun {
+		return false
+	}
+	if value.JobID != "" && value.Kind != EventScheduledJobRun {
 		return false
 	}
 	if value.KnowledgeKey != "" && value.Kind != EventKeywordReply && value.Kind != EventAIRequest {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/groups"
 	"github.com/zjutjh/jxh-go/internal/joinrequests"
 	"github.com/zjutjh/jxh-go/internal/scheduledjobs"
+	"github.com/zjutjh/jxh-go/internal/scheduler"
 	"github.com/zjutjh/jxh-go/internal/telemetry"
 )
 
@@ -118,6 +120,33 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		t.Fatalf("replay scheduled test send: reservation=%+v error=%v", testReplay, err)
 	}
 
+	occurrenceID := "scheduled-" + job.ID + "-20260728"
+	numericJobID := managerIntegrationJobID(t, job.ID)
+	failedReservation, err := store.BeginScheduledJobRun(t.Context(), numericJobID, occurrenceID, now, now)
+	if err != nil || !failedReservation.Fresh || failedReservation.RunID == "" {
+		t.Fatalf("begin failed scheduled run: reservation=%+v error=%v", failedReservation, err)
+	}
+	if err := store.CompleteScheduledJobRun(t.Context(), scheduler.RunCompletion{
+		RunID: failedReservation.RunID, Result: scheduler.RunFailed,
+		CompletedAt: now.Add(time.Second), Duration: time.Second, ErrorCode: "send_rejected",
+	}); err != nil {
+		t.Fatalf("complete failed scheduled run: %v", err)
+	}
+	retryReservation, err := store.BeginScheduledJobRun(t.Context(), numericJobID, occurrenceID, now, now.Add(2*time.Second))
+	if err != nil || !retryReservation.Fresh || retryReservation.RunID == failedReservation.RunID {
+		t.Fatalf("begin scheduled retry: reservation=%+v error=%v", retryReservation, err)
+	}
+	if err := store.CompleteScheduledJobRun(t.Context(), scheduler.RunCompletion{
+		RunID: retryReservation.RunID, Result: scheduler.RunSuccess,
+		CompletedAt: now.Add(3 * time.Second), Duration: time.Second,
+	}); err != nil {
+		t.Fatalf("complete successful scheduled retry: %v", err)
+	}
+	terminalReservation, err := store.BeginScheduledJobRun(t.Context(), numericJobID, occurrenceID, now, now.Add(4*time.Second))
+	if err != nil || terminalReservation.Fresh || terminalReservation.RunID != retryReservation.RunID || terminalReservation.Result != scheduler.RunSuccess {
+		t.Fatalf("replay successful scheduled occurrence: reservation=%+v error=%v", terminalReservation, err)
+	}
+
 	recordedRun, err := store.RecordCommandRun(t.Context(), customcommand.Run{
 		RunIdentity: "command-run-identity-1", CommandID: command.ID, CommandName: command.Name,
 		GroupID: "10001", TriggeredByQQ: "20001", Result: customcommand.RunSuccess,
@@ -141,6 +170,13 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		t.Fatalf("aggregate UTC telemetry: %v", err)
 	}
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM bot_operation_daily WHERE timezone = 'UTC'", 40)
+	if err := store.AppendTelemetryEvents(t.Context(), []telemetry.Event{{
+		Kind: telemetry.EventScheduledJobRun, OccurredAt: now.Add(7 * time.Minute), GroupID: "10001",
+		Result: telemetry.ResultSuccess, DurationMS: 50, JobID: job.ID, Count: 1,
+	}}); err != nil {
+		t.Fatalf("append scheduled job telemetry: %v", err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM bot_operation_events WHERE event_type = 'scheduled_job_run' AND job_id = "+strconv.FormatUint(numericJobID, 10)+" AND command_id IS NULL", 1)
 	filter := analytics.Filter{
 		From: now.Add(-time.Hour), To: now.Add(time.Hour), GroupIDs: []string{"10001"}, Timezone: "Asia/Shanghai",
 	}
@@ -177,9 +213,29 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		t.Fatalf("open scheduled run export: %v", err)
 	}
 	defer scheduledRows.Close()
-	scheduledRow, ok, err := scheduledRows.Next(t.Context())
-	if err != nil || !ok || scheduledRow.RunID != completedRun.ID || scheduledRow.Result != analytics.ResultSuccess {
-		t.Fatalf("read scheduled run export: row=%+v ok=%t error=%v", scheduledRow, ok, err)
+	wantScheduledRuns := map[string]analytics.Result{
+		completedRun.ID: analytics.ResultSuccess, failedReservation.RunID: analytics.ResultFailed,
+		retryReservation.RunID: analytics.ResultSuccess,
+	}
+	for {
+		scheduledRow, ok, err := scheduledRows.Next(t.Context())
+		if err != nil {
+			t.Fatalf("read scheduled run export: %v", err)
+		}
+		if !ok {
+			break
+		}
+		want, expected := wantScheduledRuns[scheduledRow.RunID]
+		if !expected {
+			continue
+		}
+		if scheduledRow.Result != want || scheduledRow.GroupID != "10001" {
+			t.Fatalf("scheduled run export row=%+v want_result=%s", scheduledRow, want)
+		}
+		delete(wantScheduledRuns, scheduledRow.RunID)
+	}
+	if len(wantScheduledRuns) != 0 {
+		t.Fatalf("scheduled run export missing=%v", wantScheduledRuns)
 	}
 	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN ('scheduled_job.create', 'custom_command.create')", 2)
 	assertManagerAuthCount(t, sqlDB, `SELECT
@@ -277,6 +333,15 @@ func managerMetricValue(summary analytics.SummaryData, key analytics.MetricKey) 
 		return -1
 	}
 	return *value.Value
+}
+
+func managerIntegrationJobID(t *testing.T, value string) uint64 {
+	t.Helper()
+	id, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || id == 0 {
+		t.Fatalf("parse scheduled job ID %q: %v", value, err)
+	}
+	return id
 }
 
 func managerIntegrationCreateGroup(

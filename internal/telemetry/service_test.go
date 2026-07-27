@@ -100,6 +100,28 @@ func TestRecordRejectsInvalidOrFreeFormLikeFields(t *testing.T) {
 	}
 }
 
+func TestRecordKeepsScheduledJobIdentitySeparateFromCommandIdentity(t *testing.T) {
+	service := newTestService(t, &storeFake{}, 3, 3)
+	if !service.Record(Observation{
+		Kind: EventScheduledJobRun, GroupID: 123, JobID: "42", Result: ResultSuccess,
+	}) {
+		t.Fatal("scheduled job observation was rejected")
+	}
+	if service.Record(Observation{
+		Kind: EventScheduledJobRun, GroupID: 123, CommandID: "cmd_1", Result: ResultSuccess,
+	}) {
+		t.Fatal("scheduled job observation accepted command identity")
+	}
+	if service.Record(Observation{
+		Kind: EventCommandRun, GroupID: 123, JobID: "42", Result: ResultSuccess,
+	}) {
+		t.Fatal("command observation accepted scheduled job identity")
+	}
+	if event := <-service.queue; event.JobID != "42" || event.CommandID != "" {
+		t.Fatalf("queued event=%+v", event)
+	}
+}
+
 func TestRecordRejectsEventsAfterShutdownAndCountsDiscardedOnce(t *testing.T) {
 	store := &storeFake{err: errors.New("unavailable")}
 	service := newTestService(t, store, 4, 4)

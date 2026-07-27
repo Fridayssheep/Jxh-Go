@@ -16,7 +16,12 @@ import (
 	"github.com/zjutjh/napcat-sdk/api"
 )
 
-var ErrUnavailable = errors.New("napcat sender is not connected")
+type unavailableError struct{}
+
+func (*unavailableError) Error() string           { return "napcat sender is not connected" }
+func (*unavailableError) SafeFailureCode() string { return "unavailable" }
+
+var ErrUnavailable error = &unavailableError{}
 
 var ErrOperationFailed = errors.New("napcat operation failed")
 
@@ -45,6 +50,8 @@ func (e *OperationError) Error() string {
 func (e *OperationError) Is(target error) bool {
 	return target == ErrOperationFailed || (e.match != nil && target == e.match)
 }
+
+func (e *OperationError) SafeFailureCode() string { return string(e.Code) }
 
 const (
 	maxGroupRequestFlagLength   = 512

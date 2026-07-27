@@ -22,6 +22,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/customcommand"
 	"github.com/zjutjh/jxh-go/internal/joinrequests"
 	"github.com/zjutjh/jxh-go/internal/scheduledjobs"
+	"github.com/zjutjh/jxh-go/internal/scheduler"
 	"github.com/zjutjh/jxh-go/internal/telemetry"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -29,6 +30,7 @@ import (
 
 var (
 	_ joinrequests.Store         = (*Store)(nil)
+	_ scheduler.RuntimeStore     = (*Store)(nil)
 	_ scheduledjobs.Store        = (*Store)(nil)
 	_ customcommand.Store        = (*Store)(nil)
 	_ telemetry.Store            = (*Store)(nil)
@@ -1679,6 +1681,99 @@ func (s *Store) CompleteScheduledJobTestSend(ctx context.Context, completion sch
 	return result, err
 }
 
+func (s *Store) BeginScheduledJobRun(
+	ctx context.Context,
+	jobID uint64,
+	occurrenceID string,
+	scheduledFor time.Time,
+	startedAt time.Time,
+) (scheduler.RunReservation, error) {
+	if jobID == 0 || !strings.HasPrefix(occurrenceID, "scheduled-") || len(occurrenceID) > 110 {
+		return scheduler.RunReservation{}, fmt.Errorf("invalid scheduled run identity")
+	}
+	var reservation scheduler.RunReservation
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var job scheduledJobManagerRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND enabled = ? AND archived_at IS NULL", jobID, true).Take(&job).Error; err != nil {
+			return err
+		}
+		var prior []scheduledRunManagerRow
+		if err := tx.Where("job_id = ? AND kind = ? AND run_identity LIKE ?", jobID, scheduledjobs.RunScheduled, occurrenceID+"-%").
+			Order("started_at DESC, run_id DESC").Find(&prior).Error; err != nil {
+			return err
+		}
+		if len(prior) > 0 {
+			latest := prior[0]
+			if latest.CompletedAt == nil {
+				completedAt := startedAt.UTC()
+				if err := tx.Model(&scheduledRunManagerRow{}).Where("run_id = ? AND completed_at IS NULL", latest.RunID).Updates(map[string]any{
+					"result": scheduledjobs.RunUnknown, "completed_at": completedAt,
+					"duration_ms": gorm.Expr("GREATEST(TIMESTAMPDIFF(MICROSECOND, started_at, ?) DIV 1000, 0)", completedAt),
+					"error_code":  "process_interrupted",
+				}).Error; err != nil {
+					return err
+				}
+				latest.Result = string(scheduledjobs.RunUnknown)
+				latest.CompletedAt = &completedAt
+			}
+			result := scheduler.RunResult(latest.Result)
+			if result != scheduler.RunFailed {
+				reservation = scheduler.RunReservation{RunID: latest.RunID, Result: result, Fresh: false}
+				return nil
+			}
+		}
+		runID, err := opsNewID("run")
+		if err != nil {
+			return err
+		}
+		scheduledAt := scheduledFor.UTC()
+		run := scheduledRunManagerRow{
+			RunID: runID, RunIdentity: fmt.Sprintf("%s-%d", occurrenceID, len(prior)+1), JobID: jobID,
+			Kind: string(scheduledjobs.RunScheduled), Result: string(scheduler.RunUnknown),
+			ScheduledFor: &scheduledAt, StartedAt: startedAt.UTC(),
+		}
+		if err := tx.Create(&run).Error; err != nil {
+			return err
+		}
+		reservation = scheduler.RunReservation{RunID: runID, Result: scheduler.RunUnknown, Fresh: true}
+		return nil
+	})
+	return reservation, err
+}
+
+func (s *Store) CompleteScheduledJobRun(ctx context.Context, completion scheduler.RunCompletion) error {
+	if completion.RunID == "" || completion.CompletedAt.IsZero() || completion.Duration < 0 ||
+		(completion.Result != scheduler.RunSuccess && completion.Result != scheduler.RunFailed && completion.Result != scheduler.RunUnknown) {
+		return fmt.Errorf("invalid scheduled run completion")
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row scheduledRunManagerRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("run_id = ? AND kind = ?", completion.RunID, scheduledjobs.RunScheduled).Take(&row).Error; err != nil {
+			return err
+		}
+		durationMS := uint64(max(completion.Duration.Milliseconds(), 0))
+		errorCode := opsOptionalString(completion.ErrorCode)
+		if row.CompletedAt != nil {
+			if row.Result != string(completion.Result) || row.DurationMS != durationMS || !sameManagerString(row.ErrorCode, errorCode) {
+				return fmt.Errorf("scheduled run completion conflict")
+			}
+			return nil
+		}
+		result := tx.Model(&scheduledRunManagerRow{}).Where("run_id = ? AND completed_at IS NULL", completion.RunID).Updates(map[string]any{
+			"result": completion.Result, "completed_at": completion.CompletedAt.UTC(),
+			"duration_ms": durationMS, "error_code": errorCode, "error_message": nil,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("scheduled run completion conflict")
+		}
+		return nil
+	})
+}
+
 func (s *Store) RecoverInterruptedScheduledJobRuns(ctx context.Context, recoveredAt time.Time) (int, error) {
 	result := s.db.WithContext(ctx).Model(&scheduledRunManagerRow{}).Where("completed_at IS NULL").Updates(map[string]any{
 		"result": scheduledjobs.RunUnknown, "completed_at": recoveredAt.UTC(), "error_code": "process_interrupted",
@@ -2230,8 +2325,8 @@ func (s *Store) AppendTelemetryEvents(ctx context.Context, events []telemetry.Ev
 			ActorHash: opsOptionalString(event.UserKey), Outcome: opsOptionalString(telemetryOutcome(event.Result)),
 			DurationMS: &duration, Metadata: metadata, OccurredAt: event.OccurredAt.UTC(),
 		}
-		if event.Kind == telemetry.EventScheduledJobRun && event.CommandID != "" {
-			jobID, parseErr := strconv.ParseUint(event.CommandID, 10, 64)
+		if event.Kind == telemetry.EventScheduledJobRun && event.JobID != "" {
+			jobID, parseErr := strconv.ParseUint(event.JobID, 10, 64)
 			if parseErr != nil {
 				return telemetry.ErrFlushFailed
 			}

@@ -910,17 +910,30 @@ func sqlIsEmpty(script string) bool {
 }
 
 func BuildMigrationDSN(cfg config.DatabaseConfig) (string, error) {
+	driverConfig, err := buildDriverConfig(cfg)
+	if err != nil {
+		return "", err
+	}
+	driverConfig.MultiStatements = true
+	formattedDSN := driverConfig.FormatDSN()
+	if err := validateMigrationDSNIdentifiers(formattedDSN); err != nil {
+		return "", err
+	}
+	return formattedDSN, nil
+}
+
+func buildDriverConfig(cfg config.DatabaseConfig) (*drivermysql.Config, error) {
 	var driverConfig *drivermysql.Config
 	var err error
 	if cfg.DSN != "" {
 		driverConfig, err = drivermysql.ParseDSN(cfg.DSN)
 		if err != nil {
-			return "", errors.New("parse database configuration: invalid DSN")
+			return nil, errors.New("parse database configuration: invalid DSN")
 		}
 	} else {
 		location, err := time.LoadLocation(cfg.Loc)
 		if err != nil {
-			return "", errors.New("load database location: invalid location")
+			return nil, errors.New("load database location: invalid location")
 		}
 		driverConfig = drivermysql.NewConfig()
 		driverConfig.User = cfg.User
@@ -931,21 +944,19 @@ func BuildMigrationDSN(cfg config.DatabaseConfig) (string, error) {
 		driverConfig.ParseTime = cfg.ParseTime
 		driverConfig.Loc = location
 		if !databaseCharset.MatchString(cfg.Charset) {
-			return "", errors.New("apply database charset: invalid charset")
+			return nil, errors.New("apply database charset: invalid charset")
 		}
 		if err := driverConfig.Apply(drivermysql.Charset(cfg.Charset, "")); err != nil {
-			return "", errors.New("apply database charset: invalid charset")
+			return nil, errors.New("apply database charset: invalid charset")
 		}
 	}
-	driverConfig.MultiStatements = true
 	if driverConfig.Timeout <= 0 {
 		driverConfig.Timeout = 5 * time.Second
 	}
-	formattedDSN := driverConfig.FormatDSN()
-	if err := validateMigrationDSNIdentifiers(formattedDSN); err != nil {
-		return "", err
+	if err := validateMigrationDSNIdentifiers(driverConfig.FormatDSN()); err != nil {
+		return nil, err
 	}
-	return formattedDSN, nil
+	return driverConfig, nil
 }
 
 func validateMigrationDSNIdentifiers(dsn string) error {

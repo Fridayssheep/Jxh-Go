@@ -15,8 +15,9 @@ var (
 )
 
 const (
-	limiterUsernameDomain = "login-username"
-	limiterIPDomain       = "login-client-ip"
+	limiterUsernameDomain       = "login-username"
+	limiterIPDomain             = "login-client-ip"
+	limiterPasswordChangeDomain = "password-change-user"
 )
 
 type LoginLimiterOptions struct {
@@ -92,6 +93,42 @@ func (l *LoginLimiter) RecordSuccess(username string, now time.Time) {
 	defer l.mu.Unlock()
 	l.cleanupExpiredLocked(now)
 	delete(l.buckets, l.key(limiterUsernameDomain, normalizeUsername(username)))
+}
+
+func (l *LoginLimiter) CheckPasswordChange(userID string, now time.Time) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cleanupExpiredLocked(now)
+	bucket, ok := l.buckets[l.key(limiterPasswordChangeDomain, userID)]
+	if ok && bucket.attempts >= l.maxAttempts {
+		return ErrRateLimited
+	}
+	return nil
+}
+
+func (l *LoginLimiter) RecordPasswordChangeFailure(userID string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cleanupExpiredLocked(now)
+	key := l.key(limiterPasswordChangeDomain, userID)
+	bucket, ok := l.buckets[key]
+	if !ok {
+		if len(l.buckets) >= l.capacity {
+			l.evictOldestLocked([2][sha256.Size]byte{key, key})
+		}
+		l.buckets[key] = limiterBucket{attempts: 1, windowStart: now, lastSeen: now}
+		return
+	}
+	bucket.attempts++
+	bucket.lastSeen = now
+	l.buckets[key] = bucket
+}
+
+func (l *LoginLimiter) RecordPasswordChangeSuccess(userID string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cleanupExpiredLocked(now)
+	delete(l.buckets, l.key(limiterPasswordChangeDomain, userID))
 }
 
 func (l *LoginLimiter) cleanupExpiredLocked(now time.Time) {

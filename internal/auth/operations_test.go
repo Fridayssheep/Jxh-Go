@@ -49,6 +49,27 @@ func TestChangePasswordRejectsWrongCurrentPasswordBeforeCommit(t *testing.T) {
 	}
 }
 
+func TestChangePasswordFailuresDoNotConsumeLoginIPBucket(t *testing.T) {
+	service, _, identity, credential := newPasswordChangeFixture(t)
+	service.passwords.(*spyPasswordEngine).setVerifyResult(false)
+	input := ChangePasswordInput{
+		Credential: credential, CurrentPassword: "wrong-password", NewPassword: "new-password-123",
+		IdempotencyKey: "idem-change-1", Context: MutationContext{IPAddress: "192.0.2.1"},
+	}
+	for attempt := 1; attempt <= 5; attempt++ {
+		if _, err := service.ChangePassword(t.Context(), identity, input); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("change password attempt %d error = %v", attempt, err)
+		}
+	}
+	now := time.Unix(100, 0)
+	if err := service.limiter.CheckPasswordChange(identity.User.ID, now); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("password change bucket Check() = %v, want ErrRateLimited", err)
+	}
+	if err := service.limiter.Check("another-admin", input.Context.IPAddress, now); err != nil {
+		t.Fatalf("password change failures consumed login IP bucket: %v", err)
+	}
+}
+
 func TestChangePasswordRejectsReplayWithExpiredResultSession(t *testing.T) {
 	service, store, identity, credential := newPasswordChangeFixture(t)
 	input := ChangePasswordInput{

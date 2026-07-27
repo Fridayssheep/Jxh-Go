@@ -148,6 +148,41 @@ func TestAdminPermissionStopsHandler(t *testing.T) {
 	}
 }
 
+func TestAdminAuthenticationInfrastructureFailureReturns503WithoutRotationFallback(t *testing.T) {
+	var logs strings.Builder
+	authenticator := &failingReplacementAuthenticator{}
+	router, err := NewRouter(MiddlewareOptions{
+		PublicOrigin: "https://manager.example", MaxBodyBytes: 64,
+		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 256)), Logger: log.New(&logs, "", 0), Authenticator: authenticator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := router.HandleFunc(http.MethodGet, "/protected", RouteOptions{AllowReplacedAuth: true}, func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	assertErrorCode(t, response, http.StatusServiceUnavailable, "dependency_unavailable")
+	if called || authenticator.replacementCalls != 0 || response.Header().Get("Retry-After") != "3" {
+		t.Fatalf("called=%t replacement_calls=%d headers=%v", called, authenticator.replacementCalls, response.Header())
+	}
+	var envelope ErrorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || !envelope.Error.Retryable {
+		t.Fatalf("authentication outage response = %+v, error=%v", envelope, err)
+	}
+	if strings.Contains(response.Body.String(), "database password") || strings.Contains(logs.String(), "database password") {
+		t.Fatalf("authentication failure leaked details: logs=%q body=%q", logs.String(), response.Body.String())
+	}
+}
+
 func TestDecodeJSONRejectsUnknownFieldsAndTrailingValues(t *testing.T) {
 	type requestBody struct {
 		Name string `json:"name"`
@@ -191,6 +226,19 @@ func (testAuthenticator) Authenticate(_ context.Context, credential string) (aut
 		User: auth.User{ID: "usr_1", Role: role}, Session: auth.Session{ID: "ses_1", UserID: "usr_1"},
 		Permissions: auth.PermissionsFor(role), CSRFToken: "valid-csrf-token",
 	}, nil
+}
+
+type failingReplacementAuthenticator struct {
+	replacementCalls int
+}
+
+func (*failingReplacementAuthenticator) Authenticate(context.Context, string) (auth.AuthContext, error) {
+	return auth.AuthContext{}, errors.New("database password must not escape")
+}
+
+func (a *failingReplacementAuthenticator) AuthenticateForRotation(context.Context, string) (auth.AuthContext, error) {
+	a.replacementCalls++
+	return auth.AuthContext{}, auth.ErrUnauthenticated
 }
 
 func assertErrorCode(t *testing.T, response *httptest.ResponseRecorder, status int, code string) {

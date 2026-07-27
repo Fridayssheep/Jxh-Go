@@ -94,20 +94,20 @@ func (s *Service) AuthenticateForRotation(ctx context.Context, credential string
 }
 
 func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, input ChangePasswordInput) (LoginResult, error) {
-	limiterIdentity := "change:" + identity.User.ID
+	limiterIdentity := identity.User.ID
 	now := s.now()
-	if err := s.limiter.Check(limiterIdentity, input.Context.IPAddress, now); err != nil {
+	if err := s.limiter.CheckPasswordChange(limiterIdentity, now); err != nil {
 		return LoginResult{}, err
 	}
 	if identity.User.ID == "" || identity.Session.ID == "" || identity.Session.UserID != identity.User.ID ||
 		!validPassword(input.CurrentPassword) || !validPassword(input.NewPassword) ||
 		!validIdempotencyKey(input.IdempotencyKey) || !validMutationContext(input.Context) {
-		s.limiter.RecordFailure(limiterIdentity, input.Context.IPAddress, now)
+		s.limiter.RecordPasswordChangeFailure(limiterIdentity, now)
 		return LoginResult{}, ErrInvalidCredentials
 	}
 	priorToken, _, ok := parseSessionCredential(input.Credential)
 	if !ok || deriveSessionID(s.sessionSecret, priorToken) != identity.Session.ID {
-		s.limiter.RecordFailure(limiterIdentity, input.Context.IPAddress, now)
+		s.limiter.RecordPasswordChangeFailure(limiterIdentity, now)
 		return LoginResult{}, ErrUnauthenticated
 	}
 	requestHash := s.passwordChangeRequestHash(identity.User.ID, identity.Session.ID, input.CurrentPassword, input.NewPassword)
@@ -124,7 +124,7 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 		if err != nil {
 			return LoginResult{}, err
 		}
-		s.limiter.RecordSuccess(limiterIdentity, now)
+		s.limiter.RecordPasswordChangeSuccess(limiterIdentity, now)
 		return result, nil
 	}
 
@@ -137,12 +137,12 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 		return LoginResult{}, fmt.Errorf("lookup password change user: %w", err)
 	}
 	if !found || !credentials.User.Enabled || credentials.User.ID != identity.User.ID {
-		s.limiter.RecordFailure(limiterIdentity, input.Context.IPAddress, now)
+		s.limiter.RecordPasswordChangeFailure(limiterIdentity, now)
 		return LoginResult{}, ErrInvalidCredentials
 	}
 	matched, _, err := s.passwords.Verify(currentPassword, credentials.PasswordHash)
 	if err != nil || !matched {
-		s.limiter.RecordFailure(limiterIdentity, input.Context.IPAddress, now)
+		s.limiter.RecordPasswordChangeFailure(limiterIdentity, now)
 		return LoginResult{}, ErrInvalidCredentials
 	}
 	passwordHash, err := s.passwords.Hash(newPassword)
@@ -179,7 +179,7 @@ func (s *Service) ChangePassword(ctx context.Context, identity AuthContext, inpu
 		return LoginResult{}, err
 	}
 	result.SessionToken = credential
-	s.limiter.RecordSuccess(limiterIdentity, now)
+	s.limiter.RecordPasswordChangeSuccess(limiterIdentity, now)
 	return result, nil
 }
 

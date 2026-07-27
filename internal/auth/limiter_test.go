@@ -66,6 +66,31 @@ func TestLoginLimiterSuccessClearsOnlyNormalizedUsernameBucket(t *testing.T) {
 	}
 }
 
+func TestPasswordChangeLimiterIsIsolatedFromLoginUsernameAndIPBuckets(t *testing.T) {
+	limiter := newTestLoginLimiter(t, 2, 32)
+	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)
+	for range 2 {
+		limiter.RecordPasswordChangeFailure("usr_1", now)
+	}
+	if err := limiter.CheckPasswordChange("usr_1", now); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("password change bucket Check() = %v, want ErrRateLimited", err)
+	}
+	if err := limiter.Check("alice", "192.0.2.10", now); err != nil {
+		t.Fatalf("password change failures polluted login buckets: %v", err)
+	}
+
+	for range 2 {
+		limiter.RecordFailure("alice", "192.0.2.10", now)
+	}
+	if err := limiter.CheckPasswordChange("usr_2", now); err != nil {
+		t.Fatalf("login failures polluted another password change bucket: %v", err)
+	}
+	limiter.RecordPasswordChangeSuccess("usr_1", now)
+	if err := limiter.CheckPasswordChange("usr_1", now); err != nil {
+		t.Fatalf("password change success did not clear its bucket: %v", err)
+	}
+}
+
 func TestLoginLimiterStoresOnlyFixedLengthDigests(t *testing.T) {
 	limiter := newTestLoginLimiter(t, 2, 32)
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC)

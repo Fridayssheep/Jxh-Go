@@ -171,12 +171,18 @@ func (m *middleware) authenticate(allowReplaced bool, next http.Handler) http.Ha
 			return
 		}
 		identity, err := m.authenticator.Authenticate(r.Context(), cookie.Value)
-		if err != nil && allowReplaced {
+		if errors.Is(err, auth.ErrUnauthenticated) && allowReplaced {
 			if replacement, ok := m.authenticator.(ReplacementAuthenticator); ok {
 				identity, err = replacement.AuthenticateForRotation(r.Context(), cookie.Value)
 			}
 		}
 		if err != nil {
+			if !errors.Is(err, auth.ErrUnauthenticated) {
+				m.logger.Printf("admin authentication unavailable request_id=%s", RequestIDFromContext(r.Context()))
+				w.Header().Set("Retry-After", "3")
+				writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "authentication service is unavailable", nil, true)
+				return
+			}
 			writeAPIError(w, r, http.StatusUnauthorized, CodeUnauthorized, "登录状态无效或已过期", nil, false)
 			return
 		}

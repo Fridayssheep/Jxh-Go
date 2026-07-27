@@ -1,8 +1,12 @@
 package knowledge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -15,6 +19,7 @@ var (
 )
 
 type rawRow struct {
+	row      int
 	keyword  string
 	answer   string
 	aliases  []string
@@ -24,11 +29,22 @@ type rawRow struct {
 	sourceID string
 }
 
-func ParseRows(rows [][]string) []Entry {
+type parsedCandidate struct {
+	row   int
+	entry Entry
+}
+
+func ParseRows(rows [][]string) ParseResult {
+	result := ParseResult{}
 	raws := make([]rawRow, 0, len(rows))
-	for _, row := range rows {
-		r := rowToRaw(row)
-		if r.keyword == "" || r.answer == "" {
+	for index, row := range rows {
+		r := rowToRaw(row, index+1)
+		if r.keyword == "" {
+			result.Issues = append(result.Issues, ParseIssue{Row: r.row, Reason: IssueMissingKeyword})
+			continue
+		}
+		if r.answer == "" {
+			result.Issues = append(result.Issues, ParseIssue{Row: r.row, Reason: IssueMissingAnswer})
 			continue
 		}
 		raws = append(raws, r)
@@ -37,31 +53,165 @@ func ParseRows(rows [][]string) []Entry {
 	titleByCode := collectCodeTitles(raws)
 	children := collectChildren(raws)
 	pathByCode := buildPaths(titleByCode, children)
-	seen := map[string]Entry{}
-	order := make([]string, 0, len(raws))
-
+	candidates := make([]parsedCandidate, 0, len(raws))
 	for _, raw := range raws {
 		entry := enrich(raw, titleByCode, children, pathByCode)
-		if existing, ok := seen[entry.SourceKey]; ok {
-			if normalizeText(existing.Answer) == normalizeText(entry.Answer) {
-				continue
-			}
-			existing.AIEnabled = false
-			seen[entry.SourceKey] = existing
-			continue
+		candidates = append(candidates, parsedCandidate{row: raw.row, entry: entry})
+	}
+	assignCandidateIDs(candidates)
+	active, sourceConflicts, duplicateIssues := resolveSourceConflicts(candidates)
+	result.Conflicts = append(result.Conflicts, sourceConflicts...)
+	result.Issues = append(result.Issues, duplicateIssues...)
+	result.Entries = candidateEntries(candidates)
+	resolveExactConflicts(&result, &active)
+	result.ActiveEntries = cloneEntries(active)
+	for _, entry := range result.Entries {
+		if !entry.Enabled {
+			result.DisabledEntryIDs = append(result.DisabledEntryIDs, entry.ID)
 		}
-		seen[entry.SourceKey] = entry
-		order = append(order, entry.SourceKey)
+		if entry.Enabled && entry.AIEnabled && !entry.ExactReply {
+			result.AIOnlyEntryIDs = append(result.AIOnlyEntryIDs, entry.ID)
+		}
 	}
-
-	out := make([]Entry, 0, len(order))
-	for _, key := range order {
-		out = append(out, seen[key])
+	if len(result.Issues) > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d rows were ignored or deduplicated", len(result.Issues)))
 	}
-	return out
+	if len(result.Conflicts) > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d conflicts require review", len(result.Conflicts)))
+	}
+	return result
 }
 
-func rowToRaw(row []string) rawRow {
+func assignCandidateIDs(candidates []parsedCandidate) {
+	baseCounts := make(map[string]int, len(candidates))
+	for _, candidate := range candidates {
+		baseCounts[candidate.entry.SourceKey+"\x00"+candidate.entry.Keyword]++
+	}
+	for index := range candidates {
+		value := candidates[index].entry.SourceKey + "\x00" + candidates[index].entry.Keyword
+		if baseCounts[value] > 1 {
+			value += fmt.Sprintf("\x00row:%d", candidates[index].row)
+		}
+		sum := sha256.Sum256([]byte(value))
+		candidates[index].entry.ID = "ke_" + hex.EncodeToString(sum[:12])
+	}
+}
+
+func resolveSourceConflicts(candidates []parsedCandidate) ([]Entry, []ParseConflict, []ParseIssue) {
+	bySource := make(map[string][]int)
+	order := make([]string, 0, len(candidates))
+	for index, candidate := range candidates {
+		if _, exists := bySource[candidate.entry.SourceKey]; !exists {
+			order = append(order, candidate.entry.SourceKey)
+		}
+		bySource[candidate.entry.SourceKey] = append(bySource[candidate.entry.SourceKey], index)
+	}
+	active := make([]Entry, 0, len(order))
+	conflicts := make([]ParseConflict, 0)
+	issues := make([]ParseIssue, 0)
+	for _, sourceKey := range order {
+		indices := bySource[sourceKey]
+		first := candidates[indices[0]].entry
+		if len(indices) > 1 {
+			identical := true
+			ids := make([]string, 0, len(indices))
+			for _, index := range indices {
+				ids = append(ids, candidates[index].entry.ID)
+				if normalizeText(candidates[index].entry.Answer) != normalizeText(first.Answer) {
+					identical = false
+				}
+			}
+			if identical {
+				for _, index := range indices[1:] {
+					issues = append(issues, ParseIssue{Row: candidates[index].row, Reason: IssueDuplicateIdentical})
+				}
+			} else {
+				for _, index := range indices {
+					candidates[index].entry.AIEnabled = false
+				}
+				first.AIEnabled = false
+				conflicts = append(conflicts, ParseConflict{Type: ConflictSourceKey, Key: sourceKey, EntryIDs: ids})
+			}
+		}
+		active = append(active, first)
+	}
+	return active, conflicts, issues
+}
+
+type exactCandidate struct {
+	entryIndex int
+	entryID    string
+	alias      bool
+}
+
+func resolveExactConflicts(result *ParseResult, active *[]Entry) {
+	byKey := make(map[string][]exactCandidate)
+	display := make(map[string]string)
+	for index, entry := range *active {
+		if !entry.Enabled || !entry.ExactReply {
+			continue
+		}
+		addExactCandidate(byKey, display, entry.Keyword, exactCandidate{entryIndex: index, entryID: entry.ID})
+		for _, alias := range entry.Aliases {
+			addExactCandidate(byKey, display, alias, exactCandidate{entryIndex: index, entryID: entry.ID, alias: true})
+		}
+	}
+	keys := make([]string, 0, len(byKey))
+	for key := range byKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	allEntryIndex := make(map[string]int, len(result.Entries))
+	for index, entry := range result.Entries {
+		allEntryIndex[entry.ID] = index
+	}
+	for _, key := range keys {
+		candidates := byKey[key]
+		if len(candidates) < 2 {
+			continue
+		}
+		allAliases := true
+		ids := make([]string, len(candidates))
+		for index, candidate := range candidates {
+			allAliases = allAliases && candidate.alias
+			ids[index] = candidate.entryID
+			(*active)[candidate.entryIndex].ExactReply = false
+			if allIndex, exists := allEntryIndex[candidate.entryID]; exists {
+				result.Entries[allIndex].ExactReply = false
+			}
+		}
+		conflictType := ConflictKeyword
+		if allAliases {
+			conflictType = ConflictAlias
+		}
+		result.Conflicts = append(result.Conflicts, ParseConflict{Type: conflictType, Key: display[key], EntryIDs: ids})
+	}
+}
+
+func addExactCandidate(byKey map[string][]exactCandidate, display map[string]string, value string, candidate exactCandidate) {
+	key := normalizeLookup(value)
+	if key == "" {
+		return
+	}
+	for index := range byKey[key] {
+		if byKey[key][index].entryID == candidate.entryID {
+			byKey[key][index].alias = byKey[key][index].alias && candidate.alias
+			return
+		}
+	}
+	byKey[key] = append(byKey[key], candidate)
+	display[key] = value
+}
+
+func candidateEntries(candidates []parsedCandidate) []Entry {
+	entries := make([]Entry, len(candidates))
+	for index := range candidates {
+		entries[index] = cloneEntry(candidates[index].entry)
+	}
+	return entries
+}
+
+func rowToRaw(row []string, rowNumber int) rawRow {
 	get := func(idx int) string {
 		if idx >= len(row) {
 			return ""
@@ -69,6 +219,7 @@ func rowToRaw(row []string) rawRow {
 		return strings.TrimSpace(row[idx])
 	}
 	return rawRow{
+		row:      rowNumber,
 		keyword:  get(0),
 		answer:   get(1),
 		aliases:  splitList(get(3)),

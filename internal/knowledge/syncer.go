@@ -6,17 +6,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
+type Downloader interface {
+	Download(ctx context.Context) ([]byte, error)
+}
+
 type SyncerOptions struct {
-	Source    WPSClient
+	Source    Downloader
 	Sheet     string
 	CacheFile string
 	Index     *IndexRef
 }
 
 type Syncer struct {
-	source    WPSClient
+	mu        sync.Mutex
+	source    Downloader
 	sheet     string
 	cacheFile string
 	index     *IndexRef
@@ -37,6 +43,11 @@ func (s *Syncer) Sync(ctx context.Context) error {
 	}
 	if s.index == nil {
 		return fmt.Errorf("knowledge index is nil")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.source == nil {
+		return fmt.Errorf("knowledge source is nil")
 	}
 	data, err := s.source.Download(ctx)
 	if err != nil {
@@ -60,6 +71,8 @@ func (s *Syncer) LoadCache() error {
 	if s.cacheFile == "" {
 		return fmt.Errorf("knowledge cache file is empty")
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, err := os.ReadFile(s.cacheFile)
 	if err != nil {
 		return err
@@ -77,11 +90,11 @@ func (s *Syncer) parseAndBuild(data []byte) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries := ParseRows(rows)
-	if len(entries) == 0 {
+	result := ParseRows(rows)
+	if len(result.ActiveEntries) == 0 {
 		return nil, fmt.Errorf("knowledge workbook contains no valid entries")
 	}
-	return NewIndex(entries), nil
+	return NewIndexFromParseResult(result), nil
 }
 
 func saveAtomic(path string, data []byte) error {

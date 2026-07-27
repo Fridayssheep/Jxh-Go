@@ -6,6 +6,8 @@ const (
 	CodeBadRequest           = "invalid_request"
 	CodeUnauthorized         = "unauthorized"
 	CodeForbidden            = "forbidden"
+	CodeConflict             = "conflict"
+	CodePreconditionRequired = "precondition_required"
 	CodeOriginForbidden      = "origin_forbidden"
 	CodeCSRFInvalid          = "csrf_invalid"
 	CodeNotFound             = "not_found"

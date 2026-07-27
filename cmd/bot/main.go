@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,17 +17,18 @@ import (
 
 	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/zjutjh/jxh-go/internal/ai"
+	"github.com/zjutjh/jxh-go/internal/app"
 	"github.com/zjutjh/jxh-go/internal/bot"
 	"github.com/zjutjh/jxh-go/internal/commands"
 	"github.com/zjutjh/jxh-go/internal/config"
 	"github.com/zjutjh/jxh-go/internal/flashfile"
 	"github.com/zjutjh/jxh-go/internal/grouprequest"
+	"github.com/zjutjh/jxh-go/internal/health"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
 	"github.com/zjutjh/jxh-go/internal/knowledgeadmin"
 	"github.com/zjutjh/jxh-go/internal/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/napcat"
 	"github.com/zjutjh/jxh-go/internal/quote"
-	"github.com/zjutjh/jxh-go/internal/safego"
 	"github.com/zjutjh/jxh-go/internal/scheduler"
 	"github.com/zjutjh/jxh-go/internal/settings"
 	"github.com/zjutjh/jxh-go/internal/storage"
@@ -46,11 +49,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	db, err := openDB(cfg)
+	db, err := openDB(ctx, cfg)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("access db pool: %v", err)
+	}
 	store := storage.NewStore(db)
+	healthService := health.NewService()
+	nowUTC := time.Now().UTC()
+	healthService.SetDatabase(health.ComponentStatus{
+		Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC,
+	})
+	healthService.SetScheduler(health.ComponentStatus{Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC})
+	healthService.SetWorkers(health.ComponentStatus{Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC})
 
 	knowledgeIndex := knowledge.NewIndexRef(nil)
 	knowledgeSync := knowledge.NewSyncer(knowledge.SyncerOptions{
@@ -63,17 +77,24 @@ func main() {
 		CacheFile: cfg.WPS.CacheFile,
 		Index:     knowledgeIndex,
 	})
+	knowledgeLoadedAt := time.Now().UTC()
 	if err := knowledgeSync.Sync(ctx); err != nil {
 		log.Printf("load knowledge from WPS failed, trying local cache: %v", err)
 		if cacheErr := knowledgeSync.LoadCache(); cacheErr != nil {
 			log.Fatalf("load knowledge: WPS error: %v; cache error: %v", err, cacheErr)
 		}
 		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
+		healthService.SetWPS(health.ComponentStatus{Available: true, Code: "cache", CheckedAt: knowledgeLoadedAt, LastSuccessAt: knowledgeLoadedAt})
+	} else {
+		healthService.SetWPS(health.ComponentStatus{Available: true, Code: "available", CheckedAt: knowledgeLoadedAt, LastSuccessAt: knowledgeLoadedAt})
 	}
 
 	aiSvc, applicantExtractor, err := newAIServices(ctx, cfg, knowledgeIndex)
 	if err != nil {
 		log.Printf("ai service not available: %v", err)
+		healthService.SetAI(health.ComponentStatus{Available: false, Code: "unavailable", CheckedAt: time.Now().UTC(), LastErrorAt: time.Now().UTC()})
+	} else {
+		healthService.SetAI(health.ComponentStatus{Available: aiSvc != nil, Code: availabilityCode(aiSvc != nil), CheckedAt: time.Now().UTC(), LastSuccessAt: time.Now().UTC()})
 	}
 	location := applicationLocation(cfg)
 	now := func() time.Time { return time.Now().In(location) }
@@ -105,7 +126,6 @@ func main() {
 		Location:         location,
 		ExtractApplicant: extractApplicant,
 	})
-	go groupRequests.RunAIParser(ctx)
 	napcatGateway := napcat.NewGateway(flashfile.NewStager("./data/flash", "/app/data/flash"))
 	pipeline := bot.NewPipeline(bot.Options{
 		Sender:        napcatGateway,
@@ -119,16 +139,12 @@ func main() {
 		LinkCleaner:   linkcleaner.NewService(),
 		Settings:      settingsRuntime,
 	})
-	go scheduler.NewRuntime(scheduler.RuntimeOptions{
+	schedulerRuntime := scheduler.NewRuntime(scheduler.RuntimeOptions{
 		Store:    store,
 		Send:     pipeline.SendGroupText,
 		Location: scheduleLocation,
 		Logf:     log.Printf,
-	}).Run(ctx)
-
-	if cfg.Database.TriggerLogRetentionDays > 0 {
-		go triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
-	}
+	})
 
 	healthAddr := strings.TrimSpace(os.Getenv("JXH_HEALTH_ADDR"))
 	if healthAddr == "" {
@@ -143,24 +159,7 @@ func main() {
 		Addr:    healthAddr,
 		Handler: healthMux,
 	}
-	go func() {
-		defer safego.Recover("health server")
-		log.Printf("health check server listening on %s", healthAddr)
-		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("health check server error: %v", err)
-		}
-	}()
-	go func() {
-		defer safego.Recover("health server shutdown")
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := healthServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("health check server shutdown error: %v", err)
-		}
-	}()
-
-	server := napcat.Server{
+	napcatServer := napcat.Server{
 		WSURL:          cfg.OneBot.WSURL,
 		Token:          cfg.OneBot.AccessToken,
 		RequestTimeout: time.Duration(cfg.OneBot.APITimeoutSec) * time.Second,
@@ -168,9 +167,72 @@ func main() {
 		Handler:        pipeline,
 		Gateway:        napcatGateway,
 	}
+	healthComponent, err := app.HTTPComponent("health-http", healthServer, true)
+	if err != nil {
+		log.Fatalf("create health component: %v", err)
+	}
+	components := []app.Component{
+		healthComponent,
+		{Name: "napcat", Critical: true, Run: napcatServer.Serve},
+		{Name: "scheduler", Run: func(ctx context.Context) error { schedulerRuntime.Run(ctx); return nil }},
+		{Name: "group-request-ai", Run: func(ctx context.Context) error { groupRequests.RunAIParser(ctx); return nil }},
+		{Name: "health-monitor", Run: func(ctx context.Context) error { runHealthMonitor(ctx, healthService, napcatGateway); return nil }},
+	}
+	if cfg.Database.TriggerLogRetentionDays > 0 {
+		components = append(components, app.Component{
+			Name: "trigger-log-purge",
+			Run: func(ctx context.Context) error {
+				triggerStats.RunPurgeLoop(ctx, cfg.Database.TriggerLogRetentionDays)
+				return nil
+			},
+		})
+	}
+	application, err := app.New(app.Options{
+		Components: components, Closers: []io.Closer{sqlDB},
+		ShutdownTimeout: time.Duration(cfg.Admin.ShutdownTimeoutSeconds) * time.Second, Logger: log.Default(),
+	})
+	if err != nil {
+		log.Fatalf("create application: %v", err)
+	}
 	log.Printf("connecting napcat websocket")
-	if err := server.Serve(ctx); err != nil {
-		log.Fatalf("serve napcat websocket: %v", err)
+	if err := application.Run(ctx); err != nil {
+		log.Fatalf("run application: %v", err)
+	}
+}
+
+func availabilityCode(available bool) string {
+	if available {
+		return "available"
+	}
+	return "not_configured"
+}
+
+func runHealthMonitor(ctx context.Context, service *health.Service, gateway *napcat.Gateway) {
+	update := func() {
+		now := time.Now().UTC()
+		snapshot := gateway.Snapshot()
+		code := "unavailable"
+		if snapshot.Connected {
+			code = "available"
+		}
+		status := health.ComponentStatus{Available: snapshot.Connected, Code: code, CheckedAt: now}
+		if snapshot.Connected {
+			status.LastSuccessAt = now
+		} else if !snapshot.DisconnectedAt.IsZero() {
+			status.LastErrorAt = snapshot.DisconnectedAt.UTC()
+		}
+		service.SetNapCat(status)
+	}
+	update()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			update()
+		}
 	}
 }
 
@@ -248,7 +310,7 @@ func schedulerLocation(cfg config.Config) *time.Location {
 	return loc
 }
 
-func openDB(cfg config.Config) (*gorm.DB, error) {
+func openDB(ctx context.Context, cfg config.Config) (*gorm.DB, error) {
 	dsn := cfg.Database.DSN
 	if dsn == "" {
 		location, err := time.LoadLocation(cfg.Database.Loc)
@@ -266,5 +328,23 @@ func openDB(cfg config.Config) (*gorm.DB, error) {
 		driverConfig.Loc = location
 		dsn = driverConfig.FormatDSN()
 	}
-	return gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(cfg.Database.MaxOpenConns)
+	sqlDB.SetMaxIdleConns(cfg.Database.MaxIdleConns)
+	sqlDB.SetConnMaxLifetime(time.Duration(cfg.Database.ConnMaxLifetimeSeconds) * time.Second)
+	sqlDB.SetConnMaxIdleTime(time.Duration(cfg.Database.ConnMaxIdleTimeSeconds) * time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Database.PingTimeoutSeconds)*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(pingCtx); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("ping database")
+	}
+	return db, nil
 }

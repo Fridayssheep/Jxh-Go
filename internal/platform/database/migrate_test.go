@@ -1896,6 +1896,7 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 	steps = append(steps,
 		commitStep(),
 		queryStep("SELECT `version`, `name`, `checksum`, `stage`", []string{"version", "name", "checksum", "stage"}, nil),
+		managerMigration008Post007StageStep(),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_guard_008`"),
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`"),
@@ -1957,6 +1958,7 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
 		queryStep("information_schema.tables", legacyTableNames(), legacyTableRows(post007)),
 		queryStep("information_schema.table_constraints", legacyConstraintNames(), legacyConstraintRows(post007)),
 		execStep("INSERT INTO `schema_migrations`"),
+		managerMigration008Post007StageStep(),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_guard_008`"),
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`"),
@@ -1974,6 +1976,13 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
 	}
 	state.assertComplete(t)
 	state.assertSingleConnection(t)
+}
+
+func managerMigration008Post007StageStep() scriptStep {
+	return queryStep("SELECT\n  (SELECT COUNT(*) FROM information_schema.columns", []string{
+		"group_columns", "group_indexes", "group_constraints",
+		"scheduled_columns", "scheduled_indexes", "scheduled_constraints", "manager_tables",
+	}, [][]driver.Value{{int64(20), int64(7), int64(2), int64(10), int64(1), int64(1), int64(0)}})
 }
 
 func TestRunnerApplyRejectsPost005WhenManifestCannotReach008(t *testing.T) {

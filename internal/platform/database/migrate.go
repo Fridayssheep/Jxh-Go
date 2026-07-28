@@ -151,7 +151,14 @@ func (r Runner) Apply(ctx context.Context, migrations []Migration) (applied []Mi
 			applied = append(applied, migration)
 			continue
 		}
-		if _, err := conn.ExecContext(ctx, migration.SQL); err != nil {
+		migrationSQL := migration.SQL
+		if recoveryManifest && isRepositoryMigration008(migration) {
+			migrationSQL, err = prepareManagerMigration008Recovery(ctx, conn, migration)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := conn.ExecContext(ctx, migrationSQL); err != nil {
 			return nil, safeDatabaseError(fmt.Sprintf("execute migration %03d %s", migration.Version, migration.Name), err)
 		}
 		if _, err := conn.ExecContext(ctx,

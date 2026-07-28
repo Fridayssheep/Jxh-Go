@@ -357,6 +357,167 @@ func TestMySQLMigrationsRecoverFromEveryUnrecordedStage(t *testing.T) {
 	})
 }
 
+func TestMySQLMigration008RecoversKnownPartialMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name                        string
+		canonicalComments           bool
+		legacyFlagComment           bool
+		canonicalAfterNormalization bool
+	}{
+		{name: "current comments"},
+		{name: "historical flag comment", legacyFlagComment: true},
+		{name: "canonical comments", canonicalComments: true},
+		{name: "canonical comments after normalization", canonicalAfterNormalization: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := openMySQLIntegrationSchema(t)
+			migrations := repositoryMigrations(t)
+			applyMySQLMigrations(t, db, migrations[:7])
+
+			failed := append([]Migration(nil), migrations...)
+			marker := "-- jxh:008-stage scheduled-columns\n"
+			position := strings.Index(failed[7].SQL, marker)
+			if position < 0 {
+				t.Fatalf("008 atomic stage marker %q is missing", marker)
+			}
+			position += len(marker)
+			failed[7].SQL = failed[7].SQL[:position] + "SELECT * FROM `jxh_forced_008_failure`;\n" + failed[7].SQL[position:]
+			if _, err := (Runner{DB: db}).Apply(t.Context(), failed); err == nil {
+				t.Fatal("injected 008 failure unexpectedly succeeded")
+			}
+			if !test.canonicalComments {
+				corruptManagerMigration008Comments(t, db, test.legacyFlagComment)
+			}
+			if test.canonicalAfterNormalization {
+				conn, err := db.Conn(t.Context())
+				if err != nil {
+					t.Fatalf("open connection for 008 recovery preparation: %v", err)
+				}
+				prepared, err := prepareManagerMigration008Recovery(t.Context(), conn, migrations[7])
+				if err != nil {
+					_ = conn.Close()
+					t.Fatalf("prepare interrupted 008 recovery: %v", err)
+				}
+				if !strings.Contains(prepared, managerMigration008RecoveredGroupStage2Fingerprint) {
+					_ = conn.Close()
+					t.Fatal("interrupted 008 recovery did not prepare the recovered stage fingerprint")
+				}
+				if err := conn.Close(); err != nil {
+					t.Fatalf("close connection after 008 comment normalization: %v", err)
+				}
+			}
+
+			applied, err := (Runner{DB: db, LockTimeout: 5 * time.Second}).Apply(t.Context(), migrations)
+			if err != nil {
+				t.Fatalf("recover known 008 partial metadata: %v", err)
+			}
+			if len(applied) != 2 || applied[0].Version != 8 || applied[1].Version != 9 {
+				t.Fatalf("applied migrations=%+v, want 008 and 009", applied)
+			}
+			if got := migrationLedgerCount(t, db); got != 9 {
+				t.Fatalf("migration ledger rows=%d, want 9", got)
+			}
+			if got := migrationAttemptCount(t, db); got != 0 {
+				t.Fatalf("migration attempt rows=%d, want 0", got)
+			}
+			for _, routine := range []string{"jxh_assert_table_008", "jxh_upgrade_core_008", "jxh_create_manager_tables_008"} {
+				assertMySQLRoutineAbsent(t, db, routine)
+			}
+			assertManagerMigration008Comments(t, db)
+		})
+	}
+}
+
+type managerMigration008CommentFixture struct {
+	table      string
+	column     string
+	definition string
+	comment    string
+	legacy     string
+}
+
+var managerMigration008CommentFixtures = []managerMigration008CommentFixture{
+	{table: "group_join_requests", column: "flag", definition: "varchar(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL", comment: "NapCat 群通知标识；实时事件取 flag，补同步取 request_id 字符串", legacy: "NapCat 群通知标识；实时事件取 flag，系统消息取 request_id 字符串"},
+	{table: "group_join_requests", column: "group_id", definition: "bigint DEFAULT NULL", comment: "QQ群号"},
+	{table: "group_join_requests", column: "user_id", definition: "bigint DEFAULT NULL", comment: "申请人 QQ"},
+	{table: "group_join_requests", column: "student_id", definition: "varchar(64) DEFAULT NULL", comment: "申请信息中显式填写的学号"},
+	{table: "group_join_requests", column: "student_name", definition: "varchar(64) DEFAULT NULL", comment: "申请信息中显式填写的姓名"},
+	{table: "group_join_requests", column: "major", definition: "varchar(128) DEFAULT NULL", comment: "AI 从验证信息中提取的专业"},
+	{table: "group_join_requests", column: "comment", definition: "text DEFAULT NULL", comment: "申请验证信息"},
+	{table: "group_join_requests", column: "raw_json", definition: "mediumtext DEFAULT NULL", comment: "NapCat 原始事件或系统消息 JSON"},
+	{table: "group_join_requests", column: "system_raw_json", definition: "mediumtext DEFAULT NULL", comment: "NapCat 最近一次系统消息 JSON"},
+	{table: "group_join_requests", column: "ai_parse_attempts", definition: "int unsigned NOT NULL DEFAULT 0", comment: "AI 解析尝试次数"},
+	{table: "group_join_requests", column: "requested_at", definition: "datetime(3) DEFAULT NULL", comment: "申请时间"},
+	{table: "group_join_requests", column: "processed_at", definition: "datetime(3) DEFAULT NULL", comment: "首次观察到已处理状态的时间"},
+	{table: "group_join_requests", column: "first_seen_at", definition: "datetime(3) DEFAULT NULL", comment: "首次登记时间"},
+	{table: "group_join_requests", column: "last_seen_at", definition: "datetime(3) DEFAULT NULL", comment: "最近出现时间"},
+	{table: "group_join_requests", column: "ai_parsed_at", definition: "datetime(3) DEFAULT NULL", comment: "AI 解析完成时间"},
+	{table: "scheduled_jobs", column: "type", definition: "varchar(16) NOT NULL", comment: "任务类型：每天/单次"},
+	{table: "scheduled_jobs", column: "time_hhmm", definition: "varchar(5) NOT NULL", comment: "触发时间，格式 HH:MM"},
+	{table: "scheduled_jobs", column: "run_date", definition: "date DEFAULT NULL", comment: "单次任务执行日期，格式 YYYY-MM-DD；每天任务此字段为 NULL"},
+	{table: "scheduled_jobs", column: "group_id", definition: "bigint NOT NULL", comment: "QQ群号"},
+	{table: "scheduled_jobs", column: "message", definition: "text NOT NULL", comment: "定时发送内容"},
+	{table: "scheduled_jobs", column: "enabled", definition: "boolean NOT NULL", comment: "是否启用"},
+	{table: "scheduled_jobs", column: "last_run_at", definition: "datetime(3) DEFAULT NULL", comment: "最近执行时间；用于防止同一天重复触发"},
+}
+
+func corruptManagerMigration008Comments(t *testing.T, db *sql.DB, legacyFlagComment bool) {
+	t.Helper()
+	for _, table := range []string{"group_join_requests", "scheduled_jobs"} {
+		clauses := make([]string, 0, len(managerMigration008CommentFixtures))
+		for _, fixture := range managerMigration008CommentFixtures {
+			if fixture.table != table {
+				continue
+			}
+			comment := fixture.comment
+			if legacyFlagComment && fixture.legacy != "" {
+				comment = fixture.legacy
+			}
+			corrupted := strings.ReplaceAll(doubleEncodeUTF8(comment), "'", "''")
+			clauses = append(clauses, fmt.Sprintf("MODIFY COLUMN `%s` %s COMMENT '%s'", fixture.column, fixture.definition, corrupted))
+		}
+		if _, err := db.ExecContext(t.Context(), "ALTER TABLE `"+table+"` "+strings.Join(clauses, ", ")); err != nil {
+			t.Fatalf("corrupt %s comments: %v", table, err)
+		}
+	}
+}
+
+func assertManagerMigration008Comments(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for _, fixture := range managerMigration008CommentFixtures {
+		var comment string
+		if err := db.QueryRowContext(t.Context(), `SELECT column_comment
+FROM information_schema.columns
+WHERE table_schema = DATABASE() AND BINARY table_name = BINARY ? AND BINARY column_name = BINARY ?`,
+			fixture.table, fixture.column).Scan(&comment); err != nil {
+			t.Fatalf("read %s.%s comment: %v", fixture.table, fixture.column, err)
+		}
+		if comment != fixture.comment {
+			t.Fatalf("%s.%s comment=%q, want %q", fixture.table, fixture.column, comment, fixture.comment)
+		}
+	}
+}
+
+func doubleEncodeUTF8(value string) string {
+	encoded := []byte(value)
+	runes := make([]rune, 0, len(encoded))
+	for _, value := range encoded {
+		if replacement, ok := windows1252Runes[value]; ok {
+			runes = append(runes, replacement)
+		} else {
+			runes = append(runes, rune(value))
+		}
+	}
+	return string(runes)
+}
+
+var windows1252Runes = map[byte]rune{
+	0x80: '\u20ac', 0x82: '\u201a', 0x83: '\u0192', 0x84: '\u201e', 0x85: '\u2026', 0x86: '\u2020', 0x87: '\u2021',
+	0x88: '\u02c6', 0x89: '\u2030', 0x8a: '\u0160', 0x8b: '\u2039', 0x8c: '\u0152', 0x8e: '\u017d',
+	0x91: '\u2018', 0x92: '\u2019', 0x93: '\u201c', 0x94: '\u201d', 0x95: '\u2022', 0x96: '\u2013', 0x97: '\u2014',
+	0x98: '\u02dc', 0x99: '\u2122', 0x9a: '\u0161', 0x9b: '\u203a', 0x9c: '\u0153', 0x9e: '\u017e', 0x9f: '\u0178',
+}
+
 func TestMySQLHistoricalMigrationsRecoverFromSQLAndLedgerBoundaries(t *testing.T) {
 	migrations := repositoryMigrations(t)
 	tests := []struct {

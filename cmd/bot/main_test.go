@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -93,6 +94,40 @@ func TestAdminHTTPRequiresCompleteSecureConfiguration(t *testing.T) {
 	configuration.PublicOrigin = "  "
 	if adminHTTPConfigured(configuration) {
 		t.Fatal("blank admin origin was accepted")
+	}
+}
+
+func TestInitializeKnowledgeAllowsMissingOptionalSourceAndCache(t *testing.T) {
+	configuration := config.Default().WPS
+	configuration.ShareURL = ""
+	configuration.CacheFile = filepath.Join(t.TempDir(), "missing.xlsx")
+	healthService := health.NewService()
+
+	index, syncer := initializeKnowledge(t.Context(), configuration, healthService)
+
+	if index == nil || syncer == nil || len(index.Entries()) != 0 {
+		t.Fatalf("knowledge runtime index=%v syncer=%v entries=%d", index, syncer, len(index.Entries()))
+	}
+	status := healthService.Snapshot().WPS
+	if status.Available || status.Code != "not_configured" || status.CheckedAt.IsZero() || !status.LastErrorAt.IsZero() {
+		t.Fatalf("WPS status=%+v", status)
+	}
+}
+
+func TestInitializeKnowledgeMarksConfiguredSourceWithoutCacheUnavailable(t *testing.T) {
+	configuration := config.Default().WPS
+	configuration.ShareURL = "://invalid"
+	configuration.CacheFile = filepath.Join(t.TempDir(), "missing.xlsx")
+	healthService := health.NewService()
+
+	index, syncer := initializeKnowledge(t.Context(), configuration, healthService)
+
+	if index == nil || syncer == nil || len(index.Entries()) != 0 {
+		t.Fatalf("knowledge runtime index=%v syncer=%v entries=%d", index, syncer, len(index.Entries()))
+	}
+	status := healthService.Snapshot().WPS
+	if status.Available || status.Code != "unavailable" || status.CheckedAt.IsZero() || status.LastErrorAt != status.CheckedAt {
+		t.Fatalf("WPS status=%+v", status)
 	}
 }
 

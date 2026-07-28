@@ -68,6 +68,28 @@ func TestSSEWritesHeartbeatAndStopsOnContext(t *testing.T) {
 	}
 }
 
+func TestSSEWritesInitialCommentBeforeFirstFlush(t *testing.T) {
+	hub := newSSETestHub(t)
+	requestContext, cancel := context.WithCancel(t.Context())
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/events", nil).WithContext(requestContext)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
+	router := newHTTPFixture(t)
+	handler, err := NewEventsHandler(hub, testAuthenticator{}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Register(router); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newCancelAfterFlushRecorder(cancel, 1)
+	router.ServeHTTP(recorder, request)
+
+	if body := recorder.Body.String(); !strings.Contains(body, ": connected\n\n") {
+		t.Fatalf("first flush body=%q", body)
+	}
+}
+
 func TestSSERejectsDuplicateOrUnknownTopicsBeforeSubscription(t *testing.T) {
 	hub := newSSETestHub(t)
 	router := newHTTPFixture(t)

@@ -97,7 +97,7 @@ func (h *EventsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	controller := http.NewResponseController(w)
 	_ = controller.SetWriteDeadline(time.Time{})
-	if err := controller.Flush(); err != nil {
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil || controller.Flush() != nil {
 		return
 	}
 

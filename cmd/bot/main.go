@@ -145,28 +145,7 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 		Available: true, Code: "available", CheckedAt: nowUTC, LastSuccessAt: nowUTC,
 	})
 
-	knowledgeIndex := knowledge.NewIndexRef(nil)
-	knowledgeSync := knowledge.NewSyncer(knowledge.SyncerOptions{
-		Source: knowledge.WPSClient{
-			ShareURL: cfg.WPS.ShareURL,
-			SID:      cfg.WPS.SID,
-			Timeout:  time.Duration(cfg.WPS.TimeoutSec) * time.Second,
-		},
-		Sheet:     cfg.WPS.Sheet,
-		CacheFile: cfg.WPS.CacheFile,
-		Index:     knowledgeIndex,
-	})
-	knowledgeLoadedAt := time.Now().UTC()
-	if err := knowledgeSync.Sync(ctx); err != nil {
-		log.Printf("load knowledge from WPS failed, trying local cache: %v", err)
-		if cacheErr := knowledgeSync.LoadCache(); cacheErr != nil {
-			return nil, errors.New("load knowledge: WPS and local cache unavailable")
-		}
-		log.Printf("loaded knowledge from local cache %s", cfg.WPS.CacheFile)
-		healthService.SetWPS(health.ComponentStatus{Available: true, Code: "cache", CheckedAt: knowledgeLoadedAt, LastSuccessAt: knowledgeLoadedAt})
-	} else {
-		healthService.SetWPS(health.ComponentStatus{Available: true, Code: "available", CheckedAt: knowledgeLoadedAt, LastSuccessAt: knowledgeLoadedAt})
-	}
+	knowledgeIndex, knowledgeSync := initializeKnowledge(ctx, cfg.WPS, healthService)
 
 	aiSvc, applicantExtractor, err := newAIServices(ctx, cfg, knowledgeIndex)
 	if err != nil {
@@ -354,6 +333,51 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 	}
 	backendOwned = false
 	return application, nil
+}
+
+func initializeKnowledge(ctx context.Context, configuration config.WPSConfig, healthService *health.Service) (*knowledge.IndexRef, *knowledge.Syncer) {
+	index := knowledge.NewIndexRef(nil)
+	syncer := knowledge.NewSyncer(knowledge.SyncerOptions{
+		Source: knowledge.WPSClient{
+			ShareURL: configuration.ShareURL,
+			SID:      configuration.SID,
+			Timeout:  time.Duration(configuration.TimeoutSec) * time.Second,
+		},
+		Sheet:     configuration.Sheet,
+		CacheFile: configuration.CacheFile,
+		Index:     index,
+	})
+	sourceConfigured := strings.TrimSpace(configuration.ShareURL) != ""
+	if sourceConfigured {
+		if err := syncer.Sync(ctx); err == nil {
+			checkedAt := time.Now().UTC()
+			healthService.SetWPS(health.ComponentStatus{
+				Available: true, Code: "available", CheckedAt: checkedAt, LastSuccessAt: checkedAt,
+			})
+			return index, syncer
+		}
+		log.Print("load knowledge from WPS failed, trying local cache")
+	}
+	if err := syncer.LoadCache(); err == nil {
+		checkedAt := time.Now().UTC()
+		log.Printf("loaded knowledge from local cache %s", configuration.CacheFile)
+		healthService.SetWPS(health.ComponentStatus{
+			Available: true, Code: "cache", CheckedAt: checkedAt, LastSuccessAt: checkedAt,
+		})
+		return index, syncer
+	}
+
+	checkedAt := time.Now().UTC()
+	if sourceConfigured {
+		log.Print("knowledge unavailable: WPS sync and local cache load failed")
+		healthService.SetWPS(health.ComponentStatus{
+			Code: "unavailable", CheckedAt: checkedAt, LastErrorAt: checkedAt,
+		})
+	} else {
+		log.Print("knowledge source is not configured and no local cache is available")
+		healthService.SetWPS(health.ComponentStatus{Code: "not_configured", CheckedAt: checkedAt})
+	}
+	return index, syncer
 }
 
 func adminHTTPConfigured(configuration config.AdminConfig) bool {

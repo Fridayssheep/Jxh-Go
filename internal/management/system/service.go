@@ -15,15 +15,18 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/management/auth"
 	"github.com/zjutjh/jxh-go/internal/management/events"
+	platformconfig "github.com/zjutjh/jxh-go/internal/platform/config"
 	"github.com/zjutjh/jxh-go/internal/platform/health"
 	"github.com/zjutjh/jxh-go/internal/platform/napcat"
 )
 
 var (
-	ErrForbidden           = errors.New("system operation forbidden")
-	ErrInvalidInput        = errors.New("invalid system operation input")
-	ErrNapCatUnavailable   = errors.New("napcat unavailable")
-	ErrIdempotencyConflict = errors.New("system idempotency conflict")
+	ErrForbidden                    = errors.New("system operation forbidden")
+	ErrInvalidInput                 = errors.New("invalid system operation input")
+	ErrNapCatUnavailable            = errors.New("napcat unavailable")
+	ErrIdempotencyConflict          = errors.New("system idempotency conflict")
+	ErrConfigurationUnavailable     = errors.New("configuration file unavailable")
+	ErrConfigurationVersionConflict = errors.New("configuration version conflict")
 )
 
 type DependencyKey string
@@ -71,6 +74,19 @@ type Health struct {
 	Live         bool
 	Ready        bool
 	Dependencies []DependencyHealth
+}
+
+type Configuration struct {
+	YAML                 string
+	Version              uint64
+	MaskedFields         []string
+	EnvironmentOverrides []string
+	RestartRequired      bool
+}
+
+type ConfigurationEditor interface {
+	Read() (platformconfig.EditableDocument, error)
+	Update(expectedVersion uint64, candidate string) (platformconfig.EditableDocument, error)
 }
 
 type HealthSource interface {
@@ -154,6 +170,7 @@ type Options struct {
 	Health               HealthSource
 	Gateway              RestartGateway
 	Events               EventPublisher
+	Configuration        ConfigurationEditor
 	IdempotencySecret    []byte
 	Dependencies         map[DependencyKey]DependencyConfiguration
 	Now                  func() time.Time
@@ -168,6 +185,7 @@ type Service struct {
 	health        HealthSource
 	gateway       RestartGateway
 	events        EventPublisher
+	configuration ConfigurationEditor
 	secret        []byte
 	dependencies  map[DependencyKey]DependencyConfiguration
 	now           func() time.Time
@@ -209,7 +227,8 @@ func NewService(options Options) (*Service, error) {
 	}
 	return &Service{
 		store: options.Store, health: options.Health, gateway: options.Gateway, events: options.Events,
-		secret: append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
+		configuration: options.Configuration,
+		secret:        append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
 		workerCtx: workerContext, cancel: cancel, workerTimeout: options.WorkerTimeout,
 		retryDelay: options.TransitionRetryDelay,
 		workers:    make(chan struct{}, options.MaxConcurrentWorkers),
@@ -235,6 +254,50 @@ func (s *Service) Health(_ context.Context, principal auth.Principal) (Health, e
 		dependencies = append(dependencies, mapDependency(component.key, configuration, component.status))
 	}
 	return Health{GeneratedAt: s.now().UTC(), Live: snapshot.Live, Ready: snapshot.Ready, Dependencies: dependencies}, nil
+}
+
+func (s *Service) Configuration(_ context.Context, principal auth.Principal) (Configuration, error) {
+	if !principal.Has(auth.PermissionSystemRead) {
+		return Configuration{}, ErrForbidden
+	}
+	if s.configuration == nil {
+		return Configuration{}, ErrConfigurationUnavailable
+	}
+	document, err := s.configuration.Read()
+	if err != nil {
+		return Configuration{}, ErrConfigurationUnavailable
+	}
+	return mapConfiguration(document), nil
+}
+
+func (s *Service) UpdateConfiguration(_ context.Context, principal auth.Principal, expectedVersion uint64, candidate string) (Configuration, error) {
+	if !principal.Has(auth.PermissionConfigWrite) {
+		return Configuration{}, ErrForbidden
+	}
+	if s.configuration == nil {
+		return Configuration{}, ErrConfigurationUnavailable
+	}
+	document, err := s.configuration.Update(expectedVersion, candidate)
+	if err != nil {
+		switch {
+		case errors.Is(err, platformconfig.ErrInvalidDocument):
+			return Configuration{}, ErrInvalidInput
+		case errors.Is(err, platformconfig.ErrVersionConflict):
+			return Configuration{}, ErrConfigurationVersionConflict
+		default:
+			return Configuration{}, ErrConfigurationUnavailable
+		}
+	}
+	return mapConfiguration(document), nil
+}
+
+func mapConfiguration(document platformconfig.EditableDocument) Configuration {
+	return Configuration{
+		YAML: document.YAML, Version: document.Version,
+		MaskedFields:         append([]string(nil), document.MaskedFields...),
+		EnvironmentOverrides: append([]string(nil), document.EnvironmentOverrides...),
+		RestartRequired:      true,
+	}
 }
 
 func (s *Service) RecoverInterrupted(ctx context.Context) (int, error) {

@@ -70,6 +70,61 @@ func TestRestartHTTPMapsUnavailableAndRejectsConfirmationBeforeService(t *testin
 	assertErrorCode(t, response, http.StatusServiceUnavailable, "dependency_unavailable")
 }
 
+func TestSystemConfigurationHTTPReturnsMaskedYAMLAndUpdatesByVersion(t *testing.T) {
+	service := &fakeSystemOperations{configuration: managersystem.Configuration{
+		YAML: "ai:\n  api_key: __JXH_SECRET_UNCHANGED__\n", Version: 7,
+		MaskedFields: []string{"ai.api_key"}, EnvironmentOverrides: []string{"ai.model"}, RestartRequired: true,
+	}}
+	router := newSystemHTTPFixture(t, service)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/system/configuration", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "observer"})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"7"` ||
+		!strings.Contains(response.Body.String(), `"masked_fields":["ai.api_key"]`) || strings.Contains(response.Body.String(), "real-secret") {
+		t.Fatalf("status=%d etag=%q body=%s", response.Code, response.Header().Get("ETag"), response.Body.String())
+	}
+
+	service.configuration.Version = 8
+	request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"yaml":"ai:\n  enabled: false\n"}`)
+	request.Header.Set("If-Match", `"7"`)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.configurationUpdates != 1 || service.expectedVersion != 7 || service.candidateYAML != "ai:\n  enabled: false\n" {
+		t.Fatalf("status=%d calls=%d version=%d yaml=%q body=%s", response.Code, service.configurationUpdates, service.expectedVersion, service.candidateYAML, response.Body.String())
+	}
+}
+
+func TestSystemConfigurationHTTPRequiresVersionAndMapsEditorErrors(t *testing.T) {
+	service := &fakeSystemOperations{}
+	router := newSystemHTTPFixture(t, service)
+
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"yaml":"app:\n  timezone: Asia/Shanghai\n"}`)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertErrorCode(t, response, http.StatusPreconditionRequired, CodePreconditionRequired)
+	if service.configurationUpdates != 0 {
+		t.Fatal("missing If-Match reached the service")
+	}
+
+	for _, test := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{managersystem.ErrInvalidInput, http.StatusBadRequest, CodeBadRequest},
+		{managersystem.ErrConfigurationVersionConflict, http.StatusConflict, "resource_version_conflict"},
+		{managersystem.ErrConfigurationUnavailable, http.StatusServiceUnavailable, "dependency_unavailable"},
+	} {
+		service.err = test.err
+		request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"yaml":"app:\n  timezone: Asia/Shanghai\n"}`)
+		request.Header.Set("If-Match", `"7"`)
+		response = httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		assertErrorCode(t, response, test.status, test.code)
+	}
+}
+
 func newSystemHTTPFixture(t *testing.T, service SystemOperations) *Router {
 	t.Helper()
 	handlers, err := NewSystemHandlers(service)
@@ -84,11 +139,15 @@ func newSystemHTTPFixture(t *testing.T, service SystemOperations) *Router {
 }
 
 type fakeSystemOperations struct {
-	health       managersystem.Health
-	operation    managersystem.Operation
-	err          error
-	restartCalls int
-	request      auth.MutationContext
+	health               managersystem.Health
+	operation            managersystem.Operation
+	err                  error
+	restartCalls         int
+	request              auth.MutationContext
+	configuration        managersystem.Configuration
+	configurationUpdates int
+	expectedVersion      uint64
+	candidateYAML        string
 }
 
 func (s *fakeSystemOperations) Health(context.Context, auth.Principal) (managersystem.Health, error) {
@@ -101,4 +160,15 @@ func (s *fakeSystemOperations) RestartNapCat(_ context.Context, _ auth.Principal
 		s.request = request[0]
 	}
 	return s.operation, s.err
+}
+
+func (s *fakeSystemOperations) Configuration(context.Context, auth.Principal) (managersystem.Configuration, error) {
+	return s.configuration, s.err
+}
+
+func (s *fakeSystemOperations) UpdateConfiguration(_ context.Context, _ auth.Principal, version uint64, yaml string) (managersystem.Configuration, error) {
+	s.configurationUpdates++
+	s.expectedVersion = version
+	s.candidateYAML = yaml
+	return s.configuration, s.err
 }

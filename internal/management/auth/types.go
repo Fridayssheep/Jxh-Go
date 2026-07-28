@@ -33,6 +33,7 @@ const (
 	PermissionUsersManage        Permission = "users:manage"
 	PermissionSessionsManage     Permission = "sessions:manage"
 	PermissionSystemRead         Permission = "system:read"
+	PermissionConfigWrite        Permission = "config:write"
 	PermissionNapCatRestart      Permission = "napcat:restart"
 	PermissionEventsRead         Permission = "events:read"
 )

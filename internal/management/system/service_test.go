@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/management/auth"
+	platformconfig "github.com/zjutjh/jxh-go/internal/platform/config"
 	"github.com/zjutjh/jxh-go/internal/platform/health"
 	"github.com/zjutjh/jxh-go/internal/platform/napcat"
 )
@@ -92,6 +93,58 @@ func TestHealthMapsComponentsWithoutProbingDependencies(t *testing.T) {
 	}
 }
 
+func TestConfigurationReadAndUpdateUseSeparatePermissions(t *testing.T) {
+	service, _, _ := newSystemFixture(t)
+	defer service.Close()
+
+	document, err := service.Configuration(t.Context(), auth.Principal{Role: auth.RoleObserver})
+	if err != nil || document.Version != 7 || document.YAML != "masked: true\n" {
+		t.Fatalf("configuration=%+v error=%v", document, err)
+	}
+	if _, err := service.UpdateConfiguration(t.Context(), auth.Principal{Role: auth.RoleMaintainer}, 7, "masked: false\n"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("maintainer update error = %v, want ErrForbidden", err)
+	}
+	updated, err := service.UpdateConfiguration(t.Context(), superPrincipal(), 7, "masked: false\n")
+	if err != nil || updated.Version != 8 || updated.YAML != "masked: false\n" {
+		t.Fatalf("updated configuration=%+v error=%v", updated, err)
+	}
+}
+
+func TestConfigurationMapsEditorFailuresToDomainErrors(t *testing.T) {
+	service, _, _ := newSystemFixture(t)
+	defer service.Close()
+	editor := service.configuration.(*fakeConfigurationEditor)
+
+	editor.readErr = platformconfig.ErrInvalidDocument
+	if _, err := service.Configuration(t.Context(), auth.Principal{Role: auth.RoleObserver}); !errors.Is(err, ErrConfigurationUnavailable) {
+		t.Fatalf("read error = %v, want ErrConfigurationUnavailable", err)
+	}
+
+	editor.readErr = nil
+	editor.updateErr = platformconfig.ErrInvalidDocument
+	if _, err := service.UpdateConfiguration(t.Context(), superPrincipal(), 7, "invalid"); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid update error = %v, want ErrInvalidInput", err)
+	}
+	editor.updateErr = platformconfig.ErrVersionConflict
+	if _, err := service.UpdateConfiguration(t.Context(), superPrincipal(), 7, "masked: false\n"); !errors.Is(err, ErrConfigurationVersionConflict) {
+		t.Fatalf("stale update error = %v, want ErrConfigurationVersionConflict", err)
+	}
+	editor.updateErr = errors.New("disk unavailable")
+	if _, err := service.UpdateConfiguration(t.Context(), superPrincipal(), 7, "masked: false\n"); !errors.Is(err, ErrConfigurationUnavailable) {
+		t.Fatalf("storage error = %v, want ErrConfigurationUnavailable", err)
+	}
+}
+
+func TestConfigurationIsUnavailableWithoutAnEditor(t *testing.T) {
+	service, _, _ := newSystemFixture(t)
+	defer service.Close()
+	service.configuration = nil
+
+	if _, err := service.Configuration(t.Context(), auth.Principal{Role: auth.RoleObserver}); !errors.Is(err, ErrConfigurationUnavailable) {
+		t.Fatalf("configuration error = %v, want ErrConfigurationUnavailable", err)
+	}
+}
+
 func TestRecoverInterruptedPublishesUnknownOperations(t *testing.T) {
 	service, store, _ := newSystemFixture(t)
 	defer service.Close()
@@ -117,6 +170,7 @@ func newSystemFixture(t *testing.T) (*Service, *fakeSystemStore, *fakeRestartGat
 	gateway := &fakeRestartGateway{connected: true}
 	service, err := NewService(Options{
 		Store: store, Health: healthService, Gateway: gateway, IdempotencySecret: []byte("01234567890123456789012345678901"),
+		Configuration: &fakeConfigurationEditor{document: platformconfig.EditableDocument{YAML: "masked: true\n", Version: 7}},
 		Dependencies: map[DependencyKey]DependencyConfiguration{
 			DependencyMySQL: {Configured: true, Required: true}, DependencyNapCat: {Configured: true},
 			DependencyTelemetry: {Configured: true},
@@ -128,6 +182,25 @@ func newSystemFixture(t *testing.T) (*Service, *fakeSystemStore, *fakeRestartGat
 		t.Fatal(err)
 	}
 	return service, store, gateway
+}
+
+type fakeConfigurationEditor struct {
+	document  platformconfig.EditableDocument
+	readErr   error
+	updateErr error
+}
+
+func (e *fakeConfigurationEditor) Read() (platformconfig.EditableDocument, error) {
+	return e.document, e.readErr
+}
+
+func (e *fakeConfigurationEditor) Update(_ uint64, yaml string) (platformconfig.EditableDocument, error) {
+	if e.updateErr != nil {
+		return platformconfig.EditableDocument{}, e.updateErr
+	}
+	e.document.YAML = yaml
+	e.document.Version++
+	return e.document, nil
 }
 
 func superPrincipal() auth.Principal {

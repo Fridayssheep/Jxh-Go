@@ -167,6 +167,7 @@ func NewBackend(options Options) (*Backend, error) {
 	}
 	systemService, err := system.NewService(system.Options{
 		Store: options.Store, Health: options.Health, Gateway: options.Gateway, Events: hub,
+		Configuration:     newConfigurationEditor(options.Config.SourcePath),
 		IdempotencySecret: secrets.SystemOperation, Dependencies: dependencyConfiguration(options.Config),
 		Now: options.Now, WorkerContext: options.Context,
 	})
@@ -294,6 +295,17 @@ func NewBackend(options Options) (*Backend, error) {
 		Telemetry: telemetryService, Maintenance: maintenance, Groups: groupService,
 		Knowledge: knowledgeService, System: systemService,
 	}, nil
+}
+
+func newConfigurationEditor(sourcePath string) system.ConfigurationEditor {
+	if strings.TrimSpace(sourcePath) == "" {
+		return nil
+	}
+	editor, err := config.NewFileEditor(sourcePath)
+	if err != nil {
+		return nil
+	}
+	return editor
 }
 
 func loadRuntimeState(

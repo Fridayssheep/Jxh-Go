@@ -13,6 +13,8 @@ import (
 
 type SystemOperations interface {
 	Health(ctx context.Context, principal auth.Principal) (managersystem.Health, error)
+	Configuration(ctx context.Context, principal auth.Principal) (managersystem.Configuration, error)
+	UpdateConfiguration(ctx context.Context, principal auth.Principal, expectedVersion uint64, yaml string) (managersystem.Configuration, error)
 	RestartNapCat(ctx context.Context, principal auth.Principal, input managersystem.RestartInput, idempotencyKey string, request ...auth.MutationContext) (managersystem.Operation, error)
 }
 
@@ -34,6 +36,12 @@ func (h *SystemHandlers) Register(router *Router) error {
 	if err := router.HandleFunc(http.MethodGet, "/api/admin/v1/system/health", RouteOptions{Permission: auth.PermissionSystemRead}, h.health); err != nil {
 		return err
 	}
+	if err := router.HandleFunc(http.MethodGet, "/api/admin/v1/system/configuration", RouteOptions{Permission: auth.PermissionSystemRead}, h.configuration); err != nil {
+		return err
+	}
+	if err := router.HandleFunc(http.MethodPatch, "/api/admin/v1/system/configuration", mutationRoute(auth.PermissionConfigWrite), h.updateConfiguration); err != nil {
+		return err
+	}
 	return router.HandleFunc(http.MethodPost, "/api/admin/v1/system/napcat/restart", mutationRoute(auth.PermissionNapCatRestart), h.restart)
 }
 
@@ -52,6 +60,40 @@ func (h *SystemHandlers) health(w http.ResponseWriter, r *http.Request) {
 		GeneratedAt: snapshot.GeneratedAt.UTC(), Liveness: "healthy",
 		Readiness: mapReadiness(snapshot), Dependencies: dependencies,
 	})
+}
+
+func (h *SystemHandlers) configuration(w http.ResponseWriter, r *http.Request) {
+	identity, _ := AuthFromContext(r.Context())
+	document, err := h.service.Configuration(r.Context(), principalFromAuth(identity))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	setRevisionETag(w, document.Version)
+	writeJSON(w, http.StatusOK, mapSystemConfiguration(document))
+}
+
+type systemConfigurationPatchRequest struct {
+	YAML string `json:"yaml"`
+}
+
+func (h *SystemHandlers) updateConfiguration(w http.ResponseWriter, r *http.Request) {
+	version, ok := requiredRevision(w, r)
+	if !ok {
+		return
+	}
+	var body systemConfigurationPatchRequest
+	if !decodeRequestJSON(w, r, &body) {
+		return
+	}
+	identity, _ := AuthFromContext(r.Context())
+	document, err := h.service.UpdateConfiguration(r.Context(), principalFromAuth(identity), version, body.YAML)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	setRevisionETag(w, document.Version)
+	writeJSON(w, http.StatusOK, mapSystemConfiguration(document))
 }
 
 type napcatRestartRequest struct {
@@ -94,6 +136,11 @@ func (h *SystemHandlers) writeServiceError(w http.ResponseWriter, r *http.Reques
 	case errors.Is(err, managersystem.ErrNapCatUnavailable):
 		w.Header().Set("Retry-After", "3")
 		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "NapCat 当前不可用", nil, true)
+	case errors.Is(err, managersystem.ErrConfigurationVersionConflict):
+		writeAPIError(w, r, http.StatusConflict, "resource_version_conflict", "配置文件已被其他操作修改", nil, false)
+	case errors.Is(err, managersystem.ErrConfigurationUnavailable):
+		w.Header().Set("Retry-After", "3")
+		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "配置文件当前不可用", nil, true)
 	default:
 		writeAPIError(w, r, http.StatusInternalServerError, CodeInternal, "服务器内部错误", nil, false)
 	}
@@ -125,6 +172,14 @@ type systemOperationDTO struct {
 	RequestedAt time.Time                     `json:"requested_at"`
 	CompletedAt *time.Time                    `json:"completed_at"`
 	ErrorCode   *string                       `json:"error_code"`
+}
+
+type systemConfigurationDTO struct {
+	YAML                 string   `json:"yaml"`
+	Version              uint64   `json:"version"`
+	MaskedFields         []string `json:"masked_fields"`
+	EnvironmentOverrides []string `json:"environment_overrides"`
+	RestartRequired      bool     `json:"restart_required"`
 }
 
 func mapDependencyHealth(value managersystem.DependencyHealth) dependencyHealthDTO {
@@ -163,5 +218,14 @@ func mapSystemOperation(value managersystem.Operation) systemOperationDTO {
 	return systemOperationDTO{
 		ID: value.ID, Type: value.Type, Status: value.Status, RequestedAt: value.RequestedAt.UTC(),
 		CompletedAt: utcTimePointer(value.CompletedAt), ErrorCode: value.ErrorCode,
+	}
+}
+
+func mapSystemConfiguration(value managersystem.Configuration) systemConfigurationDTO {
+	return systemConfigurationDTO{
+		YAML: value.YAML, Version: value.Version,
+		MaskedFields:         append([]string(nil), value.MaskedFields...),
+		EnvironmentOverrides: append([]string(nil), value.EnvironmentOverrides...),
+		RestartRequired:      value.RestartRequired,
 	}
 }

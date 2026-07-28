@@ -28,6 +28,7 @@ var allPermissions = []Permission{
 	PermissionUsersManage,
 	PermissionSessionsManage,
 	PermissionSystemRead,
+	PermissionConfigWrite,
 	PermissionNapCatRestart,
 	PermissionEventsRead,
 }

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -128,5 +130,20 @@ func TestLoadNormalizesNonPositiveRuntimeLimits(t *testing.T) {
 	}
 	if cfg.Database.MaxIdleConns != 10 {
 		t.Fatalf("max idle conns = %d, want default", cfg.Database.MaxIdleConns)
+	}
+}
+
+func TestLoadRecordsTheConfigurationSourcePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("app:\n  timezone: Asia/Shanghai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SourcePath != path {
+		t.Fatalf("source path = %q, want %q", cfg.SourcePath, path)
 	}
 }

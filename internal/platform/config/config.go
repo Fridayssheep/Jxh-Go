@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	App       AppConfig       `yaml:"app"`
-	Admin     AdminConfig     `yaml:"admin"`
-	OneBot    OneBotConfig    `yaml:"onebot"`
-	WPS       WPSConfig       `yaml:"wps"`
-	Database  DatabaseConfig  `yaml:"database"`
-	AI        AIConfig        `yaml:"ai"`
-	Quote     QuoteConfig     `yaml:"quote"`
-	Scheduler SchedulerConfig `yaml:"scheduler"`
+	SourcePath string          `yaml:"-"`
+	App        AppConfig       `yaml:"app"`
+	Admin      AdminConfig     `yaml:"admin"`
+	OneBot     OneBotConfig    `yaml:"onebot"`
+	WPS        WPSConfig       `yaml:"wps"`
+	Database   DatabaseConfig  `yaml:"database"`
+	AI         AIConfig        `yaml:"ai"`
+	Quote      QuoteConfig     `yaml:"quote"`
+	Scheduler  SchedulerConfig `yaml:"scheduler"`
 }
 
 type AppConfig struct {
@@ -99,6 +100,7 @@ type SchedulerConfig struct {
 
 func Load(path string) (Config, error) {
 	cfg := Default()
+	cfg.SourcePath = path
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {

@@ -95,6 +95,24 @@ func TestSystemConfigurationHTTPReturnsMaskedYAMLAndUpdatesByVersion(t *testing.
 	}
 }
 
+func TestSystemConfigurationHTTPReturnsEmptyListsAsArrays(t *testing.T) {
+	service := &fakeSystemOperations{configuration: managersystem.Configuration{
+		YAML: "app:\n  timezone: Asia/Shanghai\n", Version: 7,
+	}}
+	router := newSystemHTTPFixture(t, service)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/system/configuration", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "observer"})
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"masked_fields":[]`) ||
+		!strings.Contains(response.Body.String(), `"environment_overrides":[]`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestSystemConfigurationHTTPRequiresVersionAndMapsEditorErrors(t *testing.T) {
 	service := &fakeSystemOperations{}
 	router := newSystemHTTPFixture(t, service)

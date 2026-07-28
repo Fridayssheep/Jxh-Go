@@ -224,8 +224,8 @@ func mapSystemOperation(value managersystem.Operation) systemOperationDTO {
 func mapSystemConfiguration(value managersystem.Configuration) systemConfigurationDTO {
 	return systemConfigurationDTO{
 		YAML: value.YAML, Version: value.Version,
-		MaskedFields:         append([]string(nil), value.MaskedFields...),
-		EnvironmentOverrides: append([]string(nil), value.EnvironmentOverrides...),
+		MaskedFields:         append([]string{}, value.MaskedFields...),
+		EnvironmentOverrides: append([]string{}, value.EnvironmentOverrides...),
 		RestartRequired:      value.RestartRequired,
 	}
 }

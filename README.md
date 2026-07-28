@@ -274,19 +274,19 @@ make compose-logs  # 查看 compose 日志
 
 | 路径 | 说明 |
 | --- | --- |
-| `cmd/bot` | bot 启动入口 |
-| `internal/config` | 配置加载、默认值和环境变量覆盖 |
-| `internal/bot` | 群消息处理管线和命令路由 |
-| `internal/commands` | 群管理和定时任务命令 |
-| `internal/knowledge` | WPS 解析、原子内存索引和 Agent 搜索 |
-| `internal/ai` | `/ai` ReAct Agent、知识搜索工具和群申请字段提取 |
-| `internal/storage` | GORM 数据访问和数据库模型；表结构以初始化 SQL 为准 |
-| `internal/triggerstats` | MySQL-backed 词条触发统计 |
-| `internal/napcat` | NapCat SDK 适配层 |
-| `internal/quote` | 引用图请求和消息内容转换 |
-| `internal/scheduler` | 定时任务运行时 |
+| `cmd/` | Bot、数据库迁移和首个管理员引导入口 |
+| `internal/management/` | 管理 API、鉴权审计、设置、总览、统计和系统操作 |
+| `internal/automation/` | 自定义命令、定时任务管理和调度运行时 |
+| `internal/groups/` | 群目录、入群申请采集和审批状态机 |
+| `internal/knowledge/` | WPS 知识索引、管理视图和词条触发统计 |
+| `internal/messaging/` | CQ 回复、引用图、链接净化和远程文件暂存 |
+| `internal/bot/` | 群消息处理管线、命令路由和旧群聊管理命令 |
+| `internal/ai/` | `/ai` ReAct Agent、知识搜索工具和申请字段提取 |
+| `internal/platform/` | 应用生命周期、配置、数据库、GORM 存储、NapCat、健康和遥测 |
 | `deploy/mysql/init` | MySQL 初始化 SQL |
 | `deploy/mysql/migrations` | 已有部署按顺序手工执行的 schema 迁移 SQL |
 | `data/` | MySQL、NapCat、bot 和 WPS 缓存的持久化根目录 |
 | `Dockerfile` | bot 容器镜像构建文件 |
 | `docker-compose.yaml` | MySQL、NapCat、quote 和 bot 的完整 compose |
+
+`internal/README.md` 记录各功能目录的职责和新增包放置规则。

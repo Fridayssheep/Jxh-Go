@@ -7,8 +7,9 @@
 - 项目是 Go 1.25+ 编写的精弘 QQ 群助手，通过 NapCat SDK v1.0.2 接入 OneBot 11。入口是 `cmd/bot/main.go`。
 - WPS XLSX 是知识唯一真源。启动和 `/reload` 下载并解析表格，验证成功后写入 `data/cache/knowledge.xlsx`，再原子替换进程内 `knowledge.IndexRef`。MySQL 不保存知识正文。
 - 普通关键词回复使用 keyword/alias 精确匹配（大小写和首尾空格已归一化）；`/ai` 使用 Eino ReAct Agent 调用内存 `search_knowledge` 工具，支持 AND、OR 和 Go 正则搜索。
-- MySQL 只保存 `knowledge_trigger_logs`、`scheduled_jobs` 和 `group_join_requests`。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。schema 变更后需在 `deploy/mysql/migrations/` 追加迁移脚本供已有部署使用。
-- 数据访问统一位于 `internal/storage`，使用直接 GORM 调用与手写模型（`internal/storage/models.go`）。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
+- MySQL 保存 Bot 运行数据和管理端账号、会话、审计、设置、任务、审批、命令与统计数据。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。schema 变更后需在 `deploy/mysql/migrations/` 追加迁移脚本供已有部署使用。
+- 数据访问统一位于 `internal/platform/storage`，使用直接 GORM 调用与手写模型（`internal/platform/storage/models.go`）。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
+- `internal/` 按功能边界组织；新增包前先阅读 `internal/README.md`，优先放入既有的 management、automation、groups、knowledge、messaging、bot 或 platform 边界，不恢复根目录平铺结构。
 - Compose 包含 MySQL、NapCat、quote 和 bot。quote 服务从 `zjutjh/qq-quote-generator` 构建，客户端先请求 `/gif/base64/`，失败后回退 `/png/base64/`。
 - bot 只主动连接 NapCat 正向 WebSocket，不提供反向 WebSocket 服务。容器默认在 `:8080/healthz` 暴露端点供 Docker healthcheck 使用，可通过 `HEALTH_PORT` 调整；容器通过 entrypoint 支持 `PUID/PGID` 环境变量以匹配 NAS（群晖/威联通）宿主用户权限，避免 `./data/` 挂载点写入失败。
 - 仓库当前不保留 `docs/` 内容，也不提交 `*_test.go`。不要自行恢复历史设计文档或测试文件，除非任务明确要求。
@@ -47,7 +48,7 @@
 
 ## 验证要求
 
-- 当前仓库没有测试文件，因此 `go test ./...` 只能证明所有包可编译，不能证明业务行为。不要把它描述为完整回归测试。
+- 仓库包含单元、race 和可选真实 MySQL 集成测试；未设置 `JXH_MYSQL_INTEGRATION_DSN` 时数据库集成测试会跳过，不能把这种结果描述为真实 MySQL 已验证。
 - 每次代码改动至少运行：`gofmt`（仅改动的 Go 文件）、`go test ./...`、`go build ./...`、`go vet ./...`、`go mod tidy -diff` 和 `git diff --check`。
 - 可用时补跑 `staticcheck ./...`、`deadcode ./...`、`golangci-lint run` 和 `docker-compose config --quiet`。
 - 涉及 NapCat、WPS、MySQL、quote、文件挂载或真实 QQ 行为时，明确区分静态/编译验证与真实服务联调；没有实际联调就不能声称生产行为已验证。

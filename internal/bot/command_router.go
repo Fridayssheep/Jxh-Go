@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/ai"
-	"github.com/zjutjh/jxh-go/internal/commands"
-	"github.com/zjutjh/jxh-go/internal/grouprequest"
-	"github.com/zjutjh/jxh-go/internal/quote"
-	"github.com/zjutjh/jxh-go/internal/safego"
-	"github.com/zjutjh/jxh-go/internal/settings"
-	"github.com/zjutjh/jxh-go/internal/telemetry"
-	"github.com/zjutjh/jxh-go/internal/triggerstats"
+	"github.com/zjutjh/jxh-go/internal/bot/commands"
+	"github.com/zjutjh/jxh-go/internal/groups/grouprequest"
+	"github.com/zjutjh/jxh-go/internal/knowledge/triggerstats"
+	"github.com/zjutjh/jxh-go/internal/management/settings"
+	"github.com/zjutjh/jxh-go/internal/messaging/quote"
+	"github.com/zjutjh/jxh-go/internal/platform/safego"
+	"github.com/zjutjh/jxh-go/internal/platform/telemetry"
 	"github.com/zjutjh/napcat-sdk/message"
 )
 

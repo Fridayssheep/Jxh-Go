@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/zjutjh/jxh-go/internal/cqreply"
+	"github.com/zjutjh/jxh-go/internal/messaging/cqreply"
 )
 
 var (

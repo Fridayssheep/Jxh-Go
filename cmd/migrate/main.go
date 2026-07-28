@@ -13,8 +13,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/zjutjh/jxh-go/internal/config"
-	"github.com/zjutjh/jxh-go/internal/database"
+	"github.com/zjutjh/jxh-go/internal/platform/config"
+	"github.com/zjutjh/jxh-go/internal/platform/database"
 )
 
 type commandDeps struct {

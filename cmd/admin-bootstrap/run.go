@@ -12,7 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/management/auth"
 	"golang.org/x/term"
 )
 

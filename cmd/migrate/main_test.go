@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zjutjh/jxh-go/internal/config"
-	"github.com/zjutjh/jxh-go/internal/database"
+	"github.com/zjutjh/jxh-go/internal/platform/config"
+	"github.com/zjutjh/jxh-go/internal/platform/database"
 )
 
 func TestRunWithDepsAppliesRequestedManifestAndPrintsSafeResult(t *testing.T) {

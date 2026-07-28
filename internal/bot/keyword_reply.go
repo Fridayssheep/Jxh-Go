@@ -7,7 +7,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/zjutjh/jxh-go/internal/cqreply"
+	"github.com/zjutjh/jxh-go/internal/messaging/cqreply"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/message"
 )

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/auth"
-	"github.com/zjutjh/jxh-go/internal/events"
-	"github.com/zjutjh/jxh-go/internal/napcat"
+	"github.com/zjutjh/jxh-go/internal/management/auth"
+	"github.com/zjutjh/jxh-go/internal/management/events"
+	"github.com/zjutjh/jxh-go/internal/platform/napcat"
 )
 
 func TestListUsesEffectiveStalenessAndReturnsIndependentFeatures(t *testing.T) {

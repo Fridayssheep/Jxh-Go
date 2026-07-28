@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/zjutjh/jxh-go/internal/config"
-	"github.com/zjutjh/jxh-go/internal/database"
-	"github.com/zjutjh/jxh-go/internal/storage"
+	"github.com/zjutjh/jxh-go/internal/platform/config"
+	"github.com/zjutjh/jxh-go/internal/platform/database"
+	"github.com/zjutjh/jxh-go/internal/platform/storage"
 )
 
 func main() {

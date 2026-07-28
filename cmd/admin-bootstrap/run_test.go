@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/zjutjh/jxh-go/internal/auth"
+	"github.com/zjutjh/jxh-go/internal/management/auth"
 )
 
 func TestRunHashesPasswordWithConfiguredArgon2id(t *testing.T) {

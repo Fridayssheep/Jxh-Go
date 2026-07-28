@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/customcommand"
+	"github.com/zjutjh/jxh-go/internal/automation/customcommand"
 	"github.com/zjutjh/jxh-go/internal/knowledge"
-	"github.com/zjutjh/jxh-go/internal/linkcleaner"
-	"github.com/zjutjh/jxh-go/internal/quote"
-	"github.com/zjutjh/jxh-go/internal/settings"
-	"github.com/zjutjh/jxh-go/internal/telemetry"
+	"github.com/zjutjh/jxh-go/internal/management/settings"
+	"github.com/zjutjh/jxh-go/internal/messaging/linkcleaner"
+	"github.com/zjutjh/jxh-go/internal/messaging/quote"
+	"github.com/zjutjh/jxh-go/internal/platform/telemetry"
 	"github.com/zjutjh/napcat-sdk/message"
 )
 

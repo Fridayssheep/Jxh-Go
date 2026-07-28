@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zjutjh/jxh-go/internal/config"
-	"github.com/zjutjh/jxh-go/internal/health"
-	"github.com/zjutjh/jxh-go/internal/quote"
-	"github.com/zjutjh/jxh-go/internal/telemetry"
+	"github.com/zjutjh/jxh-go/internal/messaging/quote"
+	"github.com/zjutjh/jxh-go/internal/platform/config"
+	"github.com/zjutjh/jxh-go/internal/platform/health"
+	"github.com/zjutjh/jxh-go/internal/platform/telemetry"
 	"gorm.io/gorm"
 )
 

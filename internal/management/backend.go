@@ -328,6 +328,9 @@ func loadRuntimeState(
 	if _, err := groupsService.RecoverInterruptedSyncs(ctx); err != nil {
 		return fmt.Errorf("recover group syncs: %w", err)
 	}
+	if err := joinRequestService.ReloadStudentIDRule(ctx); err != nil {
+		return fmt.Errorf("load student ID rule: %w", err)
+	}
 	if err := joinRequestService.RecoverInterrupted(ctx); err != nil {
 		return fmt.Errorf("recover join request decisions: %w", err)
 	}

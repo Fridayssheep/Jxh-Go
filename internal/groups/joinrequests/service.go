@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/management/audit"
@@ -29,6 +30,8 @@ var (
 type Store interface {
 	GetPolicy(ctx context.Context, groupID string) (Policy, bool, error)
 	UpdatePolicy(ctx context.Context, mutation PolicyMutation) (Policy, error)
+	GetStudentIDRule(ctx context.Context) (StudentIDRule, bool, error)
+	UpdateStudentIDRule(ctx context.Context, mutation StudentIDRuleMutation) (StudentIDRule, error)
 	ListRequests(ctx context.Context, query ListQuery) (Page[Request], error)
 	GetRequest(ctx context.Context, requestID string) (Request, bool, error)
 	ListDecisions(ctx context.Context, query DecisionListQuery) (Page[Decision], bool, error)
@@ -99,6 +102,7 @@ type Service struct {
 	lifecycleMu        sync.Mutex
 	closed             bool
 	wait               sync.WaitGroup
+	studentIDRule      atomic.Pointer[StudentIDRule]
 }
 
 const (
@@ -123,12 +127,68 @@ func NewService(options Options) (*Service, error) {
 		workerContext = context.Background()
 	}
 	workerContext, cancel := context.WithCancel(workerContext)
-	return &Service{
+	service := &Service{
 		store: options.Store, approver: options.Approver, autoRejectReasons: options.AutoRejectReasons,
 		events: options.Events, telemetry: options.Telemetry, now: options.Now,
 		overdueAfter: overdueAfter, decisionTimeout: decisionTimeout, processingLease: processingLease,
 		persistenceTimeout: persistenceTimeout, retryDelay: retryDelay, workerCtx: workerContext, cancel: cancel,
-	}, nil
+	}
+	initialRule := StudentIDRule{Version: 1, UpdatedAt: options.Now().UTC()}
+	service.studentIDRule.Store(&initialRule)
+	return service, nil
+}
+
+func (s *Service) ReloadStudentIDRule(ctx context.Context) error {
+	value, found, err := s.store.GetStudentIDRule(ctx)
+	if err != nil {
+		return fmt.Errorf("load student ID rule: %w", err)
+	}
+	if !found || !validStudentIDRule(value) {
+		return ErrInvalidData
+	}
+	value = cloneStudentIDRule(value)
+	s.studentIDRule.Store(&value)
+	return nil
+}
+
+func (s *Service) GetStudentIDRule(_ context.Context, principal auth.Principal) (StudentIDRule, error) {
+	if !principal.Has(auth.PermissionJoinRequestsRead) {
+		return StudentIDRule{}, ErrForbidden
+	}
+	return s.studentIDRuleSnapshot(), nil
+}
+
+func (s *Service) UpdateStudentIDRule(ctx context.Context, principal auth.Principal, revision uint64, patch StudentIDRulePatch, request auth.MutationContext) (StudentIDRule, error) {
+	if !principal.Has(auth.PermissionJoinPoliciesWrite) {
+		return StudentIDRule{}, ErrForbidden
+	}
+	if revision == 0 || !studentIDRulePatchSet(patch) || !validMutationRequest(request) {
+		return StudentIDRule{}, ErrInvalidInput
+	}
+	current := s.studentIDRuleSnapshot()
+	if current.Version != revision {
+		return StudentIDRule{}, ErrConflict
+	}
+	candidate := applyStudentIDRulePatch(current, patch)
+	candidate.UpdatedAt = s.now().UTC()
+	mutation := mutationContext(principal, request, candidate.UpdatedAt)
+	candidate.UpdatedBy = cloneActor(&mutation.Actor)
+	if !validStudentIDRule(candidate) {
+		return StudentIDRule{}, ErrInvalidInput
+	}
+	value, err := s.store.UpdateStudentIDRule(ctx, StudentIDRuleMutation{
+		Context: mutation, ExpectedRevision: revision, Rule: candidate,
+	})
+	if err != nil {
+		return StudentIDRule{}, fmt.Errorf("update student ID rule: %w", err)
+	}
+	if !validStudentIDRule(value) || value.Version != revision+1 || !sameStudentIDRuleConfiguration(value, candidate) {
+		return StudentIDRule{}, ErrInvalidData
+	}
+	value = cloneStudentIDRule(value)
+	s.studentIDRule.Store(&value)
+	s.publishStudentIDRule(value.Version)
+	return cloneStudentIDRule(value), nil
 }
 
 func (s *Service) GetPolicy(ctx context.Context, principal auth.Principal, groupID string) (Policy, error) {
@@ -195,12 +255,13 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, query List
 	if err != nil {
 		return Page[Request]{}, fmt.Errorf("list join requests: %w", err)
 	}
+	rule := s.studentIDRuleSnapshot()
 	items := make([]Request, len(page.Items))
 	for index := range page.Items {
 		if !validRequest(page.Items[index], false) {
 			return Page[Request]{}, ErrInvalidData
 		}
-		items[index] = s.normalizeRequest(page.Items[index])
+		items[index] = s.normalizeRequestWithRule(page.Items[index], rule)
 	}
 	if page.NextCursor != "" && !validIdentifier(page.NextCursor, 256) {
 		return Page[Request]{}, ErrInvalidData
@@ -284,7 +345,11 @@ func (s *Service) Decide(ctx context.Context, principal auth.Principal, requestI
 	}
 	item := reservation.Items[0]
 	if reservation.Replay {
-		return replayResult(item)
+		result, replayErr := replayResult(item)
+		if result.Request.ID != "" {
+			result.Request = s.normalizeRequest(result.Request)
+		}
+		return result, replayErr
 	}
 	if !validReservedItem(item, requestID, input.Action) {
 		return DecisionResult{}, ErrInvalidData
@@ -314,6 +379,7 @@ func (s *Service) BulkDecide(ctx context.Context, principal auth.Principal, inpu
 	if !validReservation(reservation, input) {
 		return BulkResult{}, ErrInvalidData
 	}
+	rule := s.studentIDRuleSnapshot()
 	result := BulkResult{GroupID: input.GroupID, Action: input.Action, Items: make([]BulkItemResult, 0, len(reservation.Items))}
 	for _, reserved := range reservation.Items {
 		if reservation.Replay {
@@ -321,15 +387,20 @@ func (s *Service) BulkDecide(ctx context.Context, principal auth.Principal, inpu
 			if err != nil {
 				return BulkResult{}, err
 			}
+			item.Request = s.normalizeRequestWithRule(item.Request, rule)
 			result.append(item)
 			continue
 		}
 		if ctx.Err() != nil {
-			result.append(s.completeWithoutExternal(reserved, "request_canceled"))
+			item := s.completeWithoutExternal(reserved, "request_canceled")
+			item.Request = s.normalizeRequestWithRule(item.Request, rule)
+			result.append(item)
 			continue
 		}
 		completed, executeErr := s.execute(ctx, reserved, input.Reason)
-		result.append(bulkItemFromResult(reserved, completed, executeErr))
+		item := bulkItemFromResult(reserved, completed, executeErr)
+		item.Request = s.normalizeRequestWithRule(item.Request, rule)
+		result.append(item)
 	}
 	return cloneBulkResult(result), nil
 }
@@ -485,13 +556,37 @@ func nonNegativeDecisionDuration(decision Decision, completedAt time.Time) time.
 }
 
 func (s *Service) normalizeRequest(value Request) Request {
+	return s.normalizeRequestWithRule(value, s.studentIDRuleSnapshot())
+}
+
+func (s *Service) normalizeRequestWithRule(value Request, rule StudentIDRule) Request {
 	result := cloneRequest(value)
 	result.Overdue = result.DecisionStatus == DecisionPending && !result.RequestedAt.After(s.now().UTC().Add(-s.overdueAfter))
 	if result.AIParse.Fields != nil {
 		fields := ValidateApplicantFields(*result.AIParse.Fields, result.VerificationMessage)
 		result.AIParse.Fields = &fields
 	}
+	result.StudentIDAssessment = AssessStudentID(rule, result.AIParse.Fields)
 	return result
+}
+
+func (s *Service) studentIDRuleSnapshot() StudentIDRule {
+	value := s.studentIDRule.Load()
+	if value == nil {
+		return StudentIDRule{}
+	}
+	return cloneStudentIDRule(*value)
+}
+
+func (s *Service) publishStudentIDRule(version uint64) {
+	if s.events == nil {
+		return
+	}
+	_, _ = s.events.Publish(events.Draft{
+		Type: events.EventSettingsUpdated, OccurredAt: s.now().UTC(),
+		Resource: &events.Resource{Type: events.ResourceSettings, ID: "student_id_rule", Version: version},
+		Reason:   "student_id_rule_updated",
+	})
 }
 
 func (s *Service) publish(id string, version uint64, reason string) {
@@ -672,6 +767,7 @@ func cloneRequest(value Request) Request {
 	value.LastDecisionID = cloneString(value.LastDecisionID)
 	value.Comment = cloneString(value.Comment)
 	value.AIParse = cloneAIParse(value.AIParse)
+	value.StudentIDAssessment = cloneStudentIDAssessment(value.StudentIDAssessment)
 	value.RequestedAt = value.RequestedAt.UTC()
 	value.FirstObservedAt = utcOrZero(value.FirstObservedAt)
 	value.LastObservedAt = utcOrZero(value.LastObservedAt)

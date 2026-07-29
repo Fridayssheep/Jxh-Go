@@ -612,26 +612,44 @@ func (a *joinApproverFake) DecideJoinRequest(_ context.Context, flag string, app
 }
 
 type joinStoreFake struct {
-	policy            Policy
-	policyFound       bool
-	requestPage       Page[Request]
-	request           Request
-	requestFound      bool
-	decisionPage      Page[Decision]
-	decisionsFound    bool
-	reservation       Reservation
-	beginErr          error
-	begin             func(BeginMutation) (Reservation, error)
-	complete          func(CompletionMutation) (DecisionResult, error)
-	autoCandidates    []AutoCandidate
-	recovered         []Request
-	beginMutation     BeginMutation
-	policyMutation    PolicyMutation
-	listQuery         ListQuery
-	completions       []CompletionMutation
-	beginCalls        int
-	updatePolicyCalls int
-	recoveryCutoff    time.Time
+	policy                Policy
+	policyFound           bool
+	requestPage           Page[Request]
+	request               Request
+	requestFound          bool
+	decisionPage          Page[Decision]
+	decisionsFound        bool
+	reservation           Reservation
+	beginErr              error
+	begin                 func(BeginMutation) (Reservation, error)
+	complete              func(CompletionMutation) (DecisionResult, error)
+	autoCandidates        []AutoCandidate
+	recovered             []Request
+	beginMutation         BeginMutation
+	policyMutation        PolicyMutation
+	studentIDRule         StudentIDRule
+	studentIDRuleFound    bool
+	studentIDRuleMutation StudentIDRuleMutation
+	listQuery             ListQuery
+	completions           []CompletionMutation
+	beginCalls            int
+	updatePolicyCalls     int
+	recoveryCutoff        time.Time
+}
+
+func (s *joinStoreFake) GetStudentIDRule(context.Context) (StudentIDRule, bool, error) {
+	return cloneStudentIDRule(s.studentIDRule), s.studentIDRuleFound, nil
+}
+
+func (s *joinStoreFake) UpdateStudentIDRule(_ context.Context, mutation StudentIDRuleMutation) (StudentIDRule, error) {
+	s.studentIDRuleMutation = mutation
+	result := cloneStudentIDRule(mutation.Rule)
+	result.Version = mutation.ExpectedRevision + 1
+	result.UpdatedAt = mutation.Context.OccurredAt.UTC()
+	actor := mutation.Context.Actor
+	result.UpdatedBy = &actor
+	s.studentIDRule, s.studentIDRuleFound = cloneStudentIDRule(result), true
+	return result, nil
 }
 
 func (s *joinStoreFake) GetPolicy(context.Context, string) (Policy, bool, error) {

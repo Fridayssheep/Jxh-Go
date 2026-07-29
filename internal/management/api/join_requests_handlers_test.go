@@ -48,6 +48,70 @@ func TestJoinRequestPolicyRoutesMapFixedContract(t *testing.T) {
 	}
 }
 
+func TestStudentIDRuleRoutesMapVersionedContract(t *testing.T) {
+	rule := studentIDRuleHTTPFixture()
+	service := &joinRequestOperationsFake{studentIDRule: rule}
+	router := newJoinRequestHTTPFixture(t, service)
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, joinRequestReadRequest(http.MethodGet, "/api/admin/v1/join-request-rules/student-id"))
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"3"` ||
+		!strings.Contains(response.Body.String(), `"student_id_length":12`) ||
+		!strings.Contains(response.Body.String(), `"major_code":"315"`) {
+		t.Fatalf("status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+
+	service.studentIDRule.Version = 4
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/join-request-rules/student-id",
+		`{"enabled":true,"enrollment_year_segment":{"offset":2,"length":4},"major_code_segment":{"offset":6,"length":3},"mappings":[{"enrollment_year":2025,"major_code":"315","major_name":"Computer Science","aliases":["CS"]}]}`)
+	request.Header.Set("If-Match", `"3"`)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"4"` || service.studentIDRuleRevision != 3 ||
+		!service.studentIDRulePatch.Enabled.Set || !service.studentIDRulePatch.Enabled.Value ||
+		service.studentIDRulePatch.MajorCodeSegment.Value == nil || len(service.studentIDRulePatch.Mappings.Value) != 1 {
+		t.Fatalf("status=%d revision=%d patch=%+v body=%s", response.Code, service.studentIDRuleRevision, service.studentIDRulePatch, response.Body.String())
+	}
+
+	request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/join-request-rules/student-id", `{"major_code_segment":null}`)
+	request.Header.Set("If-Match", `"4"`)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !service.studentIDRulePatch.MajorCodeSegment.Set || service.studentIDRulePatch.MajorCodeSegment.Value != nil {
+		t.Fatalf("status=%d patch=%+v body=%s", response.Code, service.studentIDRulePatch, response.Body.String())
+	}
+}
+
+func TestStudentIDRuleWriteRequiresVersionAndWritePermission(t *testing.T) {
+	service := &joinRequestOperationsFake{studentIDRule: studentIDRuleHTTPFixture()}
+	router := newJoinRequestHTTPFixture(t, service)
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/join-request-rules/student-id", `{"enabled":false}`)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertErrorCode(t, response, http.StatusPreconditionRequired, CodePreconditionRequired)
+
+	request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/join-request-rules/student-id", `{"enabled":false}`)
+	request.Header.Set("If-Match", `"3"`)
+	request.Header.Set("Cookie", SessionCookieName+"=observer")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertErrorCode(t, response, http.StatusForbidden, CodeForbidden)
+	if service.calls != 0 {
+		t.Fatalf("rejected requests reached service %d times", service.calls)
+	}
+}
+
+func TestStudentIDRuleVersionConflictUsesVersionConflictCode(t *testing.T) {
+	service := &joinRequestOperationsFake{studentIDRule: studentIDRuleHTTPFixture(), err: joinrequests.ErrConflict}
+	router := newJoinRequestHTTPFixture(t, service)
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/join-request-rules/student-id", `{"enabled":false}`)
+	request.Header.Set("If-Match", `"3"`)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	assertErrorCode(t, response, http.StatusConflict, "resource_version_conflict")
+}
+
 func TestJoinRequestListParsesRepeatedStatusesAndReturnsSummary(t *testing.T) {
 	service := &joinRequestOperationsFake{requestPage: joinrequests.Page[joinrequests.Request]{Items: []joinrequests.Request{joinRequestHTTPFixture()}}}
 	router := newJoinRequestHTTPFixture(t, service)
@@ -59,7 +123,9 @@ func TestJoinRequestListParsesRepeatedStatusesAndReturnsSummary(t *testing.T) {
 		t.Fatalf("status=%d query=%+v body=%s", response.Code, service.listQuery, response.Body.String())
 	}
 	body := response.Body.String()
-	if !strings.Contains(body, `"verification_message":"学号123456 姓名张三 专业计算机"`) || strings.Contains(body, `"comment"`) || strings.Contains(body, "raw_json") {
+	if !strings.Contains(body, `"verification_message":"学号123456 姓名张三 专业计算机"`) ||
+		!strings.Contains(body, `"student_id_assessment":{"status":"warning","rule_version":3`) ||
+		strings.Contains(body, `"comment"`) || strings.Contains(body, "raw_json") {
 		t.Fatalf("body=%s", body)
 	}
 }
@@ -144,6 +210,9 @@ func TestJoinRequestHandlersRejectInvalidInputBeforeService(t *testing.T) {
 		{method: http.MethodGet, target: "/api/admin/v1/join-requests?limit=101"},
 		{method: http.MethodGet, target: "/api/admin/v1/join-requests?overdue=yes"},
 		{method: http.MethodPatch, target: "/api/admin/v1/groups/123/join-request-policy", body: `{}`, headers: map[string]string{"If-Match": `"1"`}},
+		{method: http.MethodPatch, target: "/api/admin/v1/join-request-rules/student-id", body: `{}`, headers: map[string]string{"If-Match": `"1"`}},
+		{method: http.MethodPatch, target: "/api/admin/v1/join-request-rules/student-id", body: `{"enrollment_year_segment":{"length":4}}`, headers: map[string]string{"If-Match": `"1"`}},
+		{method: http.MethodPatch, target: "/api/admin/v1/join-request-rules/student-id", body: `{"mappings":[{"enrollment_year":2025,"major_code":"315","major_name":"Computer Science"}]}`, headers: map[string]string{"If-Match": `"1"`}},
 		{method: http.MethodPost, target: "/api/admin/v1/join-requests/bulk-decisions", body: `{"group_id":"123","action":"approve","items":[{"request_id":"flag_1"}]}`, headers: map[string]string{"Idempotency-Key": "bulk-decision-key-1"}},
 	}
 	for _, test := range tests {
@@ -221,6 +290,18 @@ func joinPolicyHTTPFixture() joinrequests.Policy {
 	}
 }
 
+func studentIDRuleHTTPFixture() joinrequests.StudentIDRule {
+	return joinrequests.StudentIDRule{
+		Enabled:               true,
+		EnrollmentYearSegment: &joinrequests.StudentIDSegment{Offset: 2, Length: 4},
+		MajorCodeSegment:      &joinrequests.StudentIDSegment{Offset: 6, Length: 3},
+		Mappings: []joinrequests.StudentMajorMapping{{
+			EnrollmentYear: 2025, MajorCode: "315", MajorName: "Computer Science", Aliases: []string{"CS"},
+		}},
+		Version: 3, UpdatedAt: time.Date(2026, 7, 29, 1, 0, 0, 0, time.UTC),
+	}
+}
+
 func joinRequestHTTPFixture() joinrequests.Request {
 	studentID, name, major := "123456", "张三", "计算机"
 	comment := "detail"
@@ -232,6 +313,10 @@ func joinRequestHTTPFixture() joinrequests.Request {
 		AIParse: joinrequests.AIParseResult{Status: joinrequests.AIParseSucceeded, Fields: &joinrequests.ApplicantFields{
 			StudentID: &studentID, Name: &name, Major: &major, Valid: true, ValidationErrors: []string{},
 		}},
+		StudentIDAssessment: joinrequests.StudentIDAssessment{
+			Status: joinrequests.StudentIDAssessmentWarning, RuleVersion: 3,
+			Warnings: []joinrequests.StudentIDWarning{joinrequests.StudentIDLengthMismatch},
+		},
 		RequestedAt: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC), Overdue: true, Version: 3, Comment: &comment,
 		FirstObservedAt: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC), LastObservedAt: time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC),
 	}
@@ -254,22 +339,36 @@ func joinDecisionHTTPFixture(requestID string, status joinrequests.AttemptStatus
 }
 
 type joinRequestOperationsFake struct {
-	policy         joinrequests.Policy
-	requestPage    joinrequests.Page[joinrequests.Request]
-	request        joinrequests.Request
-	decisionPage   joinrequests.Page[joinrequests.Decision]
-	decisionResult joinrequests.DecisionResult
-	bulkResult     joinrequests.BulkResult
-	err            error
-	calls          int
-	policyRevision uint64
-	policyPatch    joinrequests.PolicyPatch
-	listQuery      joinrequests.ListQuery
-	decisionQuery  joinrequests.DecisionListQuery
-	revision       uint64
-	idempotencyKey string
-	decisionInput  joinrequests.DecisionInput
-	bulkInput      joinrequests.BulkInput
+	policy                joinrequests.Policy
+	requestPage           joinrequests.Page[joinrequests.Request]
+	request               joinrequests.Request
+	decisionPage          joinrequests.Page[joinrequests.Decision]
+	decisionResult        joinrequests.DecisionResult
+	bulkResult            joinrequests.BulkResult
+	err                   error
+	calls                 int
+	policyRevision        uint64
+	policyPatch           joinrequests.PolicyPatch
+	studentIDRule         joinrequests.StudentIDRule
+	studentIDRuleRevision uint64
+	studentIDRulePatch    joinrequests.StudentIDRulePatch
+	listQuery             joinrequests.ListQuery
+	decisionQuery         joinrequests.DecisionListQuery
+	revision              uint64
+	idempotencyKey        string
+	decisionInput         joinrequests.DecisionInput
+	bulkInput             joinrequests.BulkInput
+}
+
+func (s *joinRequestOperationsFake) GetStudentIDRule(context.Context, auth.Principal) (joinrequests.StudentIDRule, error) {
+	s.calls++
+	return s.studentIDRule, s.err
+}
+
+func (s *joinRequestOperationsFake) UpdateStudentIDRule(_ context.Context, _ auth.Principal, revision uint64, patch joinrequests.StudentIDRulePatch, _ auth.MutationContext) (joinrequests.StudentIDRule, error) {
+	s.calls++
+	s.studentIDRuleRevision, s.studentIDRulePatch = revision, patch
+	return s.studentIDRule, s.err
 }
 
 func (s *joinRequestOperationsFake) GetPolicy(context.Context, auth.Principal, string) (joinrequests.Policy, error) {

@@ -17,6 +17,8 @@ import (
 type JoinRequestOperations interface {
 	GetPolicy(context.Context, auth.Principal, string) (joinrequests.Policy, error)
 	UpdatePolicy(context.Context, auth.Principal, string, uint64, joinrequests.PolicyPatch, auth.MutationContext) (joinrequests.Policy, error)
+	GetStudentIDRule(context.Context, auth.Principal) (joinrequests.StudentIDRule, error)
+	UpdateStudentIDRule(context.Context, auth.Principal, uint64, joinrequests.StudentIDRulePatch, auth.MutationContext) (joinrequests.StudentIDRule, error)
 	List(context.Context, auth.Principal, joinrequests.ListQuery) (joinrequests.Page[joinrequests.Request], error)
 	Get(context.Context, auth.Principal, string) (joinrequests.Request, error)
 	ListDecisions(context.Context, auth.Principal, joinrequests.DecisionListQuery) (joinrequests.Page[joinrequests.Decision], error)
@@ -45,6 +47,8 @@ func (h *JoinRequestHandlers) Register(router *Router) error {
 		options RouteOptions
 		handler http.HandlerFunc
 	}{
+		{http.MethodGet, "/api/admin/v1/join-request-rules/student-id", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.getStudentIDRule},
+		{http.MethodPatch, "/api/admin/v1/join-request-rules/student-id", mutationRoute(auth.PermissionJoinPoliciesWrite), h.updateStudentIDRule},
 		{http.MethodGet, "/api/admin/v1/groups/{group_id}/join-request-policy", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.getPolicy},
 		{http.MethodPatch, "/api/admin/v1/groups/{group_id}/join-request-policy", mutationRoute(auth.PermissionJoinPoliciesWrite), h.updatePolicy},
 		{http.MethodGet, "/api/admin/v1/join-requests", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.list},
@@ -435,6 +439,7 @@ type joinRequestSummaryDTO struct {
 	DecisionStatus      joinrequests.DecisionStatus  `json:"decision_status"`
 	DecisionSource      *joinrequests.DecisionSource `json:"decision_source"`
 	AIParse             aiParseResultDTO             `json:"ai_parse"`
+	StudentIDAssessment studentIDAssessmentDTO       `json:"student_id_assessment"`
 	RequestedAt         time.Time                    `json:"requested_at"`
 	Overdue             bool                         `json:"overdue"`
 	Version             uint64                       `json:"version"`
@@ -529,7 +534,8 @@ func mapJoinRequestSummary(value joinrequests.Request) joinRequestSummaryDTO {
 		ApplicantQQ: value.ApplicantQQ, ApplicantNickname: value.ApplicantNickname,
 		VerificationMessage: value.VerificationMessage, SubType: value.SubType, Source: value.Source,
 		ObservedStatus: value.ObservedStatus, DecisionStatus: value.DecisionStatus, DecisionSource: value.DecisionSource,
-		AIParse: mapAIParse(value.AIParse), RequestedAt: value.RequestedAt.UTC(), Overdue: value.Overdue,
+		AIParse: mapAIParse(value.AIParse), StudentIDAssessment: mapStudentIDAssessment(value.StudentIDAssessment),
+		RequestedAt: value.RequestedAt.UTC(), Overdue: value.Overdue,
 		Version: value.Version, LastDecisionID: value.LastDecisionID,
 	}
 }

@@ -65,6 +65,33 @@ func TestManagerCoreMySQLResourceLifecycle(t *testing.T) {
 	if err != nil || !policy.Enabled || policy.Version != 2 {
 		t.Fatalf("update join policy: policy=%+v error=%v", policy, err)
 	}
+	studentIDRule, found, err := store.GetStudentIDRule(t.Context())
+	if err != nil || !found || studentIDRule.Enabled || studentIDRule.Version != 1 || len(studentIDRule.Mappings) != 0 {
+		t.Fatalf("get default student ID rule: rule=%+v found=%t error=%v", studentIDRule, found, err)
+	}
+	studentIDRule.Enabled = true
+	studentIDRule.EnrollmentYearSegment = &joinrequests.StudentIDSegment{Offset: 2, Length: 4}
+	studentIDRule.MajorCodeSegment = &joinrequests.StudentIDSegment{Offset: 6, Length: 3}
+	studentIDRule.Mappings = []joinrequests.StudentMajorMapping{{
+		EnrollmentYear: 2025, MajorCode: "315", MajorName: "Computer Science", Aliases: []string{"CS"},
+	}}
+	studentIDRule, err = store.UpdateStudentIDRule(t.Context(), joinrequests.StudentIDRuleMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(2750 * time.Millisecond),
+		},
+		ExpectedRevision: studentIDRule.Version, Rule: studentIDRule,
+	})
+	if err != nil || !studentIDRule.Enabled || studentIDRule.Version != 2 || studentIDRule.UpdatedBy == nil {
+		t.Fatalf("update student ID rule: rule=%+v error=%v", studentIDRule, err)
+	}
+	if _, err := store.UpdateStudentIDRule(t.Context(), joinrequests.StudentIDRuleMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(2800 * time.Millisecond),
+		},
+		ExpectedRevision: 1, Rule: studentIDRule,
+	}); !errors.Is(err, joinrequests.ErrConflict) {
+		t.Fatalf("stale student ID rule update error=%v", err)
+	}
 
 	global, err := store.GetGlobalSettings(t.Context())
 	if err != nil || global.Version != 1 || !global.Features.AIQA.Enabled {
@@ -125,7 +152,7 @@ func TestManagerCoreMySQLResourceLifecycle(t *testing.T) {
 		*data.Metrics[overview.MetricActiveGroups].Value != 1 || data.Pending[overview.PendingJoinRequests] != 0 {
 		t.Fatalf("load overview: data=%+v error=%v", data, err)
 	}
-	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN ('groups.sync', 'join_policy.update', 'settings.global.update', 'settings.group.update', 'settings.group.delete')", 6)
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN ('groups.sync', 'join_policy.update', 'student_id_rule.update', 'settings.global.update', 'settings.group.update', 'settings.group.delete')", 7)
 }
 
 func managerIntegrationAuditActor(userID string) audit.Actor {

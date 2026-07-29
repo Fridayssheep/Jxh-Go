@@ -110,6 +110,7 @@ type Request struct {
 	DecisionStatus      DecisionStatus
 	DecisionSource      *DecisionSource
 	AIParse             AIParseResult
+	StudentIDAssessment StudentIDAssessment
 	RequestedAt         time.Time
 	Overdue             bool
 	Version             uint64

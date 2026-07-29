@@ -18,14 +18,16 @@ func TestNewManagementRouterRegistersAllOperations(t *testing.T) {
 	for _, group := range router.groups {
 		operationCount += len(group.routes)
 	}
-	if operationCount != 59 {
-		t.Fatalf("registered operations=%d, want 59", operationCount)
+	if operationCount != 61 {
+		t.Fatalf("registered operations=%d, want 61", operationCount)
 	}
 	for _, route := range []struct{ method, pattern string }{
 		{"POST", "/api/admin/v1/auth/login"},
 		{"GET", "/api/admin/v1/overview"},
 		{"PATCH", "/api/admin/v1/groups/{group_id}/settings"},
 		{"POST", "/api/admin/v1/join-requests/{request_id}/decisions"},
+		{"GET", "/api/admin/v1/join-request-rules/student-id"},
+		{"PATCH", "/api/admin/v1/join-request-rules/student-id"},
 		{"POST", "/api/admin/v1/scheduled-jobs/{job_id}/test-send"},
 		{"POST", "/api/admin/v1/knowledge/reload"},
 		{"GET", "/api/admin/v1/analytics/export"},
@@ -90,8 +92,8 @@ func TestImplementedOpenAPIOperationsMatchManagementRoutes(t *testing.T) {
 			got[method+" "+path] = struct{}{}
 		}
 	}
-	if len(want) != 59 || len(got) != len(want) {
-		t.Fatalf("OpenAPI operations=%d routes=%d, want 59", len(want), len(got))
+	if len(want) != 61 || len(got) != len(want) {
+		t.Fatalf("OpenAPI operations=%d routes=%d, want 61", len(want), len(got))
 	}
 	for key := range want {
 		if _, exists := got[key]; !exists {

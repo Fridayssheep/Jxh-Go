@@ -3,6 +3,7 @@ package joinrequests
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,6 +44,67 @@ func TestDecidePassesExactFlagAndConfirmsApproval(t *testing.T) {
 	}
 }
 
+func TestManualRejectRequiresAndNormalizesReason(t *testing.T) {
+	for _, reason := range []string{"", "   ", strings.Repeat("拒", 501)} {
+		store := &joinStoreFake{}
+		approver := &joinApproverFake{available: true}
+		service := newJoinService(t, store, approver)
+		_, err := service.Decide(t.Context(), joinMaintainer(), "flag_1", 1,
+			DecisionInput{Action: ActionReject, Reason: reason}, "decision-key-1", joinMutationRequest())
+		if !errors.Is(err, ErrInvalidInput) || store.beginCalls != 0 || len(approver.flags) != 0 {
+			t.Fatalf("reason length=%d error=%v begin=%d gateway=%d", len([]rune(reason)), err, store.beginCalls, len(approver.flags))
+		}
+	}
+
+	request := joinRequestFixture("flag_1", DecisionProcessing, 2)
+	decision := decisionFixture(request.ID, "dec_1", ActionReject, AttemptStarted)
+	store := &joinStoreFake{reservation: Reservation{Items: []ReservedItem{{Request: request, Decision: decision}}}}
+	store.complete = func(mutation CompletionMutation) (DecisionResult, error) {
+		return completedDecisionResult(request, decision, mutation), nil
+	}
+	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
+	service := newJoinService(t, store, approver)
+	_, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 1,
+		DecisionInput{Action: ActionReject, Reason: "  资料不完整，请重新申请。  "}, "decision-key-1", joinMutationRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.beginMutation.Reason == nil || *store.beginMutation.Reason != "资料不完整，请重新申请。" ||
+		len(approver.reasons) != 1 || approver.reasons[0] != "资料不完整，请重新申请。" {
+		t.Fatalf("stored reason=%v gateway reasons=%v", store.beginMutation.Reason, approver.reasons)
+	}
+}
+
+func TestBulkManualRejectRequiresAndNormalizesReason(t *testing.T) {
+	store := &joinStoreFake{}
+	approver := &joinApproverFake{available: true}
+	service := newJoinService(t, store, approver)
+	input := BulkInput{GroupID: "123", Action: ActionReject, Items: []VersionedRequest{{ID: "flag_1", Version: 1}}}
+	if _, err := service.BulkDecide(t.Context(), joinMaintainer(), input, "bulk-decision-key-1", joinMutationRequest()); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty bulk rejection reason error=%v", err)
+	}
+	if store.beginCalls != 0 || len(approver.flags) != 0 {
+		t.Fatalf("empty bulk reason begin=%d gateway=%d", store.beginCalls, len(approver.flags))
+	}
+
+	request := joinRequestFixture("flag_1", DecisionProcessing, 2)
+	decision := decisionFixture(request.ID, "dec_1", ActionReject, AttemptStarted)
+	store = &joinStoreFake{reservation: Reservation{Items: []ReservedItem{{Request: request, Decision: decision}}}}
+	store.complete = func(mutation CompletionMutation) (DecisionResult, error) {
+		return completedDecisionResult(request, decision, mutation), nil
+	}
+	approver = &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
+	service = newJoinService(t, store, approver)
+	input.Reason = "  本批申请资料不完整。  "
+	if _, err := service.BulkDecide(t.Context(), joinMaintainer(), input, "bulk-decision-key-1", joinMutationRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if store.beginMutation.Reason == nil || *store.beginMutation.Reason != "本批申请资料不完整。" ||
+		len(approver.reasons) != 1 || approver.reasons[0] != "本批申请资料不完整。" {
+		t.Fatalf("stored reason=%v gateway reasons=%v", store.beginMutation.Reason, approver.reasons)
+	}
+}
+
 func TestDecideClassifiesUnavailableFailureAndUnknown(t *testing.T) {
 	t.Run("preflight unavailable", func(t *testing.T) {
 		store := &joinStoreFake{}
@@ -74,7 +136,8 @@ func TestDecideClassifiesUnavailableFailureAndUnknown(t *testing.T) {
 			}
 			recorder := &joinTelemetryRecorderFake{}
 			service := newJoinServiceWithTelemetry(t, store, &joinApproverFake{available: true, results: []ExternalResult{test.external}}, recorder)
-			result, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 1, DecisionInput{Action: ActionReject}, "decision-key-1", joinMutationRequest())
+			result, err := service.Decide(t.Context(), joinMaintainer(), request.ID, 1,
+				DecisionInput{Action: ActionReject, Reason: "不符合入群要求"}, "decision-key-1", joinMutationRequest())
 			if !errors.Is(err, test.wantError) || result.Request.DecisionStatus != test.decisionStatus || result.Decision.Status != test.attemptStatus {
 				t.Fatalf("result=%+v error=%v", result, err)
 			}
@@ -117,7 +180,8 @@ func TestDecisionCompletionRetriesWithoutRepeatingExternalAction(t *testing.T) {
 	recorder := &joinRetryTelemetryRecorder{recorded: make(chan telemetry.Observation, 1)}
 	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
 	service, err := NewService(Options{
-		Store: store, Approver: approver, Telemetry: recorder, Now: func() time.Time { return joinTestTime },
+		Store: store, Approver: approver, AutoRejectReasons: autoRejectReasonFake{value: "默认拒绝消息"},
+		Telemetry: recorder, Now: func() time.Time { return joinTestTime },
 		DecisionTimeout: time.Second, ProcessingLease: time.Minute, PersistenceTimeout: time.Second,
 		PersistenceRetryDelay: time.Millisecond,
 	})
@@ -218,7 +282,8 @@ func TestBulkDecisionConflictDoesNotCallGateway(t *testing.T) {
 	approver := &joinApproverFake{available: true}
 	service := newJoinService(t, store, approver)
 	_, err := service.BulkDecide(t.Context(), joinMaintainer(), BulkInput{
-		GroupID: "123", Action: ActionReject, Items: []VersionedRequest{{ID: "flag_1", Version: 1}},
+		GroupID: "123", Action: ActionReject, Reason: "不符合入群要求",
+		Items: []VersionedRequest{{ID: "flag_1", Version: 1}},
 	}, "bulk-decision-key-1", joinMutationRequest())
 	if !errors.Is(err, ErrConflict) || len(approver.flags) != 0 {
 		t.Fatalf("error=%v gateway calls=%d", err, len(approver.flags))
@@ -276,6 +341,61 @@ func TestAutomaticApprovalUsesDeterministicValidatedRule(t *testing.T) {
 	}
 }
 
+func TestAutomaticRejectionUsesConfiguredReasonAndSkipsUnparsedRequests(t *testing.T) {
+	invalidRequest := joinRequestFixture("flag_invalid", DecisionPending, 7)
+	invalidStudentID := "999999"
+	invalidRequest.AIParse.Fields.StudentID = &invalidStudentID
+	failedRequest := joinRequestFixture("flag_failed", DecisionPending, 2)
+	failedRequest.AIParse = AIParseResult{Status: AIParseFailed}
+	policy := joinPolicyFixture()
+	policy.AutoReject = true
+	store := &joinStoreFake{autoCandidates: []AutoCandidate{
+		{Request: failedRequest, Policy: policy},
+		{Request: invalidRequest, Policy: policy},
+	}}
+	reason := "申请资料不完整，请补充后重新申请。"
+	store.begin = func(mutation BeginMutation) (Reservation, error) {
+		processing := cloneRequest(invalidRequest)
+		processing.DecisionStatus = DecisionProcessing
+		processing.DecisionSource = decisionSourcePointer(SourceAutomatic)
+		processing.Version++
+		decision := decisionFixture(invalidRequest.ID, "dec_reject", ActionReject, AttemptStarted)
+		decision.Source = SourceAutomatic
+		decision.Reason = stringPointer(reason)
+		decision.RuleVersion = uint64Pointer(AutoApprovalRuleVersion)
+		decision.FieldSnapshot = cloneApplicantFieldsPointer(invalidRequest.AIParse.Fields)
+		return Reservation{Items: []ReservedItem{{Request: processing, Decision: decision}}}, nil
+	}
+	store.complete = func(mutation CompletionMutation) (DecisionResult, error) {
+		processing := cloneRequest(invalidRequest)
+		processing.DecisionStatus = DecisionProcessing
+		processing.DecisionSource = decisionSourcePointer(SourceAutomatic)
+		processing.Version++
+		decision := decisionFixture(invalidRequest.ID, "dec_reject", ActionReject, AttemptStarted)
+		decision.Source = SourceAutomatic
+		decision.Reason = stringPointer(reason)
+		decision.RuleVersion = uint64Pointer(AutoApprovalRuleVersion)
+		decision.FieldSnapshot = cloneApplicantFieldsPointer(invalidRequest.AIParse.Fields)
+		return completedDecisionResult(processing, decision, mutation), nil
+	}
+	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalConfirmed}}}
+	recorder := &joinTelemetryRecorderFake{}
+	service := newJoinServiceWithOptions(t, store, approver, recorder, autoRejectReasonFake{value: reason})
+	if err := service.ProcessAutoApprovals(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if store.beginCalls != 1 || store.beginMutation.Action != ActionReject || store.beginMutation.Reason == nil ||
+		*store.beginMutation.Reason != reason {
+		t.Fatalf("automatic rejection mutation=%+v calls=%d", store.beginMutation, store.beginCalls)
+	}
+	if len(approver.flags) != 1 || approver.flags[0] != invalidRequest.ID || approver.approvals[0] || approver.reasons[0] != reason {
+		t.Fatalf("gateway flags=%v approvals=%v reasons=%v", approver.flags, approver.approvals, approver.reasons)
+	}
+	if len(recorder.observations) != 0 {
+		t.Fatalf("automatic rejection changed approval telemetry=%+v", recorder.observations)
+	}
+}
+
 func TestApplicantValidationUsesSafeIntersectionAndOriginalMessage(t *testing.T) {
 	studentID, name, major := "123456", "张三", "计算机"
 	valid := ValidateApplicantFields(ApplicantFields{StudentID: &studentID, Name: &name, Major: &major}, "学号123456 姓名张三 专业计算机")
@@ -304,9 +424,28 @@ func TestListComputesOverdueAndPolicyUpdateUsesRevision(t *testing.T) {
 
 	store.policy.Version = 2
 	store.policy.Enabled = true
-	updated, err := service.UpdatePolicy(t.Context(), joinSuperAdmin(), "123", 1, PolicyPatch{Enabled: true}, joinMutationRequest())
+	updated, err := service.UpdatePolicy(t.Context(), joinSuperAdmin(), "123", 1, PolicyPatch{
+		Enabled: auth.Field[bool]{Set: true, Value: true},
+	}, joinMutationRequest())
 	if err != nil || !updated.Enabled || store.policyMutation.ExpectedRevision != 1 {
 		t.Fatalf("policy=%+v mutation=%+v error=%v", updated, store.policyMutation, err)
+	}
+
+	store.policy.Version = 3
+	store.policy.AutoReject = true
+	updated, err = service.UpdatePolicy(t.Context(), joinSuperAdmin(), "123", 2, PolicyPatch{
+		AutoReject: auth.Field[bool]{Set: true, Value: true},
+	}, joinMutationRequest())
+	if err != nil || !updated.Enabled || !updated.AutoReject || !store.policyMutation.Patch.AutoReject.Set {
+		t.Fatalf("auto reject policy=%+v mutation=%+v error=%v", updated, store.policyMutation, err)
+	}
+
+	store.updatePolicyCalls = 0
+	if _, err := service.UpdatePolicy(t.Context(), joinSuperAdmin(), "123", 3, PolicyPatch{}, joinMutationRequest()); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty policy patch error=%v", err)
+	}
+	if store.updatePolicyCalls != 0 {
+		t.Fatal("empty policy patch reached store")
 	}
 }
 
@@ -345,9 +484,20 @@ func newJoinService(t *testing.T, store Store, approver Approver) *Service {
 }
 
 func newJoinServiceWithTelemetry(t *testing.T, store Store, approver Approver, recorder TelemetryRecorder) *Service {
+	return newJoinServiceWithOptions(t, store, approver, recorder, autoRejectReasonFake{value: "默认拒绝消息"})
+}
+
+func newJoinServiceWithOptions(
+	t *testing.T,
+	store Store,
+	approver Approver,
+	recorder TelemetryRecorder,
+	reasons AutoRejectReasonProvider,
+) *Service {
 	t.Helper()
 	service, err := NewService(Options{
-		Store: store, Approver: approver, Telemetry: recorder, Now: func() time.Time { return joinTestTime },
+		Store: store, Approver: approver, AutoRejectReasons: reasons,
+		Telemetry: recorder, Now: func() time.Time { return joinTestTime },
 		DecisionTimeout: time.Second, ProcessingLease: time.Minute, PersistenceTimeout: time.Second,
 	})
 	if err != nil {
@@ -356,6 +506,12 @@ func newJoinServiceWithTelemetry(t *testing.T, store Store, approver Approver, r
 	t.Cleanup(service.Close)
 	return service
 }
+
+type autoRejectReasonFake struct {
+	value string
+}
+
+func (f autoRejectReasonFake) AutoRejectReason() string { return f.value }
 
 type joinTelemetryRecorderFake struct {
 	observations []telemetry.Observation
@@ -456,25 +612,26 @@ func (a *joinApproverFake) DecideJoinRequest(_ context.Context, flag string, app
 }
 
 type joinStoreFake struct {
-	policy         Policy
-	policyFound    bool
-	requestPage    Page[Request]
-	request        Request
-	requestFound   bool
-	decisionPage   Page[Decision]
-	decisionsFound bool
-	reservation    Reservation
-	beginErr       error
-	begin          func(BeginMutation) (Reservation, error)
-	complete       func(CompletionMutation) (DecisionResult, error)
-	autoCandidates []AutoCandidate
-	recovered      []Request
-	beginMutation  BeginMutation
-	policyMutation PolicyMutation
-	listQuery      ListQuery
-	completions    []CompletionMutation
-	beginCalls     int
-	recoveryCutoff time.Time
+	policy            Policy
+	policyFound       bool
+	requestPage       Page[Request]
+	request           Request
+	requestFound      bool
+	decisionPage      Page[Decision]
+	decisionsFound    bool
+	reservation       Reservation
+	beginErr          error
+	begin             func(BeginMutation) (Reservation, error)
+	complete          func(CompletionMutation) (DecisionResult, error)
+	autoCandidates    []AutoCandidate
+	recovered         []Request
+	beginMutation     BeginMutation
+	policyMutation    PolicyMutation
+	listQuery         ListQuery
+	completions       []CompletionMutation
+	beginCalls        int
+	updatePolicyCalls int
+	recoveryCutoff    time.Time
 }
 
 func (s *joinStoreFake) GetPolicy(context.Context, string) (Policy, bool, error) {
@@ -482,6 +639,7 @@ func (s *joinStoreFake) GetPolicy(context.Context, string) (Policy, bool, error)
 }
 
 func (s *joinStoreFake) UpdatePolicy(_ context.Context, mutation PolicyMutation) (Policy, error) {
+	s.updatePolicyCalls++
 	s.policyMutation = mutation
 	return s.policy, nil
 }

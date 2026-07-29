@@ -77,7 +77,8 @@ func (h *JoinRequestHandlers) getPolicy(w http.ResponseWriter, r *http.Request) 
 }
 
 type joinPolicyPatchRequest struct {
-	Enabled *bool `json:"enabled"`
+	Enabled    *bool `json:"enabled"`
+	AutoReject *bool `json:"auto_reject"`
 }
 
 func (h *JoinRequestHandlers) updatePolicy(w http.ResponseWriter, r *http.Request) {
@@ -93,13 +94,20 @@ func (h *JoinRequestHandlers) updatePolicy(w http.ResponseWriter, r *http.Reques
 	if !decodeRequestJSON(w, r, &body) {
 		return
 	}
-	if body.Enabled == nil {
-		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "join request policy enabled is required", nil, false)
+	if body.Enabled == nil && body.AutoReject == nil {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "join request policy patch is empty", nil, false)
 		return
+	}
+	patch := joinrequests.PolicyPatch{}
+	if body.Enabled != nil {
+		patch.Enabled = auth.Field[bool]{Set: true, Value: *body.Enabled}
+	}
+	if body.AutoReject != nil {
+		patch.AutoReject = auth.Field[bool]{Set: true, Value: *body.AutoReject}
 	}
 	identity, _ := AuthFromContext(r.Context())
 	policy, err := h.service.UpdatePolicy(r.Context(), principalFromAuth(identity), groupID, revision,
-		joinrequests.PolicyPatch{Enabled: *body.Enabled}, mutationContextFromRequest(r))
+		patch, mutationContextFromRequest(r))
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return

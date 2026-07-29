@@ -131,7 +131,8 @@ type Policy struct {
 }
 
 type PolicyPatch struct {
-	Enabled bool
+	Enabled    auth.Field[bool]
+	AutoReject auth.Field[bool]
 }
 
 type Decision struct {

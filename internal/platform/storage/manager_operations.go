@@ -615,10 +615,16 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 		}
 		actor := auditActorUpdatedBy(mutation.Context.Actor)
 		updates := map[string]any{
-			"enabled": mutation.Patch.Enabled, "revision": gorm.Expr("revision + 1"),
+			"revision":        gorm.Expr("revision + 1"),
 			"updated_by_type": actor.Type, "updated_by_user_id": actor.UserID,
 			"updated_by_qq_user_id": actor.QQUserID, "updated_by_display_name": actor.DisplayName,
 			"updated_by_role": actor.Role, "updated_at": mutation.Context.OccurredAt.UTC(),
+		}
+		if mutation.Patch.Enabled.Set {
+			updates["enabled"] = mutation.Patch.Enabled.Value
+		}
+		if mutation.Patch.AutoReject.Set {
+			updates["auto_reject"] = mutation.Patch.AutoReject.Value
 		}
 		updated := tx.Model(&joinPolicyManagerRow{}).
 			Where("group_id = ? AND revision = ?", mutation.GroupID, mutation.ExpectedRevision).Updates(updates)
@@ -641,8 +647,10 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 			Actor: domainDecisionActor(mutation.Context.Actor), OccurredAt: mutation.Context.OccurredAt,
 			Request: mutation.Context.Request, Source: sourceForManagerActor(mutation.Context.Actor.Type),
 			Action: "join_policy.update", TargetType: "group_join_policy", TargetID: mutation.GroupID,
-			Before: map[string]any{"enabled": before.Enabled, "revision": before.Revision},
-			After:  map[string]any{"enabled": after.Enabled, "revision": after.Revision}, Metadata: map[string]any{},
+			Before: map[string]any{"enabled": before.Enabled, "auto_reject": before.AutoReject, "revision": before.Revision},
+			After: map[string]any{
+				"enabled": after.Enabled, "auto_reject": after.AutoReject, "revision": after.Revision,
+			}, Metadata: map[string]any{},
 		})
 	})
 	return result, err
@@ -1107,7 +1115,7 @@ policy.auto_reject AS policy_auto_reject, policy.revision AS policy_revision, po
 policy.updated_by_type AS policy_updated_type, policy.updated_by_user_id AS policy_updated_user_id,
 policy.updated_by_qq_user_id AS policy_updated_qq_id, policy.updated_by_display_name AS policy_updated_display,
 policy.updated_by_role AS policy_updated_role`).
-		Joins("JOIN group_join_policies AS policy ON policy.group_id = request.group_id AND policy.enabled = TRUE").
+		Joins("JOIN group_join_policies AS policy ON policy.group_id = request.group_id AND (policy.enabled = TRUE OR policy.auto_reject = TRUE)").
 		Joins("LEFT JOIN managed_groups AS managed ON managed.group_id = request.group_id").
 		Where("request.decision_status = ? AND request.sub_type = ? AND request.ai_parse_status = ?", joinrequests.DecisionPending, joinrequests.SubTypeAdd, joinrequests.AIParseSucceeded).
 		Order("request.requested_at ASC").Order("request.id ASC").Limit(limit)

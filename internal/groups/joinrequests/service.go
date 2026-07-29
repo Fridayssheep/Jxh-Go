@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,10 @@ type Approver interface {
 	DecideJoinRequest(ctx context.Context, flag string, approve bool, reason string) ExternalResult
 }
 
+type AutoRejectReasonProvider interface {
+	AutoRejectReason() string
+}
+
 type EventPublisher interface {
 	Publish(draft events.Draft) (events.Event, error)
 }
@@ -65,6 +70,7 @@ type TelemetryRecorder interface {
 type Options struct {
 	Store                 Store
 	Approver              Approver
+	AutoRejectReasons     AutoRejectReasonProvider
 	Events                EventPublisher
 	Telemetry             TelemetryRecorder
 	Now                   func() time.Time
@@ -79,6 +85,7 @@ type Options struct {
 type Service struct {
 	store              Store
 	approver           Approver
+	autoRejectReasons  AutoRejectReasonProvider
 	events             EventPublisher
 	telemetry          TelemetryRecorder
 	now                func() time.Time
@@ -103,7 +110,7 @@ const (
 )
 
 func NewService(options Options) (*Service, error) {
-	if options.Store == nil || options.Approver == nil || options.Now == nil {
+	if options.Store == nil || options.Approver == nil || options.AutoRejectReasons == nil || options.Now == nil {
 		return nil, ErrInvalidInput
 	}
 	overdueAfter := positiveDuration(options.OverdueAfter, defaultOverdueAfter)
@@ -117,7 +124,8 @@ func NewService(options Options) (*Service, error) {
 	}
 	workerContext, cancel := context.WithCancel(workerContext)
 	return &Service{
-		store: options.Store, approver: options.Approver, events: options.Events, telemetry: options.Telemetry, now: options.Now,
+		store: options.Store, approver: options.Approver, autoRejectReasons: options.AutoRejectReasons,
+		events: options.Events, telemetry: options.Telemetry, now: options.Now,
 		overdueAfter: overdueAfter, decisionTimeout: decisionTimeout, processingLease: processingLease,
 		persistenceTimeout: persistenceTimeout, retryDelay: retryDelay, workerCtx: workerContext, cancel: cancel,
 	}, nil
@@ -147,7 +155,7 @@ func (s *Service) UpdatePolicy(ctx context.Context, principal auth.Principal, gr
 	if !principal.Has(auth.PermissionJoinPoliciesWrite) {
 		return Policy{}, ErrForbidden
 	}
-	if !validGroupID(groupID) || revision == 0 || !validMutationRequest(request) {
+	if !validGroupID(groupID) || revision == 0 || !validPolicyPatch(patch) || !validMutationRequest(request) {
 		return Policy{}, ErrInvalidInput
 	}
 	value, err := s.store.UpdatePolicy(ctx, PolicyMutation{
@@ -157,7 +165,9 @@ func (s *Service) UpdatePolicy(ctx context.Context, principal auth.Principal, gr
 	if err != nil {
 		return Policy{}, fmt.Errorf("update join request policy: %w", err)
 	}
-	if !validPolicy(value) || value.GroupID != groupID || value.Version != revision+1 || value.Enabled != patch.Enabled {
+	if !validPolicy(value) || value.GroupID != groupID || value.Version != revision+1 ||
+		(patch.Enabled.Set && value.Enabled != patch.Enabled.Value) ||
+		(patch.AutoReject.Set && value.AutoReject != patch.AutoReject.Value) {
 		return Policy{}, ErrInvalidData
 	}
 	s.publish(groupID, value.Version, "join_request_policy_updated")
@@ -252,6 +262,7 @@ func (s *Service) Decide(ctx context.Context, principal auth.Principal, requestI
 	if !principal.Has(auth.PermissionJoinRequestsDecide) {
 		return DecisionResult{}, ErrForbidden
 	}
+	input.Reason = strings.TrimSpace(input.Reason)
 	if !validRequestID(requestID) || revision == 0 || !validDecisionInput(input) ||
 		!idempotencyKeyPattern.MatchString(idempotencyKey) || !validMutationRequest(request) {
 		return DecisionResult{}, ErrInvalidInput
@@ -285,6 +296,7 @@ func (s *Service) BulkDecide(ctx context.Context, principal auth.Principal, inpu
 	if !principal.Has(auth.PermissionJoinRequestsDecide) {
 		return BulkResult{}, ErrForbidden
 	}
+	input.Reason = strings.TrimSpace(input.Reason)
 	if !validBulkInput(input) || !idempotencyKeyPattern.MatchString(idempotencyKey) || !validMutationRequest(request) {
 		return BulkResult{}, ErrInvalidInput
 	}
@@ -440,6 +452,9 @@ func (s *Service) recordDecision(result DecisionResult) {
 	}
 	kind := telemetry.EventManualApproval
 	if result.Decision.Source == SourceAutomatic {
+		if result.Decision.Action != ActionApprove {
+			return
+		}
 		kind = telemetry.EventAutomaticApproval
 	} else if result.Decision.Source != SourceManual {
 		return

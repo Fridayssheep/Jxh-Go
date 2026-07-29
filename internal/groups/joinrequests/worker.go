@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/management/audit"
@@ -47,21 +48,25 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 			return errors.Join(append(processErrors, ctx.Err())...)
 		}
 		request := s.normalizeRequest(candidate.Request)
-		if !eligibleAutoCandidate(request, candidate.Policy) {
+		action, reason, gatewayReason, eligible := s.automaticDecision(request, candidate.Policy)
+		if !eligible {
 			continue
 		}
 		fields := cloneApplicantFields(*request.AIParse.Fields)
 		ruleVersion := AutoApprovalRuleVersion
-		reason := "all_required_ai_fields_valid"
-		key := autoApprovalKey(request.ID, request.Version, ruleVersion)
+		key := automaticDecisionKey(request.ID, request.Version, ruleVersion, action)
 		startedAt := s.now().UTC()
+		actorName := "automatic_join_approval"
+		if action == ActionReject {
+			actorName = "automatic_join_rejection"
+		}
 		reservation, err := s.store.BeginDecisions(ctx, BeginMutation{
 			Context: MutationContext{
-				Actor:   audit.Actor{Type: audit.ActorSystem, DisplayName: "automatic_join_approval"},
+				Actor:   audit.Actor{Type: audit.ActorSystem, DisplayName: actorName},
 				Request: auth.MutationContext{RequestID: key}, OccurredAt: startedAt,
 			},
 			GroupID: request.Group.ID, Items: []VersionedRequest{{ID: request.ID, Version: request.Version}},
-			Action: ActionApprove, Source: SourceAutomatic, Reason: &reason, IdempotencyKey: key,
+			Action: action, Source: SourceAutomatic, Reason: &reason, IdempotencyKey: key,
 			ProcessingExpiresAt: startedAt.Add(s.processingLease), RuleVersion: &ruleVersion,
 			FieldSnapshots: map[string]ApplicantFields{request.ID: fields},
 		})
@@ -69,7 +74,7 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 			if errors.Is(err, ErrConflict) || errors.Is(err, ErrIdempotencyConflict) {
 				continue
 			}
-			processErrors = append(processErrors, fmt.Errorf("begin automatic join approval: %w", err))
+			processErrors = append(processErrors, fmt.Errorf("begin automatic join decision: %w", err))
 			continue
 		}
 		if len(reservation.Items) != 1 {
@@ -79,16 +84,16 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 		item := reservation.Items[0]
 		if reservation.Replay {
 			if !validRequest(item.Request, true) || !validDecision(item.Decision) ||
-				item.Request.ID != request.ID || item.Decision.RequestID != request.ID || item.Decision.Action != ActionApprove {
+				item.Request.ID != request.ID || item.Decision.RequestID != request.ID || item.Decision.Action != action {
 				processErrors = append(processErrors, ErrInvalidData)
 			}
 			continue
 		}
-		if !validReservedItem(item, request.ID, ActionApprove) {
+		if !validReservedItem(item, request.ID, action) {
 			processErrors = append(processErrors, ErrInvalidData)
 			continue
 		}
-		if _, err := s.execute(ctx, item, ""); err != nil &&
+		if _, err := s.execute(ctx, item, gatewayReason); err != nil &&
 			!errors.Is(err, ErrExternalFailure) && !errors.Is(err, ErrDependencyUnavailable) {
 			processErrors = append(processErrors, err)
 		}
@@ -120,13 +125,26 @@ func (s *Service) runAutoApprovalRound(ctx context.Context) {
 	}
 }
 
-func eligibleAutoCandidate(request Request, policy Policy) bool {
-	return validRequest(request, true) && validPolicy(policy) && policy.GroupID == request.Group.ID && policy.Enabled &&
-		request.SubType == SubTypeAdd && request.DecisionStatus == DecisionPending && request.AIParse.Status == AIParseSucceeded &&
-		request.AIParse.Fields != nil && request.AIParse.Fields.Valid
+func (s *Service) automaticDecision(request Request, policy Policy) (Action, string, string, bool) {
+	if !validRequest(request, true) || !validPolicy(policy) || policy.GroupID != request.Group.ID ||
+		request.SubType != SubTypeAdd || request.DecisionStatus != DecisionPending || request.AIParse.Status != AIParseSucceeded ||
+		request.AIParse.Fields == nil {
+		return "", "", "", false
+	}
+	if request.AIParse.Fields.Valid && policy.Enabled {
+		return ActionApprove, "all_required_ai_fields_valid", "", true
+	}
+	if !request.AIParse.Fields.Valid && policy.AutoReject {
+		reason := s.autoRejectReasons.AutoRejectReason()
+		if !validText(reason, 500, false) || strings.TrimSpace(reason) != reason {
+			return "", "", "", false
+		}
+		return ActionReject, reason, reason, true
+	}
+	return "", "", "", false
 }
 
-func autoApprovalKey(requestID string, requestVersion, ruleVersion uint64) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d", requestID, requestVersion, ruleVersion)))
+func automaticDecisionKey(requestID string, requestVersion, ruleVersion uint64, action Action) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d\x00%s", requestID, requestVersion, ruleVersion, action)))
 	return fmt.Sprintf("auto-%x", digest[:])
 }

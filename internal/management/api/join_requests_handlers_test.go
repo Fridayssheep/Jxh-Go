@@ -32,7 +32,18 @@ func TestJoinRequestPolicyRoutesMapFixedContract(t *testing.T) {
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"2"` ||
-		service.policyRevision != 1 || !service.policyPatch.Enabled {
+		service.policyRevision != 1 || !service.policyPatch.Enabled.Set || !service.policyPatch.Enabled.Value {
+		t.Fatalf("status=%d revision=%d patch=%+v body=%s", response.Code, service.policyRevision, service.policyPatch, response.Body.String())
+	}
+
+	service.policy.Version = 3
+	service.policy.AutoReject = true
+	request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/groups/123/join-request-policy", `{"auto_reject":true}`)
+	request.Header.Set("If-Match", `"2"`)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.policyRevision != 2 || !service.policyPatch.AutoReject.Set ||
+		!service.policyPatch.AutoReject.Value || service.policyPatch.Enabled.Set {
 		t.Fatalf("status=%d revision=%d patch=%+v body=%s", response.Code, service.policyRevision, service.policyPatch, response.Body.String())
 	}
 }

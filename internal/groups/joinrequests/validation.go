@@ -68,8 +68,12 @@ func validApplicantMajor(value string) bool {
 
 func validPolicy(value Policy) bool {
 	return validGroupID(value.GroupID) && value.Mode == PolicyModeAIFieldsComplete &&
-		slices.Equal(value.RequiredFields, requiredPolicyFields[:]) && !value.AutoReject && value.Version > 0 &&
+		slices.Equal(value.RequiredFields, requiredPolicyFields[:]) && value.Version > 0 &&
 		validUTCTime(value.UpdatedAt) && validOptionalActor(value.UpdatedBy)
+}
+
+func validPolicyPatch(value PolicyPatch) bool {
+	return value.Enabled.Set || value.AutoReject.Set
 }
 
 func validRequest(value Request, detail bool) bool {
@@ -148,11 +152,15 @@ func validDecisionListQuery(value DecisionListQuery) bool {
 }
 
 func validDecisionInput(value DecisionInput) bool {
-	return validAction(value.Action) && validText(value.Reason, 500, true)
+	if !validAction(value.Action) {
+		return false
+	}
+	return validText(value.Reason, 500, value.Action == ActionApprove)
 }
 
 func validBulkInput(value BulkInput) bool {
-	if !validGroupID(value.GroupID) || !validAction(value.Action) || !validText(value.Reason, 500, true) || len(value.Items) < 1 || len(value.Items) > 20 {
+	if !validGroupID(value.GroupID) || !validAction(value.Action) ||
+		!validText(value.Reason, 500, value.Action == ActionApprove) || len(value.Items) < 1 || len(value.Items) > 20 {
 		return false
 	}
 	seen := make(map[string]struct{}, len(value.Items))

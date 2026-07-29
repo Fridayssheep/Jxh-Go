@@ -227,7 +227,8 @@ func NewBackend(options Options) (*Backend, error) {
 		return fail(fmt.Errorf("create telemetry service: %w", err))
 	}
 	joinRequestService, err = joinrequests.NewService(joinrequests.Options{
-		Store: options.Store, Approver: options.Gateway, Events: hub, Telemetry: telemetryService, Now: options.Now,
+		Store: options.Store, Approver: options.Gateway, AutoRejectReasons: options.SettingsRuntime,
+		Events: hub, Telemetry: telemetryService, Now: options.Now,
 		WorkerContext: options.Context,
 	})
 	if err != nil {

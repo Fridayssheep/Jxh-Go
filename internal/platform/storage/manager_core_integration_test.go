@@ -58,7 +58,9 @@ func TestManagerCoreMySQLResourceLifecycle(t *testing.T) {
 			Actor: managerIntegrationAuditActor("usr_root"), Request: request,
 			OccurredAt: now.Add(2500 * time.Millisecond),
 		},
-		GroupID: "10001", ExpectedRevision: policy.Version, Patch: joinrequests.PolicyPatch{Enabled: true},
+		GroupID: "10001", ExpectedRevision: policy.Version, Patch: joinrequests.PolicyPatch{
+			Enabled: auth.Field[bool]{Set: true, Value: true},
+		},
 	})
 	if err != nil || !policy.Enabled || policy.Version != 2 {
 		t.Fatalf("update join policy: policy=%+v error=%v", policy, err)

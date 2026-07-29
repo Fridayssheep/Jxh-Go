@@ -1145,6 +1145,37 @@ DELIMITER ;
 CALL `jxh_extend_system_operations_009`();
 DROP PROCEDURE `jxh_extend_system_operations_009`;
 
+-- 010_add_student_id_rules
+-- Add the versioned global student ID assessment configuration.
+CREATE TABLE `student_id_rules` (
+  `rule_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `config_json` json NOT NULL,
+  `revision` int unsigned NOT NULL DEFAULT 1,
+  `updated_by_type` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `updated_by_user_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `updated_by_qq_user_id` varchar(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `updated_by_display_name` varchar(100) NOT NULL,
+  `updated_by_role` varchar(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`rule_id`),
+  CONSTRAINT `chk_student_id_rules_config` CHECK (JSON_TYPE(`config_json`) = 'OBJECT'),
+  CONSTRAINT `chk_student_id_rules_revision` CHECK (`revision` >= 1),
+  CONSTRAINT `chk_student_id_rules_actor_type` CHECK (`updated_by_type` IN ('admin_user', 'qq_user', 'system')),
+  CONSTRAINT `chk_student_id_rules_actor_role` CHECK (`updated_by_role` IS NULL OR `updated_by_role` IN ('super_admin', 'maintainer', 'observer'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+INSERT INTO `student_id_rules`
+  (`rule_id`, `config_json`, `revision`, `updated_by_type`, `updated_by_user_id`, `updated_by_qq_user_id`, `updated_by_display_name`, `updated_by_role`)
+VALUES
+  ('student_id_rule', JSON_OBJECT('enabled', FALSE, 'student_id_length', 12, 'enrollment_year_segment', NULL, 'major_code_segment', NULL, 'mappings', JSON_ARRAY()), 1, 'system', NULL, NULL, 'system', NULL);
+
+-- 011_enable_automatic_join_rejection
+-- Permit the existing per-group policy flag to reject AI-validated invalid applications.
+-- Existing rows remain false; enabling rejection always requires an explicit policy update.
+ALTER TABLE `group_join_policies`
+  DROP CHECK `chk_group_join_policies_auto_reject`;
+
 CREATE TABLE IF NOT EXISTS `schema_migrations` (
   `version` int unsigned NOT NULL,
   `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
@@ -1172,4 +1203,6 @@ INSERT INTO `schema_migrations` (`version`, `name`, `checksum`, `applied_at`) VA
   (6, '006_reparse_group_request_applicants', '42ad208b9fcbf9990fc295979d17b037bc7050410e9440b2dcffa46fae8e6248', CURRENT_TIMESTAMP(3)),
   (7, '007_remove_group_request_system_request_id', '94c4e2d5edb46c0c920540684c63585973efa419c321cdcadc9e69e779ada971', CURRENT_TIMESTAMP(3)),
   (8, '008_create_manager_schema', 'a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9', CURRENT_TIMESTAMP(3)),
-  (9, '009_support_knowledge_reload_operations', 'b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e', CURRENT_TIMESTAMP(3));
+  (9, '009_support_knowledge_reload_operations', 'b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e', CURRENT_TIMESTAMP(3)),
+  (10, '010_add_student_id_rules', '88f21f5ff3e088e8b9be196c7cb3cc129451235e5bb580a0cfa713da4364571b', CURRENT_TIMESTAMP(3)),
+  (11, '011_enable_automatic_join_rejection', '3fcb3f67001e95141787c891c4e8751de1bd8501b9074d3dcfe9e66d687560c4', CURRENT_TIMESTAMP(3));

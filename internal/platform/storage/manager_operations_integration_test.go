@@ -65,6 +65,25 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	); err != nil {
 		t.Fatalf("seed join request: %v", err)
 	}
+	policy, found, err := store.GetPolicy(t.Context(), "10001")
+	if err != nil || !found {
+		t.Fatalf("get join policy: policy=%+v found=%t error=%v", policy, found, err)
+	}
+	policy, err = store.UpdatePolicy(t.Context(), joinrequests.PolicyMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(2*time.Minute + time.Second),
+		},
+		GroupID: "10001", ExpectedRevision: policy.Version,
+		Patch: joinrequests.PolicyPatch{AutoReject: auth.Field[bool]{Set: true, Value: true}},
+	})
+	if err != nil || policy.Enabled || !policy.AutoReject {
+		t.Fatalf("enable automatic rejection: policy=%+v error=%v", policy, err)
+	}
+	autoCandidates, err := store.ListAutoCandidates(t.Context(), 20)
+	if err != nil || len(autoCandidates) != 1 || autoCandidates[0].Request.ID != "join-flag-1" ||
+		autoCandidates[0].Policy.Enabled || !autoCandidates[0].Policy.AutoReject {
+		t.Fatalf("automatic rejection candidates=%+v error=%v", autoCandidates, err)
+	}
 	joinReservation, err := store.BeginDecisions(t.Context(), joinrequests.BeginMutation{
 		Context: joinrequests.MutationContext{
 			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(3 * time.Minute),

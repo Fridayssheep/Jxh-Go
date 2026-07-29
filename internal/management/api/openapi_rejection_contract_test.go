@@ -3,6 +3,7 @@ package adminapi
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -17,6 +18,7 @@ func TestOpenAPIJoinRejectionContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	var spec struct {
+		Paths      map[string]map[string]any `yaml:"paths"`
 		Components struct {
 			Schemas map[string]map[string]any `yaml:"schemas"`
 		} `yaml:"components"`
@@ -55,6 +57,21 @@ func TestOpenAPIJoinRejectionContracts(t *testing.T) {
 
 	requireOpenAPIRejectReasonUnion(t, spec.Components.Schemas, "JoinDecisionRequest")
 	requireOpenAPIRejectReasonUnion(t, spec.Components.Schemas, "BulkJoinDecisionRequest")
+
+	policyPath := spec.Paths["/groups/{group_id}/join-request-policy"]
+	for _, method := range []string{"get", "patch"} {
+		operation, ok := policyPath[method].(map[string]any)
+		if !ok {
+			t.Fatalf("%s policy operation is missing", method)
+		}
+		summary, _ := operation["summary"].(string)
+		if !strings.Contains(summary, "自动处理策略") {
+			t.Fatalf("%s policy summary = %q, want automatic decision terminology", method, summary)
+		}
+		if description, _ := operation["description"].(string); strings.Contains(description, "绝不自动拒绝") {
+			t.Fatalf("%s policy description still forbids automatic rejection: %q", method, description)
+		}
+	}
 }
 
 func requireOpenAPISchema(t *testing.T, schemas map[string]map[string]any, name string) map[string]any {

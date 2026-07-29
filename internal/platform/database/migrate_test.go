@@ -411,19 +411,21 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadMigrations(repository) error = %v", err)
 	}
-	if len(migrations) != 9 {
-		t.Fatalf("len(migrations) = %d, want 9", len(migrations))
+	if len(migrations) != 11 {
+		t.Fatalf("len(migrations) = %d, want 11", len(migrations))
 	}
 	wantChecksums := map[int]string{
-		1: "81f71d4c8db2a412f0f9b0f1d4d61d6d53ecc538b801b2c365d570f789fa66a9",
-		2: "df0b7f62b0e0465a64d7c90b9d798cada31159ffa683e22abceab41724d395fa",
-		3: "0703d0fe865e6865d0047ae84ba75ab9a9506b72d90c60f74c3b36051ac11306",
-		4: "254b502311291b48f7002c041fb6c96cad16f4386aa26e195a6bf373aa41bf17",
-		5: "a2239296a829056b33833806a7a064ab6db7ad677f915c723bfe21cd92f9bdae",
-		6: "42ad208b9fcbf9990fc295979d17b037bc7050410e9440b2dcffa46fae8e6248",
-		7: "94c4e2d5edb46c0c920540684c63585973efa419c321cdcadc9e69e779ada971",
-		8: "a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9",
-		9: "b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e",
+		1:  "81f71d4c8db2a412f0f9b0f1d4d61d6d53ecc538b801b2c365d570f789fa66a9",
+		2:  "df0b7f62b0e0465a64d7c90b9d798cada31159ffa683e22abceab41724d395fa",
+		3:  "0703d0fe865e6865d0047ae84ba75ab9a9506b72d90c60f74c3b36051ac11306",
+		4:  "254b502311291b48f7002c041fb6c96cad16f4386aa26e195a6bf373aa41bf17",
+		5:  "a2239296a829056b33833806a7a064ab6db7ad677f915c723bfe21cd92f9bdae",
+		6:  "42ad208b9fcbf9990fc295979d17b037bc7050410e9440b2dcffa46fae8e6248",
+		7:  "94c4e2d5edb46c0c920540684c63585973efa419c321cdcadc9e69e779ada971",
+		8:  "a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9",
+		9:  "b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e",
+		10: "88f21f5ff3e088e8b9be196c7cb3cc129451235e5bb580a0cfa713da4364571b",
+		11: "3fcb3f67001e95141787c891c4e8751de1bd8501b9074d3dcfe9e66d687560c4",
 	}
 	for _, migration := range migrations {
 		if want := wantChecksums[migration.Version]; want != "" && migration.Checksum != want {
@@ -451,7 +453,7 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 		t.Fatalf("render repository init: %v", err)
 	}
 	if !bytes.Equal(initSQL, []byte(wantInitSQL)) {
-		t.Fatalf("init schema is not the deterministic reversible MySQL CLI rendering of migrations 001..009")
+		t.Fatalf("init schema is not the deterministic reversible MySQL CLI rendering of migrations 001..011")
 	}
 
 	initText := string(initSQL)
@@ -474,6 +476,45 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 		if row[1] != fmt.Sprint(migration.Version) || row[2] != migration.Name || row[3] != migration.Checksum {
 			t.Errorf("init schema ledger row %d = (%s, %s, %s), want (%d, %s, %s)",
 				migration.Version, row[1], row[2], row[3], migration.Version, migration.Name, migration.Checksum)
+		}
+	}
+}
+
+func TestStudentIDRuleMigrationPersistsVersionedGlobalConfiguration(t *testing.T) {
+	paths := map[string]string{
+		"010":  filepath.Join("..", "..", "..", "deploy", "mysql", "migrations", "010_add_student_id_rules.sql"),
+		"init": filepath.Join("..", "..", "..", "deploy", "mysql", "init", "001_schema.sql"),
+	}
+	for label, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", label, err)
+		}
+		script := string(contents)
+		for _, required := range []string{
+			"CREATE TABLE `student_id_rules`", "`rule_id` varchar(64)", "`config_json` json NOT NULL",
+			"`revision` int unsigned NOT NULL", "CHECK (JSON_TYPE(`config_json`) = 'OBJECT')",
+			"'student_id_rule'", "JSON_OBJECT('enabled', FALSE, 'student_id_length', 12",
+		} {
+			if !strings.Contains(script, required) {
+				t.Errorf("%s schema is missing %q", label, required)
+			}
+		}
+	}
+}
+
+func TestMigration011EnablesAutomaticJoinRejectionWithoutChangingPolicyValues(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "mysql", "migrations", "011_enable_automatic_join_rejection.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := compactSQL(string(contents))
+	if !strings.Contains(script, "ALTER TABLE `group_join_policies` DROP CHECK `chk_group_join_policies_auto_reject`") {
+		t.Fatalf("migration 011 does not drop the auto-reject guard: %s", script)
+	}
+	for _, forbidden := range []string{"UPDATE `group_join_policies`", "auto_reject` = TRUE", "auto_reject`=TRUE"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("migration 011 changes existing policy values via %q: %s", forbidden, script)
 		}
 	}
 }
@@ -1901,6 +1942,10 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`"),
 		execStep("INSERT INTO `schema_migrations`"),
+		execStep("-- Add the versioned global student ID assessment configuration"),
+		execStep("INSERT INTO `schema_migrations`"),
+		execStep("-- Permit the existing per-group policy flag"),
+		execStep("INSERT INTO `schema_migrations`"),
 		queryStep("RELEASE_LOCK", []string{"released"}, [][]driver.Value{{int64(1)}}),
 	)
 	db, state := newScriptDB(t, steps...)
@@ -1909,13 +1954,13 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if len(applied) != 2 || applied[0].Version != 8 || applied[1].Version != 9 {
-		t.Fatalf("applied = %+v, want 008 through 009", applied)
+	if len(applied) != 4 || applied[0].Version != 8 || applied[1].Version != 9 || applied[2].Version != 10 || applied[3].Version != 11 {
+		t.Fatalf("applied = %+v, want 008 through 011", applied)
 	}
 	state.assertComplete(t)
 }
 
-func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
+func TestRunnerApplyAdoptsPost005ThenExecutes006Through011(t *testing.T) {
 	migrations := repositoryMigrations(t)
 	snapshot := post005LegacySchemaFixture()
 	post007 := knownPost007LegacySchema()
@@ -1963,6 +2008,10 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_009`"),
 		execStep("INSERT INTO `schema_migrations`"),
+		execStep("-- Add the versioned global student ID assessment configuration"),
+		execStep("INSERT INTO `schema_migrations`"),
+		execStep("-- Permit the existing per-group policy flag"),
+		execStep("INSERT INTO `schema_migrations`"),
 		queryStep("RELEASE_LOCK", []string{"released"}, [][]driver.Value{{int64(1)}}),
 	)
 	db, state := newScriptDB(t, steps...)
@@ -1971,8 +2020,8 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through008(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if len(applied) != 4 || applied[0].Version != 6 || applied[1].Version != 7 || applied[2].Version != 8 || applied[3].Version != 9 {
-		t.Fatalf("applied = %+v, want 006 through 009", applied)
+	if len(applied) != 6 || applied[0].Version != 6 || applied[1].Version != 7 || applied[2].Version != 8 || applied[3].Version != 9 || applied[4].Version != 10 || applied[5].Version != 11 {
+		t.Fatalf("applied = %+v, want 006 through 011", applied)
 	}
 	state.assertComplete(t)
 	state.assertSingleConnection(t)

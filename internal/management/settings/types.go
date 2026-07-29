@@ -19,6 +19,7 @@ const (
 )
 
 const DefaultWelcomeTemplate = "欢迎来到浙江工业大学，精弘网络欢迎各位的到来！\n输入 菜单 获取精小弘机器人的菜单哦！\n请及时修改群名片\n格式如下：专业/大类+姓名"
+const DefaultAutoRejectReason = "申请信息不完整或格式不符合要求，请完善后重新申请。"
 
 type Basic struct {
 	Enabled bool
@@ -27,6 +28,10 @@ type Basic struct {
 type Welcome struct {
 	Enabled         bool
 	MessageTemplate string
+}
+
+type JoinRequestSettings struct {
+	AutoRejectReason string
 }
 
 type Features struct {
@@ -47,6 +52,10 @@ type WelcomePatch struct {
 	MessageTemplate auth.Field[string]
 }
 
+type JoinRequestSettingsPatch struct {
+	AutoRejectReason auth.Field[string]
+}
+
 type GlobalPatch struct {
 	KeywordReply  auth.Field[BasicPatch]
 	AIQA          auth.Field[BasicPatch]
@@ -54,6 +63,7 @@ type GlobalPatch struct {
 	LinkCleaner   auth.Field[BasicPatch]
 	Welcome       auth.Field[WelcomePatch]
 	CustomCommand auth.Field[BasicPatch]
+	JoinRequests  auth.Field[JoinRequestSettingsPatch]
 }
 
 type BasicOverride struct {
@@ -91,10 +101,11 @@ type GroupPatch struct {
 }
 
 type Global struct {
-	Features  Features
-	Version   uint64
-	UpdatedAt time.Time
-	UpdatedBy *audit.Actor
+	Features     Features
+	JoinRequests JoinRequestSettings
+	Version      uint64
+	UpdatedAt    time.Time
+	UpdatedBy    *audit.Actor
 }
 
 type Group struct {
@@ -149,4 +160,8 @@ func DefaultFeatures() Features {
 		LinkCleaner: Basic{Enabled: true}, Welcome: Welcome{Enabled: true, MessageTemplate: DefaultWelcomeTemplate},
 		CustomCommand: Basic{Enabled: true},
 	}
+}
+
+func DefaultJoinRequestSettings() JoinRequestSettings {
+	return JoinRequestSettings{AutoRejectReason: DefaultAutoRejectReason}
 }

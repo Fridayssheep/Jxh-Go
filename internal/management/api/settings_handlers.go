@@ -170,7 +170,8 @@ func (f *rawSettingsField) UnmarshalJSON(data []byte) error {
 }
 
 type settingsPatchEnvelope struct {
-	Features rawSettingsField `json:"features"`
+	Features     rawSettingsField `json:"features"`
+	JoinRequests rawSettingsField `json:"join_requests"`
 }
 
 type featureSettingsPatchFields struct {
@@ -191,53 +192,72 @@ type welcomeSettingsPatchFields struct {
 	MessageTemplate rawSettingsField `json:"message_template"`
 }
 
+type joinRequestSettingsPatchFields struct {
+	AutoRejectReason rawSettingsField `json:"auto_reject_reason"`
+}
+
 func decodeGlobalSettingsPatch(w http.ResponseWriter, r *http.Request) (settings.GlobalPatch, bool) {
 	var envelope settingsPatchEnvelope
 	if !decodeRequestJSON(w, r, &envelope) {
 		return settings.GlobalPatch{}, false
 	}
-	if !envelope.Features.Set || envelope.Features.Null {
-		writeInvalidSettingsPayload(w, r)
-		return settings.GlobalPatch{}, false
-	}
-	var fields featureSettingsPatchFields
-	if err := decodeStrictJSONBytes(envelope.Features.data, &fields); err != nil {
+	if (!envelope.Features.Set && !envelope.JoinRequests.Set) || envelope.Features.Null || envelope.JoinRequests.Null {
 		writeInvalidSettingsPayload(w, r)
 		return settings.GlobalPatch{}, false
 	}
 	patch := settings.GlobalPatch{}
 	valid := true
-	patch.KeywordReply, valid = decodeGlobalBasicField(fields.KeywordReply)
-	if !valid {
-		writeInvalidSettingsPayload(w, r)
-		return settings.GlobalPatch{}, false
+	if envelope.Features.Set {
+		var fields featureSettingsPatchFields
+		if err := decodeStrictJSONBytes(envelope.Features.data, &fields); err != nil {
+			writeInvalidSettingsPayload(w, r)
+			return settings.GlobalPatch{}, false
+		}
+		patch.KeywordReply, valid = decodeGlobalBasicField(fields.KeywordReply)
+		if valid {
+			patch.AIQA, valid = decodeGlobalBasicField(fields.AIQA)
+		}
+		if valid {
+			patch.Quote, valid = decodeGlobalBasicField(fields.Quote)
+		}
+		if valid {
+			patch.LinkCleaner, valid = decodeGlobalBasicField(fields.LinkCleaner)
+		}
+		if valid {
+			patch.CustomCommand, valid = decodeGlobalBasicField(fields.CustomCommand)
+		}
+		if valid {
+			patch.Welcome, valid = decodeGlobalWelcomeField(fields.Welcome)
+		}
 	}
-	patch.AIQA, valid = decodeGlobalBasicField(fields.AIQA)
-	if !valid {
-		writeInvalidSettingsPayload(w, r)
-		return settings.GlobalPatch{}, false
+	if valid {
+		patch.JoinRequests, valid = decodeGlobalJoinRequestsField(envelope.JoinRequests)
 	}
-	patch.Quote, valid = decodeGlobalBasicField(fields.Quote)
-	if !valid {
-		writeInvalidSettingsPayload(w, r)
-		return settings.GlobalPatch{}, false
-	}
-	patch.LinkCleaner, valid = decodeGlobalBasicField(fields.LinkCleaner)
-	if !valid {
-		writeInvalidSettingsPayload(w, r)
-		return settings.GlobalPatch{}, false
-	}
-	patch.CustomCommand, valid = decodeGlobalBasicField(fields.CustomCommand)
-	if !valid {
-		writeInvalidSettingsPayload(w, r)
-		return settings.GlobalPatch{}, false
-	}
-	patch.Welcome, valid = decodeGlobalWelcomeField(fields.Welcome)
 	if !valid || !globalPatchSet(patch) {
 		writeInvalidSettingsPayload(w, r)
 		return settings.GlobalPatch{}, false
 	}
 	return patch, true
+}
+
+func decodeGlobalJoinRequestsField(field rawSettingsField) (auth.Field[settings.JoinRequestSettingsPatch], bool) {
+	if !field.Set {
+		return auth.Field[settings.JoinRequestSettingsPatch]{}, true
+	}
+	var body joinRequestSettingsPatchFields
+	if err := decodeStrictJSONBytes(field.data, &body); err != nil || !body.AutoRejectReason.Set || body.AutoRejectReason.Null {
+		return auth.Field[settings.JoinRequestSettingsPatch]{}, false
+	}
+	var reason string
+	if err := decodeStrictJSONBytes(body.AutoRejectReason.data, &reason); err != nil {
+		return auth.Field[settings.JoinRequestSettingsPatch]{}, false
+	}
+	return auth.Field[settings.JoinRequestSettingsPatch]{
+		Set: true,
+		Value: settings.JoinRequestSettingsPatch{
+			AutoRejectReason: auth.Field[string]{Set: true, Value: reason},
+		},
+	}, true
 }
 
 func decodeGlobalBasicField(field rawSettingsField) (auth.Field[settings.BasicPatch], bool) {
@@ -394,7 +414,8 @@ func decodeNullableString(field rawSettingsField) (*string, bool) {
 }
 
 func globalPatchSet(value settings.GlobalPatch) bool {
-	return value.KeywordReply.Set || value.AIQA.Set || value.Quote.Set || value.LinkCleaner.Set || value.Welcome.Set || value.CustomCommand.Set
+	return value.KeywordReply.Set || value.AIQA.Set || value.Quote.Set || value.LinkCleaner.Set || value.Welcome.Set ||
+		value.CustomCommand.Set || value.JoinRequests.Set
 }
 
 func groupPatchSet(value settings.GroupPatch) bool {
@@ -437,6 +458,10 @@ type featureSettingsDTO struct {
 	CustomCommand basicFeatureSettingsDTO   `json:"custom_commands"`
 }
 
+type joinRequestSettingsDTO struct {
+	AutoRejectReason string `json:"auto_reject_reason"`
+}
+
 type welcomeFeatureOverrideDTO struct {
 	Enabled         *bool   `json:"enabled,omitempty"`
 	MessageTemplate *string `json:"message_template,omitempty"`
@@ -452,10 +477,11 @@ type groupFeatureOverridesDTO struct {
 }
 
 type globalSettingsDTO struct {
-	Features  featureSettingsDTO `json:"features"`
-	Version   uint64             `json:"version"`
-	UpdatedAt time.Time          `json:"updated_at"`
-	UpdatedBy *auditActorDTO     `json:"updated_by"`
+	Features     featureSettingsDTO     `json:"features"`
+	JoinRequests joinRequestSettingsDTO `json:"join_requests"`
+	Version      uint64                 `json:"version"`
+	UpdatedAt    time.Time              `json:"updated_at"`
+	UpdatedBy    *auditActorDTO         `json:"updated_by"`
 }
 
 type groupSettingsDTO struct {
@@ -470,7 +496,8 @@ type groupSettingsDTO struct {
 
 func mapGlobalSettings(value settings.Global) globalSettingsDTO {
 	return globalSettingsDTO{
-		Features: mapFeatureSettings(value.Features), Version: value.Version,
+		Features:     mapFeatureSettings(value.Features),
+		JoinRequests: joinRequestSettingsDTO{AutoRejectReason: value.JoinRequests.AutoRejectReason}, Version: value.Version,
 		UpdatedAt: value.UpdatedAt.UTC(), UpdatedBy: mapOptionalAuditActor(value.UpdatedBy),
 	}
 }

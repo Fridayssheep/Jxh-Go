@@ -33,7 +33,8 @@ func TestRuntimeResolvesGlobalAndGroupSettings(t *testing.T) {
 	global := DefaultFeatures()
 	global.AIQA.Enabled = false
 	if err := runtime.ApplyGlobal(Global{
-		Features: global, Version: 2, UpdatedAt: time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC),
+		Features: global, JoinRequests: DefaultJoinRequestSettings(), Version: 2,
+		UpdatedAt: time.Date(2026, 7, 28, 2, 0, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +55,24 @@ func TestRuntimeResolvesGlobalAndGroupSettings(t *testing.T) {
 	}
 }
 
+func TestRuntimeExposesConfiguredAutoRejectReason(t *testing.T) {
+	runtime := NewDefaultRuntime()
+	if got := runtime.AutoRejectReason(); got != DefaultAutoRejectReason {
+		t.Fatalf("default auto reject reason = %q", got)
+	}
+
+	reason := "申请资料不完整，请补充后重新申请。"
+	if err := runtime.ApplyGlobal(Global{
+		Features: DefaultFeatures(), JoinRequests: JoinRequestSettings{AutoRejectReason: reason},
+		Version: 2, UpdatedAt: time.Date(2026, 7, 29, 1, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := runtime.AutoRejectReason(); got != reason {
+		t.Fatalf("updated auto reject reason = %q", got)
+	}
+}
+
 func TestRuntimeRejectsInconsistentDocumentsAndCopiesOverrides(t *testing.T) {
 	runtime := NewDefaultRuntime()
 	enabled := false
@@ -66,7 +85,7 @@ func TestRuntimeRejectsInconsistentDocumentsAndCopiesOverrides(t *testing.T) {
 	}
 
 	state := RuntimeState{
-		Global: Global{Features: DefaultFeatures(), Version: 2, UpdatedAt: time.Now().UTC()},
+		Global: Global{Features: DefaultFeatures(), JoinRequests: DefaultJoinRequestSettings(), Version: 2, UpdatedAt: time.Now().UTC()},
 		Groups: []RuntimeGroup{{GroupID: "123", Overrides: overrides, Version: 4}},
 	}
 	if err := runtime.Replace(state); err != nil {
@@ -110,7 +129,9 @@ func TestRuntimeConcurrentReadersObserveValidSnapshots(t *testing.T) {
 	for version := uint64(2); version <= 100; version++ {
 		features := DefaultFeatures()
 		features.AIQA.Enabled = version%2 == 0
-		if err := runtime.ApplyGlobal(Global{Features: features, Version: version, UpdatedAt: time.Now().UTC()}); err != nil {
+		if err := runtime.ApplyGlobal(Global{
+			Features: features, JoinRequests: DefaultJoinRequestSettings(), Version: version, UpdatedAt: time.Now().UTC(),
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

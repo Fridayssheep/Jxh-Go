@@ -40,6 +40,31 @@ func TestSettingsGlobalRoutesMapContractAndPatchPresence(t *testing.T) {
 	}
 }
 
+func TestSettingsGlobalRoutesReadAndPatchJoinRequestSettings(t *testing.T) {
+	service := &settingsOperationsFake{global: globalSettingsFixture()}
+	router := newSettingsHTTPFixture(t, service)
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, settingsReadRequest(http.MethodGet, "/api/admin/v1/settings"))
+	if response.Code != http.StatusOK || !strings.Contains(
+		response.Body.String(),
+		`"join_requests":{"auto_reject_reason":"申请信息不完整或格式不符合要求，请完善后重新申请。"}`,
+	) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	service.global.Version = 4
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/settings",
+		`{"join_requests":{"auto_reject_reason":"请补充学号和姓名后重新申请。"}}`)
+	request.Header.Set("If-Match", `"3"`)
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !service.globalPatch.JoinRequests.Set ||
+		service.globalPatch.JoinRequests.Value.AutoRejectReason.Value != "请补充学号和姓名后重新申请。" {
+		t.Fatalf("status=%d patch=%+v body=%s", response.Code, service.globalPatch, response.Body.String())
+	}
+}
+
 func TestSettingsGroupPatchPreservesFeatureAndNestedNullSemantics(t *testing.T) {
 	service := &settingsOperationsFake{group: groupSettingsFixture()}
 	router := newSettingsHTTPFixture(t, service)
@@ -166,7 +191,8 @@ func globalSettingsFixture() settings.Global {
 	features := settings.DefaultFeatures()
 	features.Welcome.MessageTemplate = "Welcome {{member_qq}}"
 	return settings.Global{
-		Features: features, Version: 3, UpdatedAt: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
+		Features: features, JoinRequests: settings.DefaultJoinRequestSettings(),
+		Version: 3, UpdatedAt: time.Date(2026, 7, 28, 1, 0, 0, 0, time.UTC),
 		UpdatedBy: &audit.Actor{Type: audit.ActorAdminUser, UserID: &userID, DisplayName: "Admin"},
 	}
 }

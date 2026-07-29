@@ -122,6 +122,7 @@ func (s *Service) UpdateGlobal(ctx context.Context, principal auth.Principal, re
 	if !principal.Has(auth.PermissionSettingsWrite) {
 		return Global{}, ErrForbidden
 	}
+	patch = normalizeGlobalPatch(patch)
 	if revision == 0 || !validGlobalPatch(patch) || !validRequest(request) {
 		return Global{}, ErrInvalidInput
 	}
@@ -238,7 +239,7 @@ func validateRuntimeState(value RuntimeState) error {
 
 func validGlobal(value Global) bool {
 	return value.Version >= 1 && !value.UpdatedAt.IsZero() && value.UpdatedAt.Location() == time.UTC &&
-		validFeatures(value.Features) && validOptionalActor(value.UpdatedBy)
+		validFeatures(value.Features) && validJoinRequestSettings(value.JoinRequests) && validOptionalActor(value.UpdatedBy)
 }
 
 func validGroup(value Group) bool {
@@ -291,7 +292,29 @@ func validGlobalPatch(value GlobalPatch) bool {
 			return false
 		}
 	}
+	if value.JoinRequests.Set {
+		set = true
+		patch := value.JoinRequests.Value
+		if !patch.AutoRejectReason.Set || !validAutoRejectReason(patch.AutoRejectReason.Value) {
+			return false
+		}
+	}
 	return set
+}
+
+func normalizeGlobalPatch(value GlobalPatch) GlobalPatch {
+	if value.JoinRequests.Set && value.JoinRequests.Value.AutoRejectReason.Set {
+		value.JoinRequests.Value.AutoRejectReason.Value = strings.TrimSpace(value.JoinRequests.Value.AutoRejectReason.Value)
+	}
+	return value
+}
+
+func validJoinRequestSettings(value JoinRequestSettings) bool {
+	return validAutoRejectReason(value.AutoRejectReason)
+}
+
+func validAutoRejectReason(value string) bool {
+	return utf8.ValidString(value) && strings.TrimSpace(value) == value && value != "" && utf8.RuneCountInString(value) <= 500
 }
 
 func validGroupPatch(value GroupPatch) bool {

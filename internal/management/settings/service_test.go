@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,9 @@ func TestServiceGlobalUpdateChangesInheritedSettingsOnlyAfterStoreCommit(t *test
 	service := newSettingsService(t, store, runtime)
 	features := DefaultFeatures()
 	features.AIQA.Enabled = false
-	store.globalResult = Global{Features: features, Version: 2, UpdatedAt: settingsTestTime}
+	store.globalResult = Global{
+		Features: features, JoinRequests: DefaultJoinRequestSettings(), Version: 2, UpdatedAt: settingsTestTime,
+	}
 	patch := GlobalPatch{AIQA: auth.Field[BasicPatch]{Set: true, Value: BasicPatch{Enabled: auth.Field[bool]{Set: true, Value: false}}}}
 
 	value, err := service.UpdateGlobal(t.Context(), settingsWriter(), 1, patch, validMutationRequest())
@@ -38,6 +41,42 @@ func TestServiceGlobalUpdateChangesInheritedSettingsOnlyAfterStoreCommit(t *test
 	}
 	if runtime.Enabled(123, FeatureAIQA) {
 		t.Fatal("failed store mutation changed runtime")
+	}
+}
+
+func TestServiceGlobalUpdateNormalizesAutoRejectReasonBeforeStore(t *testing.T) {
+	runtime := NewDefaultRuntime()
+	store := &settingsStoreFake{globalResult: Global{
+		Features: DefaultFeatures(), JoinRequests: JoinRequestSettings{AutoRejectReason: "请补充学号和姓名后重新申请。"},
+		Version: 2, UpdatedAt: settingsTestTime,
+	}}
+	service := newSettingsService(t, store, runtime)
+	patch := GlobalPatch{JoinRequests: auth.Field[JoinRequestSettingsPatch]{Set: true, Value: JoinRequestSettingsPatch{
+		AutoRejectReason: auth.Field[string]{Set: true, Value: "  请补充学号和姓名后重新申请。  "},
+	}}}
+
+	if _, err := service.UpdateGlobal(t.Context(), settingsWriter(), 1, patch, validMutationRequest()); err != nil {
+		t.Fatal(err)
+	}
+	got := store.globalMutation.Patch.JoinRequests.Value.AutoRejectReason.Value
+	if got != "请补充学号和姓名后重新申请。" || runtime.AutoRejectReason() != got {
+		t.Fatalf("stored reason = %q, runtime reason = %q", got, runtime.AutoRejectReason())
+	}
+}
+
+func TestServiceRejectsInvalidAutoRejectReasonBeforeStore(t *testing.T) {
+	for _, reason := range []string{"   ", strings.Repeat("拒", 501)} {
+		store := &settingsStoreFake{}
+		service := newSettingsService(t, store, NewDefaultRuntime())
+		patch := GlobalPatch{JoinRequests: auth.Field[JoinRequestSettingsPatch]{Set: true, Value: JoinRequestSettingsPatch{
+			AutoRejectReason: auth.Field[string]{Set: true, Value: reason},
+		}}}
+		if _, err := service.UpdateGlobal(t.Context(), settingsWriter(), 1, patch, validMutationRequest()); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("reason length %d error = %v", len([]rune(reason)), err)
+		}
+		if store.calls != 0 {
+			t.Fatalf("invalid reason reached store %d times", store.calls)
+		}
 	}
 }
 
@@ -97,7 +136,9 @@ func TestServiceRepairsRuntimeAfterCommittedMutationVersionDrift(t *testing.T) {
 	}
 	persisted := DefaultFeatures()
 	persisted.AIQA.Enabled = false
-	global := Global{Features: persisted, Version: 2, UpdatedAt: settingsTestTime}
+	global := Global{
+		Features: persisted, JoinRequests: DefaultJoinRequestSettings(), Version: 2, UpdatedAt: settingsTestTime,
+	}
 	store := &settingsStoreFake{globalResult: global, runtimeState: RuntimeState{Global: global}}
 	service := newSettingsService(t, store, runtime)
 	patch := GlobalPatch{AIQA: auth.Field[BasicPatch]{Set: true, Value: BasicPatch{
@@ -149,7 +190,9 @@ func TestServiceRejectsInvalidPatchesAndUnauthorizedAccessBeforeStore(t *testing
 func TestServiceReloadRejectsInvalidStateWithoutReplacingSnapshot(t *testing.T) {
 	runtime := NewDefaultRuntime()
 	store := &settingsStoreFake{runtimeState: RuntimeState{
-		Global: Global{Features: DefaultFeatures(), Version: 2, UpdatedAt: settingsTestTime},
+		Global: Global{
+			Features: DefaultFeatures(), JoinRequests: DefaultJoinRequestSettings(), Version: 2, UpdatedAt: settingsTestTime,
+		},
 		Groups: []RuntimeGroup{
 			{GroupID: "123", Overrides: Overrides{AIQA: &BasicOverride{Enabled: false}}, Version: 1},
 			{GroupID: "123", Overrides: Overrides{AIQA: &BasicOverride{Enabled: true}}, Version: 2},

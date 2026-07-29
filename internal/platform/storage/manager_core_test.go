@@ -22,6 +22,14 @@ func TestManagerStoreInterfaceSatisfaction(t *testing.T) {
 }
 
 func TestManagerGlobalSettingsDocumentDefaultsAndRoundTrip(t *testing.T) {
+	globalDefaults, err := decodeManagerGlobalSettings([]byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if globalDefaults.JoinRequests != settings.DefaultJoinRequestSettings() {
+		t.Fatalf("empty global join request settings = %+v", globalDefaults.JoinRequests)
+	}
+
 	defaults, err := decodeManagerFeatures([]byte(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +60,37 @@ func TestManagerGlobalSettingsDocumentDefaultsAndRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestManagerGlobalSettingsDocumentPersistsJoinRequestSettings(t *testing.T) {
+	want := managerGlobalSettings{
+		Features:     settings.DefaultFeatures(),
+		JoinRequests: settings.JoinRequestSettings{AutoRejectReason: "请补充学号后重新申请。"},
+	}
+	encoded, err := encodeManagerGlobalSettings(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"join_requests":{"auto_reject_reason":"请补充学号后重新申请。"}`) {
+		t.Fatalf("encoded global document = %s", encoded)
+	}
+	got, err := decodeManagerGlobalSettings(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+
+	patch := settings.GlobalPatch{JoinRequests: auth.Field[settings.JoinRequestSettingsPatch]{
+		Set: true, Value: settings.JoinRequestSettingsPatch{
+			AutoRejectReason: auth.Field[string]{Set: true, Value: "新的拒绝消息"},
+		},
+	}}
+	patched := applyManagerGlobalSettingsPatch(got, patch)
+	if patched.Features != want.Features || patched.JoinRequests.AutoRejectReason != "新的拒绝消息" {
+		t.Fatalf("patched global settings = %+v", patched)
 	}
 }
 

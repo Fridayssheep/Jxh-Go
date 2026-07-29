@@ -11,6 +11,7 @@ var ErrInvalidRuntime = errors.New("invalid settings runtime state")
 
 type runtimeSnapshot struct {
 	global        Features
+	joinRequests  JoinRequestSettings
 	globalVersion uint64
 	groups        map[string]RuntimeGroup
 }
@@ -24,13 +25,19 @@ func NewRuntime(initial Features, version uint64) (*Runtime, error) {
 		return nil, ErrInvalidRuntime
 	}
 	runtime := &Runtime{}
-	runtime.state.Store(&runtimeSnapshot{global: cloneFeatures(initial), globalVersion: version, groups: map[string]RuntimeGroup{}})
+	runtime.state.Store(&runtimeSnapshot{
+		global: cloneFeatures(initial), joinRequests: DefaultJoinRequestSettings(), globalVersion: version,
+		groups: map[string]RuntimeGroup{},
+	})
 	return runtime, nil
 }
 
 func NewDefaultRuntime() *Runtime {
 	runtime := &Runtime{}
-	runtime.state.Store(&runtimeSnapshot{global: DefaultFeatures(), globalVersion: 1, groups: map[string]RuntimeGroup{}})
+	runtime.state.Store(&runtimeSnapshot{
+		global: DefaultFeatures(), joinRequests: DefaultJoinRequestSettings(), globalVersion: 1,
+		groups: map[string]RuntimeGroup{},
+	})
 	return runtime
 }
 
@@ -66,6 +73,10 @@ func (r *Runtime) Enabled(groupID int64, key FeatureKey) bool {
 	}
 }
 
+func (r *Runtime) AutoRejectReason() string {
+	return r.load().joinRequests.AutoRejectReason
+}
+
 func (r *Runtime) Replace(value RuntimeState) error {
 	if !validGlobal(value.Global) {
 		return ErrInvalidRuntime
@@ -81,7 +92,8 @@ func (r *Runtime) Replace(value RuntimeState) error {
 		groups[group.GroupID] = RuntimeGroup{GroupID: group.GroupID, Overrides: cloneOverrides(group.Overrides), Version: group.Version}
 	}
 	r.state.Store(&runtimeSnapshot{
-		global: cloneFeatures(value.Global.Features), globalVersion: value.Global.Version, groups: groups,
+		global: cloneFeatures(value.Global.Features), joinRequests: value.Global.JoinRequests,
+		globalVersion: value.Global.Version, groups: groups,
 	})
 	return nil
 }
@@ -96,7 +108,8 @@ func (r *Runtime) ApplyGlobal(value Global) error {
 			return ErrInvalidRuntime
 		}
 		next := &runtimeSnapshot{
-			global: cloneFeatures(value.Features), globalVersion: value.Version, groups: cloneRuntimeGroups(current.groups),
+			global: cloneFeatures(value.Features), joinRequests: value.JoinRequests,
+			globalVersion: value.Version, groups: cloneRuntimeGroups(current.groups),
 		}
 		if r.state.CompareAndSwap(current, next) {
 			return nil
@@ -114,7 +127,8 @@ func (r *Runtime) ApplyGroup(value Group) error {
 			return ErrInvalidRuntime
 		}
 		next := &runtimeSnapshot{
-			global: cloneFeatures(current.global), globalVersion: current.globalVersion, groups: cloneRuntimeGroups(current.groups),
+			global: cloneFeatures(current.global), joinRequests: current.joinRequests,
+			globalVersion: current.globalVersion, groups: cloneRuntimeGroups(current.groups),
 		}
 		if value.Version == 0 {
 			delete(next.groups, value.GroupID)
@@ -143,7 +157,8 @@ func (r *Runtime) DeleteGroup(groupID string, expectedVersion uint64) error {
 			return ErrInvalidRuntime
 		}
 		next := &runtimeSnapshot{
-			global: cloneFeatures(current.global), globalVersion: current.globalVersion, groups: cloneRuntimeGroups(current.groups),
+			global: cloneFeatures(current.global), joinRequests: current.joinRequests,
+			globalVersion: current.globalVersion, groups: cloneRuntimeGroups(current.groups),
 		}
 		delete(next.groups, groupID)
 		if r.state.CompareAndSwap(current, next) {
@@ -161,7 +176,10 @@ func (r *Runtime) load() *runtimeSnapshot {
 	if state := r.state.Load(); state != nil {
 		return state
 	}
-	initial := &runtimeSnapshot{global: DefaultFeatures(), globalVersion: 1, groups: map[string]RuntimeGroup{}}
+	initial := &runtimeSnapshot{
+		global: DefaultFeatures(), joinRequests: DefaultJoinRequestSettings(), globalVersion: 1,
+		groups: map[string]RuntimeGroup{},
+	}
 	if r.state.CompareAndSwap(nil, initial) {
 		return initial
 	}

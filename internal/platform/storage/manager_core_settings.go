@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/zjutjh/jxh-go/internal/management/audit"
 	"github.com/zjutjh/jxh-go/internal/management/settings"
@@ -27,17 +29,27 @@ type managerWelcomeSettingsDocument struct {
 	MessageTemplate *string `json:"message_template,omitempty"`
 }
 
+type managerJoinRequestSettingsDocument struct {
+	AutoRejectReason *string `json:"auto_reject_reason,omitempty"`
+}
+
 type managerSettingsDocument struct {
-	KeywordReply  *managerBasicSettingsDocument   `json:"keyword_reply,omitempty"`
-	AIQA          *managerBasicSettingsDocument   `json:"ai_qa,omitempty"`
-	Quote         *managerBasicSettingsDocument   `json:"quote,omitempty"`
-	LinkCleaner   *managerBasicSettingsDocument   `json:"link_cleaner,omitempty"`
-	Welcome       *managerWelcomeSettingsDocument `json:"welcome,omitempty"`
-	CustomCommand *managerBasicSettingsDocument   `json:"custom_commands,omitempty"`
+	KeywordReply  *managerBasicSettingsDocument       `json:"keyword_reply,omitempty"`
+	AIQA          *managerBasicSettingsDocument       `json:"ai_qa,omitempty"`
+	Quote         *managerBasicSettingsDocument       `json:"quote,omitempty"`
+	LinkCleaner   *managerBasicSettingsDocument       `json:"link_cleaner,omitempty"`
+	Welcome       *managerWelcomeSettingsDocument     `json:"welcome,omitempty"`
+	CustomCommand *managerBasicSettingsDocument       `json:"custom_commands,omitempty"`
+	JoinRequests  *managerJoinRequestSettingsDocument `json:"join_requests,omitempty"`
+}
+
+type managerGlobalSettings struct {
+	Features     settings.Features
+	JoinRequests settings.JoinRequestSettings
 }
 
 func (s *Store) GetGlobalSettings(ctx context.Context) (settings.Global, error) {
-	model, value, err := loadManagerGlobalSettings(s.db.WithContext(ctx), false)
+	model, value, err := loadManagerGlobalDocument(s.db.WithContext(ctx), false)
 	if err != nil {
 		return settings.Global{}, err
 	}
@@ -82,11 +94,11 @@ func (s *Store) GetGroupSettings(ctx context.Context, groupID string) (value set
 
 func (s *Store) LoadRuntimeSettings(ctx context.Context) (state settings.RuntimeState, err error) {
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		globalModel, globalFeatures, loadErr := loadManagerGlobalSettings(tx, false)
+		globalModel, globalValue, loadErr := loadManagerGlobalDocument(tx, false)
 		if loadErr != nil {
 			return loadErr
 		}
-		state.Global = managerGlobalFromSetting(globalModel, globalFeatures)
+		state.Global = managerGlobalFromSetting(globalModel, globalValue)
 		var models []managerFeatureSetting
 		if loadErr = tx.Where("scope_type = ? AND group_id IS NOT NULL", managerSettingsScopeGroup).
 			Order("group_id ASC").Find(&models).Error; loadErr != nil {
@@ -115,16 +127,16 @@ func (s *Store) LoadRuntimeSettings(ctx context.Context) (state settings.Runtime
 
 func (s *Store) UpdateGlobalSettings(ctx context.Context, mutation settings.UpdateGlobalMutation) (value settings.Global, err error) {
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		model, features, loadErr := loadManagerGlobalSettings(tx, true)
+		model, globalValue, loadErr := loadManagerGlobalDocument(tx, true)
 		if loadErr != nil {
 			return loadErr
 		}
 		if model.Revision != mutation.ExpectedRevision {
 			return settings.ErrConflict
 		}
-		before := encodeManagerFeaturesDocument(features)
-		features = applyManagerGlobalPatch(features, mutation.Patch)
-		encoded, encodeErr := encodeManagerFeatures(features)
+		before := encodeManagerGlobalSettingsDocument(globalValue)
+		globalValue = applyManagerGlobalSettingsPatch(globalValue, mutation.Patch)
+		encoded, encodeErr := encodeManagerGlobalSettings(globalValue)
 		if encodeErr != nil {
 			return encodeErr
 		}
@@ -159,12 +171,12 @@ func (s *Store) UpdateGlobalSettings(ctx context.Context, mutation settings.Upda
 		if auditErr := insertManagerAudit(tx, managerAuditEntry{
 			Context: auditContext, OccurredAt: updatedAt, ScopeType: managerSettingsScopeGlobal,
 			Action: "settings.global.update", TargetType: "feature_settings", TargetID: model.SettingID,
-			Result: audit.ResultSuccess, Before: before, After: encodeManagerFeaturesDocument(features),
+			Result: audit.ResultSuccess, Before: before, After: encodeManagerGlobalSettingsDocument(globalValue),
 			Metadata: map[string]any{"previous_revision": mutation.ExpectedRevision, "revision": nextRevision},
 		}); auditErr != nil {
 			return auditErr
 		}
-		value = managerGlobalFromSetting(model, features)
+		value = managerGlobalFromSetting(model, globalValue)
 		return nil
 	})
 	return value, err
@@ -333,16 +345,21 @@ func (s *Store) DeleteGroupSettings(ctx context.Context, mutation settings.Delet
 }
 
 func loadManagerGlobalSettings(tx *gorm.DB, lock bool) (managerFeatureSetting, settings.Features, error) {
+	model, value, err := loadManagerGlobalDocument(tx, lock)
+	return model, value.Features, err
+}
+
+func loadManagerGlobalDocument(tx *gorm.DB, lock bool) (managerFeatureSetting, managerGlobalSettings, error) {
 	var model managerFeatureSetting
 	query := tx.Where("scope_type = ? AND group_id IS NULL", managerSettingsScopeGlobal)
 	if lock {
 		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 	}
 	if err := query.Take(&model).Error; err != nil {
-		return managerFeatureSetting{}, settings.Features{}, err
+		return managerFeatureSetting{}, managerGlobalSettings{}, err
 	}
-	features, err := decodeManagerFeatures(model.SettingsJSON)
-	return model, features, err
+	value, err := decodeManagerGlobalSettings(model.SettingsJSON)
+	return model, value, err
 }
 
 func loadManagerGroupSetting(tx *gorm.DB, groupID int64, lock bool) (managerFeatureSetting, bool, error) {
@@ -371,9 +388,10 @@ func managerActiveGroupExists(tx *gorm.DB, groupID int64, lock bool) (bool, erro
 	return err == nil, err
 }
 
-func managerGlobalFromSetting(model managerFeatureSetting, features settings.Features) settings.Global {
+func managerGlobalFromSetting(model managerFeatureSetting, value managerGlobalSettings) settings.Global {
 	return settings.Global{
-		Features: features, Version: model.Revision, UpdatedAt: model.UpdatedAt.UTC(), UpdatedBy: managerSettingActor(model),
+		Features: value.Features, JoinRequests: value.JoinRequests,
+		Version: model.Revision, UpdatedAt: model.UpdatedAt.UTC(), UpdatedBy: managerSettingActor(model),
 	}
 }
 
@@ -450,6 +468,29 @@ func decodeManagerFeatures(raw []byte) (settings.Features, error) {
 	return features, nil
 }
 
+func decodeManagerGlobalSettings(raw []byte) (managerGlobalSettings, error) {
+	features, err := decodeManagerFeatures(raw)
+	if err != nil {
+		return managerGlobalSettings{}, err
+	}
+	var document managerSettingsDocument
+	if err := decodeManagerSettingsDocument(raw, &document); err != nil {
+		return managerGlobalSettings{}, err
+	}
+	joinRequests := settings.DefaultJoinRequestSettings()
+	if document.JoinRequests != nil {
+		if document.JoinRequests.AutoRejectReason == nil || !validManagerAutoRejectReason(*document.JoinRequests.AutoRejectReason) {
+			return managerGlobalSettings{}, errManagerInvalidState
+		}
+		joinRequests.AutoRejectReason = *document.JoinRequests.AutoRejectReason
+	}
+	return managerGlobalSettings{Features: features, JoinRequests: joinRequests}, nil
+}
+
+func validManagerAutoRejectReason(value string) bool {
+	return utf8.ValidString(value) && strings.TrimSpace(value) == value && value != "" && utf8.RuneCountInString(value) <= 500
+}
+
 func decodeManagerOverrides(raw []byte) (settings.Overrides, error) {
 	var document managerSettingsDocument
 	if err := decodeManagerSettingsDocument(raw, &document); err != nil {
@@ -505,6 +546,18 @@ func decodeManagerSettingsDocument(raw []byte, destination *managerSettingsDocum
 
 func encodeManagerFeatures(features settings.Features) ([]byte, error) {
 	return marshalManagerJSON(encodeManagerFeaturesDocument(features))
+}
+
+func encodeManagerGlobalSettings(value managerGlobalSettings) ([]byte, error) {
+	return marshalManagerJSON(encodeManagerGlobalSettingsDocument(value))
+}
+
+func encodeManagerGlobalSettingsDocument(value managerGlobalSettings) managerSettingsDocument {
+	document := encodeManagerFeaturesDocument(value.Features)
+	document.JoinRequests = &managerJoinRequestSettingsDocument{
+		AutoRejectReason: stringPointer(value.JoinRequests.AutoRejectReason),
+	}
+	return document
 }
 
 func encodeManagerFeaturesDocument(features settings.Features) managerSettingsDocument {
@@ -567,6 +620,14 @@ func applyManagerGlobalPatch(features settings.Features, patch settings.GlobalPa
 		}
 	}
 	return features
+}
+
+func applyManagerGlobalSettingsPatch(value managerGlobalSettings, patch settings.GlobalPatch) managerGlobalSettings {
+	value.Features = applyManagerGlobalPatch(value.Features, patch)
+	if patch.JoinRequests.Set && patch.JoinRequests.Value.AutoRejectReason.Set {
+		value.JoinRequests.AutoRejectReason = patch.JoinRequests.Value.AutoRejectReason.Value
+	}
+	return value
 }
 
 func applyManagerGroupPatch(overrides settings.Overrides, patch settings.GroupPatch) settings.Overrides {

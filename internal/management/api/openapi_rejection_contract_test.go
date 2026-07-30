@@ -55,6 +55,18 @@ func TestOpenAPIJoinRejectionContracts(t *testing.T) {
 	requireOpenAPIProperty(t, policyPatch, "enabled")
 	requireOpenAPIProperty(t, policyPatch, "auto_reject")
 
+	group := requireOpenAPISchema(t, spec.Components.Schemas, "Group")
+	requireOpenAPIRequired(t, group, "join_request_policy")
+	groupPolicy := requireOpenAPIProperty(t, group, "join_request_policy")
+	if groupPolicy["$ref"] != "#/components/schemas/JoinRequestPolicySummary" {
+		t.Fatalf("Group.join_request_policy ref = %v", groupPolicy["$ref"])
+	}
+	policySummary := requireOpenAPISchema(t, spec.Components.Schemas, "JoinRequestPolicySummary")
+	for _, field := range []string{"enabled", "auto_reject", "version"} {
+		requireOpenAPIRequired(t, policySummary, field)
+		requireOpenAPIProperty(t, policySummary, field)
+	}
+
 	requireOpenAPIRejectReasonUnion(t, spec.Components.Schemas, "JoinDecisionRequest")
 	requireOpenAPIRejectReasonUnion(t, spec.Components.Schemas, "BulkJoinDecisionRequest")
 

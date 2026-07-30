@@ -27,6 +27,9 @@ func TestPermissionsMatchRoleMatrix(t *testing.T) {
 	if !Allowed(RoleSuperAdmin, PermissionConfigWrite) || Allowed(RoleMaintainer, PermissionConfigWrite) || Allowed(RoleObserver, PermissionConfigWrite) {
 		t.Fatal("only super admin may write the process configuration")
 	}
+	if !Allowed(RoleSuperAdmin, PermissionJoinPoliciesWrite) || Allowed(RoleMaintainer, PermissionJoinPoliciesWrite) || Allowed(RoleObserver, PermissionJoinPoliciesWrite) {
+		t.Fatal("only super admin may write join request policies")
+	}
 }
 
 func TestPermissionMatrixExactlyCoversOpenAPIEnums(t *testing.T) {

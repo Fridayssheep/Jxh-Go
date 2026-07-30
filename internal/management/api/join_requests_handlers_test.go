@@ -48,6 +48,25 @@ func TestJoinRequestPolicyRoutesMapFixedContract(t *testing.T) {
 	}
 }
 
+func TestJoinRequestPolicyWriteRequiresVersionAndWritePermission(t *testing.T) {
+	service := &joinRequestOperationsFake{policy: joinPolicyHTTPFixture()}
+	router := newJoinRequestHTTPFixture(t, service)
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/groups/123/join-request-policy", `{"enabled":true}`)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertErrorCode(t, response, http.StatusPreconditionRequired, CodePreconditionRequired)
+
+	request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/groups/123/join-request-policy", `{"enabled":true}`)
+	request.Header.Set("If-Match", `"1"`)
+	request.Header.Set("Cookie", SessionCookieName+"=observer")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertErrorCode(t, response, http.StatusForbidden, CodeForbidden)
+	if service.calls != 0 {
+		t.Fatalf("rejected requests reached service %d times", service.calls)
+	}
+}
+
 func TestStudentIDRuleRoutesMapVersionedContract(t *testing.T) {
 	rule := studentIDRuleHTTPFixture()
 	service := &joinRequestOperationsFake{studentIDRule: rule}

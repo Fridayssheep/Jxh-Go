@@ -194,7 +194,10 @@ func TestManagerGroupMappingAppliesComputedStaleness(t *testing.T) {
 		GroupID: 123, Name: "Alpha", MemberCount: 10, MaxMemberCount: 100, BotRole: string(groups.RoleAdmin),
 		SnapshotState: string(groups.SnapshotFresh), LastSyncedAt: &lastSynced,
 	}
-	group, err := managerGroupFromModel(model, settings.DefaultFeatures(), settings.Overrides{}, false, lastSynced.Add(time.Second))
+	group, err := managerGroupFromModel(
+		model, settings.DefaultFeatures(), settings.Overrides{}, groups.JoinRequestPolicySummary{Version: 1},
+		false, lastSynced.Add(time.Second),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

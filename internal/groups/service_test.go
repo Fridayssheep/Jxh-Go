@@ -30,6 +30,16 @@ func TestListUsesEffectiveStalenessAndReturnsIndependentFeatures(t *testing.T) {
 	}
 }
 
+func TestListRejectsGroupWithoutJoinRequestPolicyVersion(t *testing.T) {
+	service, store, _, _ := newFixture(t)
+	group := groupFixture()
+	group.JoinRequestPolicy.Version = 0
+	store.page = Page{Items: []Group{group}}
+	if _, err := service.List(t.Context(), reader(), ListQuery{}); !errors.Is(err, ErrInvalidData) {
+		t.Fatalf("list error=%v", err)
+	}
+}
+
 func TestSyncPersistsValidatedDirectoryAndDegradesRoleFailures(t *testing.T) {
 	service, store, gateway, publisher := newFixture(t)
 	gateway.snapshot.Connected = true
@@ -221,6 +231,7 @@ func groupFixture() Group {
 	return Group{
 		ID: "123", Name: "Alpha", MemberCount: 10, MaxMemberCount: 100, BotRole: RoleAdmin,
 		SnapshotState: SnapshotFresh, LastSyncedAt: time.Unix(100, 0).UTC(), Features: features,
+		JoinRequestPolicy: JoinRequestPolicySummary{Enabled: true, AutoReject: false, Version: 7},
 	}
 }
 

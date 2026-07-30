@@ -66,15 +66,22 @@ type Feature struct {
 	Source  FeatureSource
 }
 
+type JoinRequestPolicySummary struct {
+	Enabled    bool
+	AutoReject bool
+	Version    uint64
+}
+
 type Group struct {
-	ID             string
-	Name           string
-	MemberCount    uint64
-	MaxMemberCount uint64
-	BotRole        Role
-	SnapshotState  SnapshotState
-	LastSyncedAt   time.Time
-	Features       []Feature
+	ID                string
+	Name              string
+	MemberCount       uint64
+	MaxMemberCount    uint64
+	BotRole           Role
+	SnapshotState     SnapshotState
+	LastSyncedAt      time.Time
+	Features          []Feature
+	JoinRequestPolicy JoinRequestPolicySummary
 }
 
 type ListQuery struct {
@@ -512,7 +519,7 @@ func validateGroup(group Group) error {
 	if !validGroupID(group.ID) || !validName(group.Name) || !validRole(group.BotRole) ||
 		(group.SnapshotState != SnapshotFresh && group.SnapshotState != SnapshotStale) || group.LastSyncedAt.IsZero() ||
 		group.LastSyncedAt.Location() != time.UTC || group.MaxMemberCount > 0 && group.MemberCount > group.MaxMemberCount ||
-		len(group.Features) != len(featureOrder) {
+		len(group.Features) != len(featureOrder) || group.JoinRequestPolicy.Version == 0 {
 		return ErrInvalidData
 	}
 	seen := make(map[FeatureKey]struct{}, len(group.Features))

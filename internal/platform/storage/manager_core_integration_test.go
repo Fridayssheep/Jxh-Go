@@ -46,7 +46,8 @@ func TestManagerCoreMySQLResourceLifecycle(t *testing.T) {
 	}
 
 	group, found, err := store.GetGroup(t.Context(), "10001")
-	if err != nil || !found || group.Name != "Integration Group" || group.BotRole != groups.RoleAdmin || len(group.Features) != 6 {
+	if err != nil || !found || group.Name != "Integration Group" || group.BotRole != groups.RoleAdmin || len(group.Features) != 6 ||
+		group.JoinRequestPolicy.Enabled || group.JoinRequestPolicy.AutoReject || group.JoinRequestPolicy.Version != 1 {
 		t.Fatalf("get group: group=%+v found=%t error=%v", group, found, err)
 	}
 	policy, found, err := store.GetPolicy(t.Context(), "10001")
@@ -141,7 +142,8 @@ func TestManagerCoreMySQLResourceLifecycle(t *testing.T) {
 	}
 
 	page, err := store.ListGroups(t.Context(), groups.StoreListQuery{ListQuery: groups.ListQuery{Limit: 10}})
-	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "10001" {
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "10001" ||
+		!page.Items[0].JoinRequestPolicy.Enabled || page.Items[0].JoinRequestPolicy.AutoReject || page.Items[0].JoinRequestPolicy.Version != 2 {
 		t.Fatalf("list groups: page=%+v error=%v", page, err)
 	}
 	data, err := store.LoadOverview(t.Context(), overview.StoreQuery{

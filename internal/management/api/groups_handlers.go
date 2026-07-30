@@ -170,15 +170,22 @@ type groupFeatureDTO struct {
 	Source  groups.FeatureSource `json:"source"`
 }
 
+type groupJoinRequestPolicyDTO struct {
+	Enabled    bool   `json:"enabled"`
+	AutoReject bool   `json:"auto_reject"`
+	Version    uint64 `json:"version"`
+}
+
 type groupDTO struct {
-	ID             string               `json:"group_id"`
-	Name           string               `json:"name"`
-	MemberCount    uint64               `json:"member_count"`
-	MaxMemberCount uint64               `json:"max_member_count"`
-	BotRole        groups.Role          `json:"bot_role"`
-	SnapshotState  groups.SnapshotState `json:"snapshot_state"`
-	LastSyncedAt   time.Time            `json:"last_synced_at"`
-	Features       []groupFeatureDTO    `json:"features"`
+	ID                string                    `json:"group_id"`
+	Name              string                    `json:"name"`
+	MemberCount       uint64                    `json:"member_count"`
+	MaxMemberCount    uint64                    `json:"max_member_count"`
+	BotRole           groups.Role               `json:"bot_role"`
+	SnapshotState     groups.SnapshotState      `json:"snapshot_state"`
+	LastSyncedAt      time.Time                 `json:"last_synced_at"`
+	Features          []groupFeatureDTO         `json:"features"`
+	JoinRequestPolicy groupJoinRequestPolicyDTO `json:"join_request_policy"`
 }
 
 type groupListDTO struct {
@@ -203,6 +210,10 @@ func mapGroup(value groups.Group) groupDTO {
 	return groupDTO{
 		ID: value.ID, Name: value.Name, MemberCount: value.MemberCount, MaxMemberCount: value.MaxMemberCount,
 		BotRole: value.BotRole, SnapshotState: value.SnapshotState, LastSyncedAt: value.LastSyncedAt.UTC(), Features: features,
+		JoinRequestPolicy: groupJoinRequestPolicyDTO{
+			Enabled: value.JoinRequestPolicy.Enabled, AutoReject: value.JoinRequestPolicy.AutoReject,
+			Version: value.JoinRequestPolicy.Version,
+		},
 	}
 }
 

@@ -21,7 +21,11 @@ func TestGroupListMapsFiltersAndContractDTO(t *testing.T) {
 	if response.Code != http.StatusOK || service.query.Limit != 25 || service.query.FeatureEnabled == nil || !*service.query.FeatureEnabled {
 		t.Fatalf("status=%d query=%+v body=%s", response.Code, service.query, response.Body.String())
 	}
-	for _, expected := range []string{`"group_id":"00123"`, `"snapshot_state":"fresh"`, `"source":"group_override"`, `"next_cursor":"cursor_2"`} {
+	for _, expected := range []string{
+		`"group_id":"00123"`, `"snapshot_state":"fresh"`, `"source":"group_override"`,
+		`"join_request_policy":{"enabled":true,"auto_reject":false,"version":7}`,
+		`"next_cursor":"cursor_2"`,
+	} {
 		if !strings.Contains(response.Body.String(), expected) {
 			t.Fatalf("body missing %s: %s", expected, response.Body.String())
 		}
@@ -124,6 +128,7 @@ func groupHTTPFixture() groups.Group {
 		ID: "00123", Name: "Alpha", MemberCount: 10, MaxMemberCount: 100, BotRole: groups.RoleAdmin,
 		SnapshotState: groups.SnapshotFresh, LastSyncedAt: time.Unix(100, 0).UTC(),
 		Features: []groups.Feature{{Key: groups.FeatureAIQA, Enabled: true, Source: groups.FeatureGroupOverride}},
+		JoinRequestPolicy: groups.JoinRequestPolicySummary{Enabled: true, AutoReject: false, Version: 7},
 	}
 }
 

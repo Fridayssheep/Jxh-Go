@@ -68,10 +68,16 @@ func (s *Store) ListGroups(ctx context.Context, query groups.StoreListQuery) (pa
 		if loadErr != nil {
 			return loadErr
 		}
+		policiesByGroup, loadErr := loadManagerJoinPolicySummaries(tx, models)
+		if loadErr != nil {
+			return loadErr
+		}
 		items := make([]groups.Group, 0, len(models))
 		for _, model := range models {
 			overrides := overridesByGroup[model.GroupID]
-			item, mapErr := managerGroupFromModel(model, globalFeatures, overrides, query.ForceStale, query.StaleBefore)
+			item, mapErr := managerGroupFromModel(
+				model, globalFeatures, overrides, policiesByGroup[model.GroupID], query.ForceStale, query.StaleBefore,
+			)
 			if mapErr != nil {
 				return mapErr
 			}
@@ -130,7 +136,13 @@ func (s *Store) GetGroup(ctx context.Context, id string) (value groups.Group, fo
 				return loadErr
 			}
 		}
-		value, loadErr = managerGroupFromModel(model, globalFeatures, overrides, false, time.Time{})
+		policiesByGroup, loadErr := loadManagerJoinPolicySummaries(tx, []managerManagedGroup{model})
+		if loadErr != nil {
+			return loadErr
+		}
+		value, loadErr = managerGroupFromModel(
+			model, globalFeatures, overrides, policiesByGroup[model.GroupID], false, time.Time{},
+		)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -471,14 +483,48 @@ func loadManagerGroupOverrides(tx *gorm.DB, models []managerManagedGroup) (map[i
 	return result, nil
 }
 
+func loadManagerJoinPolicySummaries(
+	tx *gorm.DB,
+	models []managerManagedGroup,
+) (map[int64]groups.JoinRequestPolicySummary, error) {
+	result := make(map[int64]groups.JoinRequestPolicySummary, len(models))
+	if len(models) == 0 {
+		return result, nil
+	}
+	ids := make([]int64, len(models))
+	for index, model := range models {
+		ids[index] = model.GroupID
+	}
+	var rows []joinPolicyManagerRow
+	if err := tx.Where("group_id IN ?", ids).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.GroupID <= 0 || row.Revision == 0 {
+			return nil, errManagerInvalidState
+		}
+		if _, duplicate := result[row.GroupID]; duplicate {
+			return nil, errManagerInvalidState
+		}
+		result[row.GroupID] = groups.JoinRequestPolicySummary{
+			Enabled: row.Enabled, AutoReject: row.AutoReject, Version: row.Revision,
+		}
+	}
+	if len(result) != len(models) {
+		return nil, errManagerInvalidState
+	}
+	return result, nil
+}
+
 func managerGroupFromModel(
 	model managerManagedGroup,
 	global settings.Features,
 	overrides settings.Overrides,
+	joinRequestPolicy groups.JoinRequestPolicySummary,
 	forceStale bool,
 	staleBefore time.Time,
 ) (groups.Group, error) {
-	if model.GroupID <= 0 || model.LastSyncedAt == nil || model.LastSyncedAt.IsZero() {
+	if model.GroupID <= 0 || model.LastSyncedAt == nil || model.LastSyncedAt.IsZero() || joinRequestPolicy.Version == 0 {
 		return groups.Group{}, errManagerInvalidState
 	}
 	state := groups.SnapshotState(model.SnapshotState)
@@ -493,6 +539,7 @@ func managerGroupFromModel(
 		ID: strconv.FormatInt(model.GroupID, 10), Name: model.Name, MemberCount: model.MemberCount,
 		MaxMemberCount: model.MaxMemberCount, BotRole: groups.Role(model.BotRole), SnapshotState: state,
 		LastSyncedAt: lastSyncedAt, Features: managerGroupFeatures(global, overrides),
+		JoinRequestPolicy: joinRequestPolicy,
 	}, nil
 }
 

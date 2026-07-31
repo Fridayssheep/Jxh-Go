@@ -124,6 +124,7 @@ services:
     ports:
       - "${WEB_PORT:-8080}:80"
     networks:
+      - edge
       - manager
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
@@ -133,5 +134,6 @@ services:
       start_period: 5s
 
 networks:
+  edge:
   manager:
     internal: true

@@ -31,7 +31,7 @@ Jxh-Go 是精弘 QQ 群助手的 Go 重构版本，面向浙江工业大学相�
 
 ### 1. 准备依赖
 
-本地使用 compose 部署只需要 Docker Compose；如果需要本地运行/调试 bot（make run / go run），还需要 Go 1.25+。`docker-compose.yaml` 会一次启动 MySQL、NapCat、引用图服务和 bot。
+本地使用 compose 部署只需要 Docker Compose；如果需要本地运行/调试 bot（make run / go run），还需要 Go 1.25+。`docker-compose.yaml` 会一次启动 MySQL、NapCat、引用图服务、bot 和前端管理面板。
 
 ### 2. 准备配置
 
@@ -67,18 +67,37 @@ make compose-up
 NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up -d --build
 ```
 
-compose 会同时启动 MySQL、NapCat、quote 和 bot。
+compose 会同时启动 MySQL、NapCat、quote、bot 和 frontend。
 
 Compose 会把运行配置保存在 `./data/config/config.yaml`。首次启动时 entrypoint 会从镜像内模板初始化该文件，后续启动不会覆盖管理面板写入的设置；bot 收到受控重启请求后以退出码 75 结束，由 `restart: unless-stopped` 自动拉起。
 
-管理 API 默认监听 `http://127.0.0.1:8090/api/admin/v1`。首次使用前执行迁移并创建唯一的首个超级管理员：
+管理面板默认访问地址是 `http://localhost:8080`。frontend 容器中的 Nginx 会把 `/api/admin/v1` 同源转发到 Compose 内部的 `bot:8090`；后端管理端口不再发布到宿主机。Compose 的 migrate 服务会在 bot 启动前自动应用迁移，随后可在 bot 容器内创建唯一的首个超级管理员：
 
 ```bash
-make migrate
-printf '%s\n' 'replace-with-a-strong-password' | go run ./cmd/admin-bootstrap -config config.yaml -username admin -display-name 管理员 -password-stdin
+printf '%s\n' 'replace-with-a-strong-password' | docker compose exec -T bot \
+  jxh-admin-bootstrap -config /app/config/config.yaml \
+  -username admin -display-name 管理员 -password-stdin
 ```
 
-密码不会出现在命令参数中；生产环境优先直接运行命令并通过终端隐藏输入。创建成功后该命令会拒绝再次引导，后续账号统一由管理 API 创建。
+密码不会作为 `jxh-admin-bootstrap` 的命令参数传入；示例中的明文只作占位，生产部署应从不回显的密钥输入或 secret 管理器写入标准输入。创建成功后该命令会拒绝再次引导，后续账号统一由管理 API 创建。
+
+本地 HTTP 使用 `.env.example` 中的默认组合：
+
+```dotenv
+WEB_PORT=8080
+JXH_ADMIN_PUBLIC_ORIGIN=http://localhost:8080
+JXH_ADMIN_COOKIE_SECURE=false
+```
+
+生产环境由宿主机反向代理终止 TLS，并把请求转发到 `127.0.0.1:${WEB_PORT}`；对应配置必须改为浏览器实际访问的 HTTPS Origin：
+
+```dotenv
+WEB_PORT=8080
+JXH_ADMIN_PUBLIC_ORIGIN=https://manager.example.com
+JXH_ADMIN_COOKIE_SECURE=true
+```
+
+修改 `WEB_PORT` 后必须同步修改 `JXH_ADMIN_PUBLIC_ORIGIN` 中的端口。后端默认不信任客户端提供的 `X-Forwarded-For`；需要记录真实客户端地址时，通过 `JXH_ADMIN_TRUSTED_PROXIES` 明确配置实际反向代理 CIDR，不要直接信任全部私网或公网地址。
 
 持久化数据默认放在仓库根目录的 `./data/` 下，便于直接打包备份和迁移。
 
@@ -215,6 +234,10 @@ bot 只处理明确 @bot 的 `/admin` 命令，并会在每次执行 `/admin` �
 | `JXH_MYSQL_PASSWORD` | bot 直连运行时的 MySQL 密码；compose 部署通常用 `MYSQL_PASSWORD` |
 | `JXH_MYSQL_DSN` | 完整 MySQL DSN，设置后优先使用 |
 | `PUID` / `PGID` | Compose 中 bot 进程使用的 UID/GID，NAS 挂载目录可据此匹配宿主权限 |
+| `WEB_PORT` | frontend 容器发布到宿主机的管理面板端口，默认 `8080` |
+| `JXH_ADMIN_PUBLIC_ORIGIN` | 浏览器访问管理面板的唯一 Origin，必须与协议、域名和端口完全一致 |
+| `JXH_ADMIN_COOKIE_SECURE` | 是否只通过 HTTPS 发送管理会话 Cookie；生产环境必须为 `true` |
+| `JXH_ADMIN_TRUSTED_PROXIES` | 可选的受信反向代理 CIDR，多个值使用逗号分隔 |
 | `JXH_BOT_RESTART_MODE` | Bot 重启模式；仅在 Docker/systemd 等进程监督器下使用 `supervised_exit`，Compose 已自动设置 |
 | `JXH_AI_PROVIDER` | ChatModel 提供方，支持 `openai`、`ark` |
 | `JXH_AI_BASE_URL` | ChatModel base URL |
@@ -294,6 +317,8 @@ make compose-logs  # 查看 compose 日志
 | `deploy/mysql/migrations` | 已有部署按顺序手工执行的 schema 迁移 SQL |
 | `data/` | MySQL、NapCat、bot 和 WPS 缓存的持久化根目录 |
 | `Dockerfile` | bot 容器镜像构建文件 |
-| `docker-compose.yaml` | MySQL、NapCat、quote 和 bot 的完整 compose |
+| `docker-compose.yaml` | MySQL、NapCat、quote、bot 和 frontend 的完整 compose |
+| `../../jxh-manager/Dockerfile` | Vue 管理面板的多阶段生产镜像构建文件 |
+| `../../jxh-manager/nginx.conf` | SPA 静态服务、管理 API 代理和 SSE 转发配置 |
 
 `internal/README.md` 记录各功能目录的职责和新增包放置规则。

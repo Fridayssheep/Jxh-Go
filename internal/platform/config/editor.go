@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -13,12 +14,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/gofrs/flock"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	SecretPlaceholder        = "__JXH_SECRET_UNCHANGED__"
 	maxEditableDocumentBytes = 1 << 20
 	maxJavaScriptSafeInteger = uint64(1<<53 - 1)
 )
@@ -29,69 +31,20 @@ var (
 	ErrVersionConflict = errors.New("config version conflict")
 )
 
-type EditableDocument struct {
-	YAML                 string
-	Version              uint64
-	MaskedFields         []string
-	EnvironmentOverrides []string
-}
-
 type FileEditor struct {
 	path string
 	mu   sync.Mutex
 }
 
-var sensitiveConfigFields = [][]string{
-	{"admin", "session_secret"},
-	{"ai", "api_key"},
-	{"database", "dsn"},
-	{"database", "password"},
-	{"onebot", "access_token"},
-	{"wps", "share_url"},
-	{"wps", "sid"},
-}
-
-var environmentConfigFields = map[string]string{
-	"JXH_ADMIN_ADDR":                          "admin.addr",
-	"JXH_ADMIN_COOKIE_SECURE":                 "admin.cookie_secure",
-	"JXH_ADMIN_IDLE_TIMEOUT_SECONDS":          "admin.idle_timeout_seconds",
-	"JXH_ADMIN_LOGIN_MAX_ATTEMPTS":            "admin.login_max_attempts",
-	"JXH_ADMIN_LOGIN_WINDOW_SECONDS":          "admin.login_window_seconds",
-	"JXH_ADMIN_MAX_CONCURRENT_REQUESTS":       "admin.max_concurrent_requests",
-	"JXH_ADMIN_MAX_REQUEST_BODY_BYTES":        "admin.max_request_body_bytes",
-	"JXH_ADMIN_PUBLIC_ORIGIN":                 "admin.public_origin",
-	"JXH_ADMIN_READ_HEADER_TIMEOUT_SECONDS":   "admin.read_header_timeout_seconds",
-	"JXH_ADMIN_READ_TIMEOUT_SECONDS":          "admin.read_timeout_seconds",
-	"JXH_ADMIN_SESSION_IDLE_TIMEOUT_SECONDS":  "admin.session_idle_timeout_seconds",
-	"JXH_ADMIN_SESSION_SECRET":                "admin.session_secret",
-	"JXH_ADMIN_SESSION_TTL_SECONDS":           "admin.session_ttl_seconds",
-	"JXH_ADMIN_SHUTDOWN_TIMEOUT_SECONDS":      "admin.shutdown_timeout_seconds",
-	"JXH_ADMIN_TRUSTED_PROXIES":               "admin.trusted_proxies",
-	"JXH_ADMIN_WRITE_TIMEOUT_SECONDS":         "admin.write_timeout_seconds",
-	"JXH_AI_API_KEY":                          "ai.api_key",
-	"JXH_AI_BASE_URL":                         "ai.base_url",
-	"JXH_AI_MODEL":                            "ai.model",
-	"JXH_AI_PROVIDER":                         "ai.provider",
-	"JXH_DATABASE_CHARSET":                    "database.charset",
-	"JXH_DATABASE_CONN_MAX_IDLE_TIME_SECONDS": "database.conn_max_idle_time_seconds",
-	"JXH_DATABASE_CONN_MAX_LIFETIME_SECONDS":  "database.conn_max_lifetime_seconds",
-	"JXH_DATABASE_HOST":                       "database.host",
-	"JXH_DATABASE_LOC":                        "database.loc",
-	"JXH_DATABASE_MAX_IDLE_CONNS":             "database.max_idle_conns",
-	"JXH_DATABASE_MAX_OPEN_CONNS":             "database.max_open_conns",
-	"JXH_DATABASE_NAME":                       "database.name",
-	"JXH_DATABASE_PARSE_TIME":                 "database.parse_time",
-	"JXH_DATABASE_PING_TIMEOUT_SECONDS":       "database.ping_timeout_seconds",
-	"JXH_DATABASE_PORT":                       "database.port",
-	"JXH_DATABASE_USER":                       "database.user",
-	"JXH_MYSQL_DSN":                           "database.dsn",
-	"JXH_MYSQL_PASSWORD":                      "database.password",
-	"JXH_ONEBOT_TOKEN":                        "onebot.access_token",
-	"JXH_ONEBOT_WS_URL":                       "onebot.ws_url",
-	"JXH_QUOTE_BASE_URL":                      "quote.base_url",
-	"JXH_WPS_SHARE_URL":                       "wps.share_url",
-	"JXH_WPS_SID":                             "wps.sid",
-	"JXH_WPS_TIMEOUT_SEC":                     "wps.timeout_sec",
+var editableEnvironmentFields = map[string]string{
+	"JXH_AI_API_KEY":      "ai.api_key",
+	"JXH_AI_BASE_URL":     "ai.base_url",
+	"JXH_AI_MODEL":        "ai.model",
+	"JXH_AI_PROVIDER":     "ai.provider",
+	"JXH_QUOTE_BASE_URL":  "quote.base_url",
+	"JXH_WPS_SHARE_URL":   "wps.share_url",
+	"JXH_WPS_SID":         "wps.sid",
+	"JXH_WPS_TIMEOUT_SEC": "wps.timeout_sec",
 }
 
 func NewFileEditor(path string) (*FileEditor, error) {
@@ -105,71 +58,372 @@ func NewFileEditor(path string) (*FileEditor, error) {
 	return &FileEditor{path: absolute}, nil
 }
 
-func (e *FileEditor) Read() (EditableDocument, error) {
+func (e *FileEditor) Read(ctx context.Context) (Settings, error) {
 	if e == nil {
-		return EditableDocument{}, ErrInvalidEditor
+		return Settings{}, ErrInvalidEditor
+	}
+	if err := ctx.Err(); err != nil {
+		return Settings{}, err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.readLocked()
 }
 
-func (e *FileEditor) Update(expectedVersion uint64, candidate string) (EditableDocument, error) {
-	if e == nil || expectedVersion == 0 || len(candidate) == 0 || len(candidate) > maxEditableDocumentBytes {
-		return EditableDocument{}, ErrInvalidDocument
+func (e *FileEditor) Update(ctx context.Context, expectedVersion uint64, patch SettingsPatch) (Settings, []string, error) {
+	if e == nil {
+		return Settings{}, nil, ErrInvalidEditor
 	}
+	if expectedVersion == 0 {
+		return Settings{}, nil, ErrInvalidDocument
+	}
+	if err := validatePatch(patch); err != nil {
+		return Settings{}, nil, err
+	}
+	if managed := managedPatchFields(patch); len(managed) != 0 {
+		return Settings{}, nil, &ManagedFieldsError{Fields: managed}
+	}
+	if err := ctx.Err(); err != nil {
+		return Settings{}, nil, err
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	currentBytes, err := os.ReadFile(e.path)
+	fileLock := flock.New(e.path + ".lock")
+	lockContext, cancelLock := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelLock()
+	locked, err := fileLock.TryLockContext(lockContext, 100*time.Millisecond)
 	if err != nil {
-		return EditableDocument{}, fmt.Errorf("read config file: %w", err)
+		return Settings{}, nil, fmt.Errorf("lock config file: %w", err)
+	}
+	if !locked {
+		return Settings{}, nil, fmt.Errorf("lock config file: %w", context.DeadlineExceeded)
+	}
+	defer func() { _ = fileLock.Unlock() }()
+
+	currentBytes, err := readConfigDocument(e.path)
+	if err != nil {
+		return Settings{}, nil, err
 	}
 	if versionFor(currentBytes) != expectedVersion {
-		return EditableDocument{}, ErrVersionConflict
+		return Settings{}, nil, ErrVersionConflict
 	}
-	currentNode, err := decodeYAMLDocument(currentBytes)
+	document, err := decodeYAMLDocument(currentBytes)
 	if err != nil {
-		return EditableDocument{}, fmt.Errorf("decode current config: %w", err)
+		return Settings{}, nil, ErrInvalidDocument
 	}
-	candidateNode, err := decodeYAMLDocument([]byte(candidate))
+	changed, err := applySettingsPatch(document, patch)
 	if err != nil {
-		return EditableDocument{}, ErrInvalidDocument
+		return Settings{}, nil, err
 	}
-	if err := restoreSecrets(candidateNode, currentNode); err != nil {
-		return EditableDocument{}, ErrInvalidDocument
+	if len(changed) == 0 {
+		settings, readErr := settingsFromDocument(e.path, currentBytes)
+		return settings, nil, readErr
 	}
-	restored, err := yaml.Marshal(candidateNode)
-	if err != nil || bytes.Contains(restored, []byte(SecretPlaceholder)) || validateStrictDocument(restored) != nil {
-		return EditableDocument{}, ErrInvalidDocument
+
+	candidate, err := yaml.Marshal(document)
+	if err != nil || len(candidate) == 0 || len(candidate) > maxEditableDocumentBytes {
+		return Settings{}, nil, ErrInvalidDocument
 	}
-	if err := replaceFileAtomic(e.path, restored); err != nil {
-		return EditableDocument{}, fmt.Errorf("replace config file: %w", err)
+	if err := validateStrictDocument(candidate); err != nil {
+		return Settings{}, nil, ErrInvalidDocument
 	}
-	return e.readLocked()
+	if _, err := settingsFromDocument(e.path, candidate); err != nil {
+		return Settings{}, nil, err
+	}
+	latestBytes, err := readConfigDocument(e.path)
+	if err != nil {
+		return Settings{}, nil, err
+	}
+	if versionFor(latestBytes) != expectedVersion {
+		return Settings{}, nil, ErrVersionConflict
+	}
+	if err := replaceFileAtomic(e.path, candidate); err != nil {
+		return Settings{}, nil, fmt.Errorf("replace config file: %w", err)
+	}
+	settings, err := e.readLocked()
+	if err != nil {
+		return Settings{}, nil, err
+	}
+	return settings, changed, nil
 }
 
-func (e *FileEditor) readLocked() (EditableDocument, error) {
-	raw, err := os.ReadFile(e.path)
+func (e *FileEditor) readLocked() (Settings, error) {
+	raw, err := readConfigDocument(e.path)
 	if err != nil {
-		return EditableDocument{}, fmt.Errorf("read config file: %w", err)
+		return Settings{}, err
+	}
+	return settingsFromDocument(e.path, raw)
+}
+
+func readConfigDocument(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config file: %w", err)
 	}
 	if len(raw) == 0 || len(raw) > maxEditableDocumentBytes {
-		return EditableDocument{}, ErrInvalidDocument
+		return nil, ErrInvalidDocument
 	}
+	return raw, nil
+}
+
+func settingsFromDocument(path string, raw []byte) (Settings, error) {
 	document, err := decodeYAMLDocument(raw)
 	if err != nil || validateStrictDocument(raw) != nil {
-		return EditableDocument{}, ErrInvalidDocument
+		return Settings{}, ErrInvalidDocument
 	}
-	masked := maskSecrets(document)
-	encoded, err := yaml.Marshal(document)
+	cfg, err := loadConfigBytes(path, raw)
 	if err != nil {
-		return EditableDocument{}, fmt.Errorf("encode editable config: %w", err)
+		return Settings{}, ErrInvalidDocument
 	}
-	return EditableDocument{
-		YAML: string(encoded), Version: versionFor(raw), MaskedFields: masked,
-		EnvironmentOverrides: activeEnvironmentOverrides(),
-	}, nil
+	overrides := activeEditableEnvironmentOverrides()
+	settings := Settings{
+		WPS: WPSSettings{
+			ShareURL:   secretState(cfg.WPS.ShareURL, document, []string{"wps", "share_url"}, "JXH_WPS_SHARE_URL"),
+			SID:        secretState(cfg.WPS.SID, document, []string{"wps", "sid"}, "JXH_WPS_SID"),
+			Sheet:      cfg.WPS.Sheet,
+			TimeoutSec: cfg.WPS.TimeoutSec,
+		},
+		AI: AISettings{
+			Provider:         cfg.AI.Provider,
+			BaseURL:          cfg.AI.BaseURL,
+			APIKey:           secretState(cfg.AI.APIKey, document, []string{"ai", "api_key"}, "JXH_AI_API_KEY"),
+			Model:            cfg.AI.Model,
+			TimeoutSec:       cfg.AI.TimeoutSec,
+			MaxQuestionChars: cfg.AI.MaxQuestionChars,
+		},
+		Quote:                QuoteSettings{BaseURL: cfg.Quote.BaseURL, TimeoutSec: cfg.Quote.TimeoutSec},
+		Time:                 TimeSettings{AppTimezone: cfg.App.Timezone, SchedulerTimezone: cfg.Scheduler.Timezone},
+		Retention:            RetentionSettings{TriggerLogRetentionDays: cfg.Database.TriggerLogRetentionDays},
+		EnvironmentOverrides: overrides,
+		Version:              versionFor(raw),
+	}
+	if err := validateEffectiveSettings(settings); err != nil {
+		return Settings{}, err
+	}
+	if err := validateEffectiveSecrets(cfg); err != nil {
+		return Settings{}, err
+	}
+	return settings, nil
+}
+
+func secretState(effective string, document *yaml.Node, path []string, environmentKey string) SecretState {
+	if value, exists := os.LookupEnv(environmentKey); exists && value != "" {
+		return SecretState{Configured: effective != "", Source: SourceEnvironment}
+	}
+	if valueAtPath(document, path) != nil {
+		return SecretState{Configured: effective != "", Source: SourceFile}
+	}
+	return SecretState{Configured: effective != "", Source: SourceDefault}
+}
+
+func validateEffectiveSettings(settings Settings) error {
+	patch := SettingsPatch{
+		WPS: &WPSSettingsPatch{Sheet: &settings.WPS.Sheet, TimeoutSec: &settings.WPS.TimeoutSec},
+		AI: &AISettingsPatch{
+			Provider: &settings.AI.Provider, BaseURL: &settings.AI.BaseURL, Model: &settings.AI.Model,
+			TimeoutSec: &settings.AI.TimeoutSec, MaxQuestionChars: &settings.AI.MaxQuestionChars,
+		},
+		Quote:     &QuoteSettingsPatch{BaseURL: &settings.Quote.BaseURL, TimeoutSec: &settings.Quote.TimeoutSec},
+		Time:      &TimeSettingsPatch{AppTimezone: &settings.Time.AppTimezone, SchedulerTimezone: &settings.Time.SchedulerTimezone},
+		Retention: &RetentionSettingsPatch{TriggerLogRetentionDays: &settings.Retention.TriggerLogRetentionDays},
+	}
+	return validatePatch(patch)
+}
+
+func validateEffectiveSecrets(cfg Config) error {
+	fields := make([]FieldError, 0, 3)
+	if cfg.WPS.ShareURL != "" && (len([]rune(cfg.WPS.ShareURL)) > 2048 || !validHTTPURL(cfg.WPS.ShareURL, true)) {
+		fields = append(fields, FieldError{Path: "wps.share_url", Code: "invalid_url"})
+	}
+	if len([]rune(cfg.WPS.SID)) > 4096 {
+		fields = append(fields, FieldError{Path: "wps.sid", Code: "invalid_length"})
+	}
+	if len([]rune(cfg.AI.APIKey)) > 8192 {
+		fields = append(fields, FieldError{Path: "ai.api_key", Code: "invalid_length"})
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return &ValidationError{Fields: fields}
+}
+
+func managedPatchFields(patch SettingsPatch) []string {
+	active := activeEditableEnvironmentOverrides()
+	if len(active) == 0 {
+		return nil
+	}
+	managed := make(map[string]struct{}, len(active))
+	for _, path := range active {
+		managed[path] = struct{}{}
+	}
+	result := make([]string, 0)
+	for _, path := range patch.Paths() {
+		if _, exists := managed[path]; exists {
+			result = append(result, path)
+		}
+	}
+	return result
+}
+
+func activeEditableEnvironmentOverrides() []string {
+	result := make([]string, 0, len(editableEnvironmentFields))
+	for key, field := range editableEnvironmentFields {
+		if value, exists := os.LookupEnv(key); exists && value != "" {
+			result = append(result, field)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+func applySettingsPatch(document *yaml.Node, patch SettingsPatch) ([]string, error) {
+	changed := make([]string, 0, len(patch.Paths()))
+	set := func(path string, value any) error {
+		wasChanged, err := setYAMLValue(document, strings.Split(path, "."), value)
+		if err == nil && wasChanged {
+			changed = append(changed, path)
+		}
+		return err
+	}
+	setSecret := func(path string, update *SecretUpdate) error {
+		if update == nil {
+			return nil
+		}
+		if update.Operation == SecretClear {
+			return set(path, "")
+		}
+		return set(path, update.Value)
+	}
+	if value := patch.WPS; value != nil {
+		if err := setSecret("wps.share_url", value.ShareURL); err != nil {
+			return nil, err
+		}
+		if err := setSecret("wps.sid", value.SID); err != nil {
+			return nil, err
+		}
+		if value.Sheet != nil {
+			if err := set("wps.sheet", strings.TrimSpace(*value.Sheet)); err != nil {
+				return nil, err
+			}
+		}
+		if value.TimeoutSec != nil {
+			if err := set("wps.timeout_sec", *value.TimeoutSec); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if value := patch.AI; value != nil {
+		for _, item := range []struct {
+			path  string
+			value any
+			set   bool
+		}{
+			{"ai.provider", dereference(value.Provider), value.Provider != nil},
+			{"ai.base_url", dereference(value.BaseURL), value.BaseURL != nil},
+			{"ai.model", dereference(value.Model), value.Model != nil},
+			{"ai.timeout_sec", dereference(value.TimeoutSec), value.TimeoutSec != nil},
+			{"ai.max_question_chars", dereference(value.MaxQuestionChars), value.MaxQuestionChars != nil},
+		} {
+			if item.set {
+				if err := set(item.path, item.value); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if err := setSecret("ai.api_key", value.APIKey); err != nil {
+			return nil, err
+		}
+	}
+	if value := patch.Quote; value != nil {
+		if value.BaseURL != nil {
+			if err := set("quote.base_url", *value.BaseURL); err != nil {
+				return nil, err
+			}
+		}
+		if value.TimeoutSec != nil {
+			if err := set("quote.timeout_sec", *value.TimeoutSec); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if value := patch.Time; value != nil {
+		if value.AppTimezone != nil {
+			if err := set("app.timezone", *value.AppTimezone); err != nil {
+				return nil, err
+			}
+		}
+		if value.SchedulerTimezone != nil {
+			if err := set("scheduler.timezone", *value.SchedulerTimezone); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if value := patch.Retention; value != nil && value.TriggerLogRetentionDays != nil {
+		if err := set("database.trigger_log_retention_days", *value.TriggerLogRetentionDays); err != nil {
+			return nil, err
+		}
+	}
+	sort.Strings(changed)
+	return changed, nil
+}
+
+func dereference[T any](value *T) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func setYAMLValue(document *yaml.Node, path []string, value any) (bool, error) {
+	if document == nil || len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode || len(path) == 0 {
+		return false, ErrInvalidDocument
+	}
+	current := document.Content[0]
+	for _, segment := range path[:len(path)-1] {
+		next := mappingValue(current, segment)
+		if next == nil {
+			current.Content = append(current.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: segment},
+				&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"},
+			)
+			next = current.Content[len(current.Content)-1]
+		}
+		if next.Kind != yaml.MappingNode {
+			return false, ErrInvalidDocument
+		}
+		current = next
+	}
+	leaf := path[len(path)-1]
+	next := mappingValue(current, leaf)
+	if next == nil {
+		current.Content = append(current.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: leaf})
+		next = &yaml.Node{}
+		current.Content = append(current.Content, next)
+	}
+	var replacement yaml.Node
+	if err := replacement.Encode(value); err != nil {
+		return false, err
+	}
+	if next.Kind == replacement.Kind && next.Tag == replacement.Tag && next.Value == replacement.Value {
+		return false, nil
+	}
+	comments := [3]string{next.HeadComment, next.LineComment, next.FootComment}
+	*next = replacement
+	next.HeadComment, next.LineComment, next.FootComment = comments[0], comments[1], comments[2]
+	return true, nil
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
 }
 
 func decodeYAMLDocument(data []byte) (*yaml.Node, error) {
@@ -202,75 +456,18 @@ func validateStrictDocument(data []byte) error {
 	return nil
 }
 
-func maskSecrets(document *yaml.Node) []string {
-	masked := make([]string, 0, len(sensitiveConfigFields))
-	for _, path := range sensitiveConfigFields {
-		value := valueAtPath(document, path)
-		if value == nil || value.Kind != yaml.ScalarNode || value.Value == "" {
-			continue
-		}
-		value.Tag = "!!str"
-		value.Value = SecretPlaceholder
-		value.Style = 0
-		masked = append(masked, strings.Join(path, "."))
-	}
-	return masked
-}
-
-func restoreSecrets(candidate, current *yaml.Node) error {
-	for _, path := range sensitiveConfigFields {
-		value := valueAtPath(candidate, path)
-		if value == nil || value.Kind != yaml.ScalarNode || value.Value != SecretPlaceholder {
-			continue
-		}
-		prior := valueAtPath(current, path)
-		if prior == nil || prior.Kind != yaml.ScalarNode {
-			return ErrInvalidDocument
-		}
-		*value = *prior
-	}
-	return nil
-}
-
 func valueAtPath(document *yaml.Node, path []string) *yaml.Node {
 	if document == nil || len(document.Content) != 1 {
 		return nil
 	}
 	current := document.Content[0]
 	for _, segment := range path {
-		if current.Kind != yaml.MappingNode {
+		current = mappingValue(current, segment)
+		if current == nil {
 			return nil
 		}
-		var next *yaml.Node
-		for index := 0; index+1 < len(current.Content); index += 2 {
-			if current.Content[index].Value == segment {
-				next = current.Content[index+1]
-				break
-			}
-		}
-		if next == nil {
-			return nil
-		}
-		current = next
 	}
 	return current
-}
-
-func activeEnvironmentOverrides() []string {
-	result := make([]string, 0)
-	seen := make(map[string]struct{})
-	for key, field := range environmentConfigFields {
-		if value, exists := os.LookupEnv(key); !exists || value == "" {
-			continue
-		}
-		if _, exists := seen[field]; exists {
-			continue
-		}
-		seen[field] = struct{}{}
-		result = append(result, field)
-	}
-	sort.Strings(result)
-	return result
 }
 
 func versionFor(data []byte) uint64 {
@@ -335,6 +532,4 @@ func replaceFileAtomic(path string, data []byte) (err error) {
 	return err
 }
 
-func restrictedFileMode(mode os.FileMode) os.FileMode {
-	return mode.Perm() & 0o600
-}
+func restrictedFileMode(mode os.FileMode) os.FileMode { return mode.Perm() & 0o600 }

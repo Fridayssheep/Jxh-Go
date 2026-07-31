@@ -10,16 +10,25 @@ import (
 )
 
 type Config struct {
-	SourcePath string          `yaml:"-"`
-	App        AppConfig       `yaml:"app"`
-	Admin      AdminConfig     `yaml:"admin"`
-	OneBot     OneBotConfig    `yaml:"onebot"`
-	WPS        WPSConfig       `yaml:"wps"`
-	Database   DatabaseConfig  `yaml:"database"`
-	AI         AIConfig        `yaml:"ai"`
-	Quote      QuoteConfig     `yaml:"quote"`
-	Scheduler  SchedulerConfig `yaml:"scheduler"`
+	SourcePath     string          `yaml:"-"`
+	SourceVersion  uint64          `yaml:"-"`
+	BotRestartMode BotRestartMode  `yaml:"-"`
+	App            AppConfig       `yaml:"app"`
+	Admin          AdminConfig     `yaml:"admin"`
+	OneBot         OneBotConfig    `yaml:"onebot"`
+	WPS            WPSConfig       `yaml:"wps"`
+	Database       DatabaseConfig  `yaml:"database"`
+	AI             AIConfig        `yaml:"ai"`
+	Quote          QuoteConfig     `yaml:"quote"`
+	Scheduler      SchedulerConfig `yaml:"scheduler"`
 }
+
+type BotRestartMode string
+
+const (
+	BotRestartDisabled       BotRestartMode = "disabled"
+	BotRestartSupervisedExit BotRestartMode = "supervised_exit"
+)
 
 type AppConfig struct {
 	Timezone string `yaml:"timezone"`
@@ -99,16 +108,25 @@ type SchedulerConfig struct {
 }
 
 func Load(path string) (Config, error) {
-	cfg := Default()
-	cfg.SourcePath = path
+	var data []byte
+	var err error
 	if path != "" {
-		data, err := os.ReadFile(path)
+		data, err = os.ReadFile(path)
 		if err != nil {
 			return Config{}, err
 		}
+	}
+	return loadConfigBytes(path, data)
+}
+
+func loadConfigBytes(path string, data []byte) (Config, error) {
+	cfg := Default()
+	cfg.SourcePath = path
+	if len(data) != 0 {
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return Config{}, err
 		}
+		cfg.SourceVersion = versionFor(data)
 	}
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
@@ -119,7 +137,8 @@ func Load(path string) (Config, error) {
 
 func Default() Config {
 	return Config{
-		App: AppConfig{Timezone: "Asia/Shanghai"},
+		BotRestartMode: BotRestartDisabled,
+		App:            AppConfig{Timezone: "Asia/Shanghai"},
 		Admin: AdminConfig{
 			Addr:                      "127.0.0.1:8090",
 			CookieSecure:              true,
@@ -286,6 +305,16 @@ func applyEnv(cfg *Config) error {
 	override("JXH_AI_BASE_URL", func(v string) { cfg.AI.BaseURL = v })
 	override("JXH_AI_API_KEY", func(v string) { cfg.AI.APIKey = v })
 	override("JXH_AI_MODEL", func(v string) { cfg.AI.Model = v })
+	restartMode := os.Getenv("JXH_BOT_RESTART_MODE")
+	if restartMode == "" {
+		restartMode = string(BotRestartDisabled)
+	}
+	switch BotRestartMode(restartMode) {
+	case BotRestartDisabled, BotRestartSupervisedExit:
+		cfg.BotRestartMode = BotRestartMode(restartMode)
+	default:
+		return fmt.Errorf("JXH_BOT_RESTART_MODE: invalid restart mode")
+	}
 	return nil
 }
 

@@ -147,3 +147,28 @@ func TestLoadRecordsTheConfigurationSourcePath(t *testing.T) {
 		t.Fatalf("source path = %q, want %q", cfg.SourcePath, path)
 	}
 }
+
+func TestLoadRecordsSourceVersionAndRestartMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := []byte("app:\n  timezone: Asia/Shanghai\n")
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JXH_BOT_RESTART_MODE", "supervised_exit")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SourceVersion != versionFor(contents) {
+		t.Fatalf("source version = %d, want %d", cfg.SourceVersion, versionFor(contents))
+	}
+	if cfg.BotRestartMode != BotRestartSupervisedExit {
+		t.Fatalf("restart mode = %q", cfg.BotRestartMode)
+	}
+
+	t.Setenv("JXH_BOT_RESTART_MODE", "unsupported")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "JXH_BOT_RESTART_MODE") {
+		t.Fatalf("Load() error = %v, want restart mode validation", err)
+	}
+}

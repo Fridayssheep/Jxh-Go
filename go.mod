@@ -6,6 +6,7 @@ require (
 	github.com/cloudwego/eino v0.9.1
 	github.com/cloudwego/eino-ext/components/model/ark v0.1.68
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
+	github.com/gofrs/flock v0.13.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/xuri/excelize/v2 v2.10.1
 	github.com/zjutjh/napcat-sdk v1.0.2

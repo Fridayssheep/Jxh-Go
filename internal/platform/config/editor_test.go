@@ -4,229 +4,302 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const editorTestConfig = `app:
   timezone: "Asia/Shanghai"
 admin:
   addr: "127.0.0.1:8090"
-  public_origin: "http://127.0.0.1:5173"
-  session_secret: "session-secret-that-is-long-enough"
-  cookie_secure: false
+  session_secret: "deployment-session-secret"
 onebot:
   ws_url: "ws://127.0.0.1:3001"
-  access_token: "onebot-secret"
+  access_token: "deployment-onebot-secret"
 wps:
-  share_url: "https://example.test/knowledge.xlsx"
-  sid: "wps-secret"
+  share_url: "https://example.test/knowledge.xlsx?token=seed-secret"
+  sid: "wps-seed-secret"
+  sheet: "release"
+  cache_file: "./unique/deployment-cache.xlsx"
+  timeout_sec: 120
 database:
-  host: "127.0.0.1"
-  port: 3306
-  user: "jxh"
-  password: "database-secret"
-  name: "jxh_bot"
-  dsn: "dsn-secret"
+  host: "unique-database-host"
+  password: "deployment-database-secret"
+  max_open_conns: 73
+  max_idle_conns: 19
+  trigger_log_retention_days: 180
 ai:
   enabled: true
   provider: "openai"
-  api_key: "ai-secret"
-  model: "test-model"
+  base_url: "https://api.example.test/v1"
+  api_key: "ai-seed-secret"
+  model: "seed-model"
+  timeout_sec: 30
+  max_question_chars: 500
 quote:
-  base_url: "http://127.0.0.1:5000"
+  base_url: "http://quote:5000"
+  timeout_sec: 10
 scheduler:
   timezone: "Asia/Shanghai"
 `
 
-func TestFileEditorReadMasksSecretsAndReportsEnvironmentOverrides(t *testing.T) {
+func TestFileEditorReadsOnlyEffectiveEditableSettings(t *testing.T) {
 	path := writeEditorTestConfig(t, editorTestConfig)
-	t.Setenv("JXH_AI_API_KEY", "environment-secret")
-	t.Setenv("JXH_ONEBOT_WS_URL", "ws://environment.test:3001")
-	editor, err := NewFileEditor(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("JXH_WPS_SID", "environment-wps-secret")
+	t.Setenv("JXH_AI_MODEL", "environment-model")
+	editor := mustFileEditor(t, path)
 
-	document, err := editor.Read()
+	settings, err := editor.Read(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{
-		"session-secret-that-is-long-enough", "onebot-secret", "https://example.test/knowledge.xlsx", "wps-secret",
-		"database-secret", "dsn-secret", "ai-secret", "environment-secret",
-	} {
-		if strings.Contains(document.YAML, secret) {
-			t.Fatalf("editable YAML exposed secret %q", secret)
-		}
+	if settings.WPS.ShareURL.Configured != true || settings.WPS.ShareURL.Source != SourceFile {
+		t.Fatalf("share URL state = %#v", settings.WPS.ShareURL)
 	}
-	if got, want := strings.Count(document.YAML, SecretPlaceholder), 7; got != want {
-		t.Fatalf("secret placeholders = %d, want %d\n%s", got, want, document.YAML)
+	if settings.WPS.SID.Configured != true || settings.WPS.SID.Source != SourceEnvironment {
+		t.Fatalf("SID state = %#v", settings.WPS.SID)
 	}
-	if got := strings.Join(document.MaskedFields, ","); got != "admin.session_secret,ai.api_key,database.dsn,database.password,onebot.access_token,wps.share_url,wps.sid" {
-		t.Fatalf("masked fields = %q", got)
+	if settings.AI.APIKey.Configured != true || settings.AI.APIKey.Source != SourceFile {
+		t.Fatalf("API key state = %#v", settings.AI.APIKey)
 	}
-	if got := strings.Join(document.EnvironmentOverrides, ","); got != "ai.api_key,onebot.ws_url" {
-		t.Fatalf("environment overrides = %q", got)
+	if settings.AI.Model != "environment-model" {
+		t.Fatalf("AI model = %q", settings.AI.Model)
 	}
-	if document.Version == 0 || document.Version > maxJavaScriptSafeInteger {
-		t.Fatalf("version = %d, want a positive JavaScript-safe integer", document.Version)
+	if got, want := settings.EnvironmentOverrides, []string{"ai.model", "wps.sid"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment overrides = %v, want %v", got, want)
+	}
+	if settings.Version == 0 || settings.Version > maxJavaScriptSafeInteger {
+		t.Fatalf("version = %d", settings.Version)
+	}
+	if text := settingsForLeakCheck(settings); strings.Contains(text, "seed-secret") || strings.Contains(text, "environment-wps-secret") {
+		t.Fatalf("settings leaked a secret: %s", text)
 	}
 }
 
-func TestFileEditorUpdatePreservesMaskedSecretsAndChangesVersion(t *testing.T) {
+func TestFileEditorPatchesAllowedPathsAndPreservesDeploymentConfig(t *testing.T) {
 	path := writeEditorTestConfig(t, editorTestConfig)
-	editor, err := NewFileEditor(path)
+	editor := mustFileEditor(t, path)
+	before, err := editor.Read(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := editor.Read()
-	if err != nil {
-		t.Fatal(err)
+	patch := SettingsPatch{
+		WPS:       &WPSSettingsPatch{Sheet: ptr(" next "), TimeoutSec: ptr(45)},
+		AI:        &AISettingsPatch{Provider: ptr("ark"), BaseURL: ptr("https://ark.example.test/v1"), Model: ptr("next-model"), TimeoutSec: ptr(60), MaxQuestionChars: ptr(900)},
+		Quote:     &QuoteSettingsPatch{BaseURL: ptr("https://quote.example.test"), TimeoutSec: ptr(20)},
+		Time:      &TimeSettingsPatch{AppTimezone: ptr("Asia/Tokyo"), SchedulerTimezone: ptr("UTC")},
+		Retention: &RetentionSettingsPatch{TriggerLogRetentionDays: ptr(365)},
 	}
-	candidate := strings.Replace(before.YAML, "Asia/Shanghai", "Asia/Tokyo", 1)
-
-	after, err := editor.Update(before.Version, candidate)
+	after, changed, err := editor.Update(t.Context(), before.Version, patch)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if after.Version == before.Version {
-		t.Fatal("version did not change after a successful update")
+		t.Fatal("version did not change")
 	}
-	written, err := os.ReadFile(path)
+	if after.WPS.Sheet != "next" || after.AI.Provider != "ark" || after.Time.SchedulerTimezone != "UTC" {
+		t.Fatalf("updated settings = %#v", after)
+	}
+	if len(changed) != 12 || !sortStringsAreStrict(changed) {
+		t.Fatalf("changed fields = %v", changed)
+	}
+
+	var raw map[string]any
+	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(written)
-	if !strings.Contains(text, `timezone: Asia/Tokyo`) && !strings.Contains(text, `timezone: "Asia/Tokyo"`) {
-		t.Fatalf("updated timezone missing from file:\n%s", text)
-	}
-	for _, secret := range []string{
-		"session-secret-that-is-long-enough", "onebot-secret", "https://example.test/knowledge.xlsx", "wps-secret",
-		"database-secret", "dsn-secret", "ai-secret",
-	} {
-		if !strings.Contains(text, secret) {
-			t.Fatalf("secret %q was not preserved", secret)
-		}
-	}
-	if strings.Contains(text, SecretPlaceholder) {
-		t.Fatal("secret placeholder was persisted")
-	}
-	info, err := os.Stat(path)
-	if err != nil {
+	if err := yaml.Unmarshal(contents, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("config permissions = %o, want no group/other access", info.Mode().Perm())
-	}
+	assertYAMLValue(t, raw, "admin", "session_secret", "deployment-session-secret")
+	assertYAMLValue(t, raw, "onebot", "access_token", "deployment-onebot-secret")
+	assertYAMLValue(t, raw, "database", "host", "unique-database-host")
+	assertYAMLValue(t, raw, "database", "max_open_conns", 73)
+	assertYAMLValue(t, raw, "database", "max_idle_conns", 19)
+	assertYAMLValue(t, raw, "wps", "cache_file", "./unique/deployment-cache.xlsx")
+	assertYAMLValue(t, raw, "wps", "sid", "wps-seed-secret")
+	assertYAMLValue(t, raw, "ai", "enabled", true)
 }
 
-func TestFileEditorUpdateCanReplaceASecret(t *testing.T) {
+func TestFileEditorRejectsEnvironmentManagedFields(t *testing.T) {
 	path := writeEditorTestConfig(t, editorTestConfig)
-	editor, err := NewFileEditor(path)
+	t.Setenv("JXH_AI_MODEL", "environment-model")
+	t.Setenv("JXH_WPS_SID", "environment-secret")
+	editor := mustFileEditor(t, path)
+	settings, err := editor.Read(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := editor.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidate := strings.Replace(document.YAML, SecretPlaceholder, "replacement-session-secret-that-is-long-enough", 1)
-
-	if _, err := editor.Update(document.Version, candidate); err != nil {
-		t.Fatal(err)
-	}
-	written, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(written), "session_secret: replacement-session-secret-that-is-long-enough") || strings.Contains(string(written), "session_secret: session-secret-that-is-long-enough") {
-		t.Fatalf("session secret was not replaced:\n%s", written)
+	_, _, err = editor.Update(t.Context(), settings.Version, SettingsPatch{
+		WPS: &WPSSettingsPatch{SID: &SecretUpdate{Operation: SecretReplace, Value: "replacement"}},
+		AI:  &AISettingsPatch{Model: ptr("replacement")},
+	})
+	var managed *ManagedFieldsError
+	if !errors.As(err, &managed) || !reflect.DeepEqual(managed.Fields, []string{"ai.model", "wps.sid"}) {
+		t.Fatalf("error = %#v, want sorted managed fields", err)
 	}
 }
 
-func TestFileEditorUpdateDoesNotWidenOwnerReadOnlyPermissions(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows does not expose Unix owner permission bits")
-	}
+func TestFileEditorSecretKeepReplaceAndClear(t *testing.T) {
 	path := writeEditorTestConfig(t, editorTestConfig)
-	if err := os.Chmod(path, 0o400); err != nil {
-		t.Fatal(err)
-	}
-	editor, err := NewFileEditor(path)
+	editor := mustFileEditor(t, path)
+	before, err := editor.Read(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := editor.Read()
+	updated, changed, err := editor.Update(t.Context(), before.Version, SettingsPatch{
+		WPS: &WPSSettingsPatch{
+			ShareURL: &SecretUpdate{Operation: SecretReplace, Value: "https://new.example.test/sheet?token=next"},
+			SID:      &SecretUpdate{Operation: SecretClear},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !updated.WPS.ShareURL.Configured || updated.WPS.SID.Configured {
+		t.Fatalf("secret states = %#v %#v", updated.WPS.ShareURL, updated.WPS.SID)
+	}
+	if !reflect.DeepEqual(changed, []string{"wps.share_url", "wps.sid"}) {
+		t.Fatalf("changed fields = %v", changed)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(contents)
+	if strings.Contains(text, "wps-seed-secret") || strings.Contains(text, "token=seed-secret") {
+		t.Fatal("old WPS secrets were retained")
+	}
+	if !strings.Contains(text, "token=next") {
+		t.Fatal("replacement secret was not persisted")
+	}
+	if strings.Contains(settingsForLeakCheck(updated), "token=next") {
+		t.Fatal("replacement secret leaked in response")
 	}
 
-	if _, err := editor.Update(document.Version, document.YAML); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
+	kept, changed, err := editor.Update(t.Context(), updated.Version, SettingsPatch{WPS: &WPSSettingsPatch{Sheet: ptr("other")}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o400 {
-		t.Fatalf("config permissions = %o, want 400", got)
+	if len(changed) != 1 || !kept.WPS.ShareURL.Configured {
+		t.Fatalf("implicit keep failed: changed=%v settings=%#v", changed, kept.WPS)
 	}
 }
 
-func TestRestrictedFileModePreservesOnlyOwnerAccess(t *testing.T) {
-	for _, test := range []struct {
-		original os.FileMode
-		want     os.FileMode
+func TestFileEditorValidatesURLsTimezonesEnumsAndRanges(t *testing.T) {
+	path := writeEditorTestConfig(t, editorTestConfig)
+	tests := []struct {
+		name  string
+		patch SettingsPatch
+		path  string
 	}{
-		{0o644, 0o600},
-		{0o640, 0o600},
-		{0o600, 0o600},
-		{0o400, 0o400},
-	} {
-		if got := restrictedFileMode(test.original); got != test.want {
-			t.Fatalf("restrictedFileMode(%o) = %o, want %o", test.original, got, test.want)
-		}
+		{"WPS URL", SettingsPatch{WPS: &WPSSettingsPatch{ShareURL: &SecretUpdate{Operation: SecretReplace, Value: "ftp://example.test/a"}}}, "wps.share_url"},
+		{"AI URL userinfo", SettingsPatch{AI: &AISettingsPatch{BaseURL: ptr("https://user:pass@example.test")}}, "ai.base_url"},
+		{"provider", SettingsPatch{AI: &AISettingsPatch{Provider: ptr("unknown")}}, "ai.provider"},
+		{"timezone", SettingsPatch{Time: &TimeSettingsPatch{AppTimezone: ptr("Mars/Olympus")}}, "app.timezone"},
+		{"WPS timeout", SettingsPatch{WPS: &WPSSettingsPatch{TimeoutSec: ptr(601)}}, "wps.timeout_sec"},
+		{"retention", SettingsPatch{Retention: &RetentionSettingsPatch{TriggerLogRetentionDays: ptr(-1)}}, "database.trigger_log_retention_days"},
+		{"empty secret replacement", SettingsPatch{AI: &AISettingsPatch{APIKey: &SecretUpdate{Operation: SecretReplace}}}, "ai.api_key"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			editor := mustFileEditor(t, path)
+			settings, err := editor.Read(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = editor.Update(t.Context(), settings.Version, test.patch)
+			var validation *ValidationError
+			if !errors.As(err, &validation) || !validation.HasPath(test.path) {
+				t.Fatalf("error = %#v, want validation for %s", err, test.path)
+			}
+		})
 	}
 }
 
-func TestFileEditorRejectsStaleOrInvalidDocumentsWithoutChangingFile(t *testing.T) {
+func TestFileEditorDetectsVersionConflictAcrossInstances(t *testing.T) {
 	path := writeEditorTestConfig(t, editorTestConfig)
+	first := mustFileEditor(t, path)
+	second := mustFileEditor(t, path)
+	settings, err := first.Read(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := first.Update(t.Context(), settings.Version, SettingsPatch{WPS: &WPSSettingsPatch{Sheet: ptr("first")}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := second.Update(t.Context(), settings.Version, SettingsPatch{WPS: &WPSSettingsPatch{Sheet: ptr("second")}}); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("error = %v, want version conflict", err)
+	}
+}
+
+func TestFileEditorRejectsEmptyPatch(t *testing.T) {
+	path := writeEditorTestConfig(t, editorTestConfig)
+	editor := mustFileEditor(t, path)
+	settings, err := editor.Read(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := editor.Update(t.Context(), settings.Version, SettingsPatch{}); !errors.Is(err, ErrEmptyPatch) {
+		t.Fatalf("error = %v, want empty patch", err)
+	}
+}
+
+func mustFileEditor(t *testing.T, path string) *FileEditor {
+	t.Helper()
 	editor, err := NewFileEditor(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := editor.Read()
-	if err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := editor.Update(document.Version+1, document.YAML); !errors.Is(err, ErrVersionConflict) {
-		t.Fatalf("stale update error = %v, want ErrVersionConflict", err)
-	}
-	invalid := document.YAML + "unknown_section:\n  value: true\n"
-	if _, err := editor.Update(document.Version, invalid); !errors.Is(err, ErrInvalidDocument) {
-		t.Fatalf("invalid update error = %v, want ErrInvalidDocument", err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(original) {
-		t.Fatal("rejected update changed the config file")
-	}
+	return editor
 }
 
 func writeEditorTestConfig(t *testing.T, contents string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func ptr[T any](value T) *T { return &value }
+
+func settingsForLeakCheck(settings Settings) string {
+	return strings.Join([]string{
+		settings.WPS.Sheet,
+		settings.AI.Provider,
+		settings.AI.BaseURL,
+		settings.AI.Model,
+		settings.Quote.BaseURL,
+		settings.Time.AppTimezone,
+		settings.Time.SchedulerTimezone,
+		string(settings.WPS.ShareURL.Source),
+		string(settings.WPS.SID.Source),
+		string(settings.AI.APIKey.Source),
+	}, "|")
+}
+
+func sortStringsAreStrict(values []string) bool {
+	for index := 1; index < len(values); index++ {
+		if values[index-1] >= values[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func assertYAMLValue(t *testing.T, raw map[string]any, section, key string, want any) {
+	t.Helper()
+	sectionValue, ok := raw[section].(map[string]any)
+	if !ok {
+		t.Fatalf("section %s = %#v", section, raw[section])
+	}
+	if got := sectionValue[key]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s.%s = %#v, want %#v", section, key, got, want)
+	}
 }

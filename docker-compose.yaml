@@ -66,8 +66,8 @@ services:
     image: jxh-bot:latest
     container_name: jxh-bot
     restart: unless-stopped
-    ports:
-      - "${ADMIN_PORT:-8090}:8090"
+    expose:
+      - "8090"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -81,9 +81,10 @@ services:
       JXH_ONEBOT_WS_URL: ws://napcat:3001
       JXH_ONEBOT_TOKEN: ${JXH_ONEBOT_TOKEN:-change-me}
       JXH_ADMIN_ADDR: ":8090"
-      JXH_ADMIN_PUBLIC_ORIGIN: ${JXH_ADMIN_PUBLIC_ORIGIN:-http://localhost:8090}
+      JXH_ADMIN_PUBLIC_ORIGIN: ${JXH_ADMIN_PUBLIC_ORIGIN:-http://localhost:${WEB_PORT:-8080}}
       JXH_ADMIN_SESSION_SECRET: ${JXH_ADMIN_SESSION_SECRET:-}
       JXH_ADMIN_COOKIE_SECURE: ${JXH_ADMIN_COOKIE_SECURE:-false}
+      JXH_ADMIN_TRUSTED_PROXIES: ${JXH_ADMIN_TRUSTED_PROXIES:-}
       JXH_ADMIN_MAX_CONCURRENT_REQUESTS: ${JXH_ADMIN_MAX_CONCURRENT_REQUESTS:-128}
       JXH_BOT_RESTART_MODE: supervised_exit
       JXH_MYSQL_DSN: ${JXH_MYSQL_DSN:-${MYSQL_USER:-jxh}:${MYSQL_PASSWORD:-jxh_password}@tcp(mysql:3306)/${MYSQL_DATABASE:-jxh_bot}?charset=utf8mb4&parseTime=True&loc=Local}
@@ -106,3 +107,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    networks:
+      - default
+      - manager
+
+  frontend:
+    build:
+      context: ../../jxh-manager
+      dockerfile: Dockerfile
+    image: jxh-manager:latest
+    container_name: jxh-manager
+    restart: unless-stopped
+    depends_on:
+      bot:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    networks:
+      - manager
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  manager:
+    internal: true

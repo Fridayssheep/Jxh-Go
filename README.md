@@ -43,6 +43,14 @@ cp config.example.yaml config.yaml
 
 使用 Compose 时无需执行这条命令；首次启动会自动创建 `./data/config/config.yaml`，之后由管理面板或管理员直接维护该持久化文件。
 
+Compose 部署仍需先创建环境文件：
+
+```bash
+cp .env.example .env
+```
+
+启动前至少修改 `.env` 中的 MySQL 密码、`JXH_ONEBOT_TOKEN` 和 `JXH_ADMIN_SESSION_SECRET`；会话密钥必须是独立生成的至少 32 字节随机值。生产部署还需按下文同步设置 HTTPS Origin 和安全 Cookie。
+
 先重点检查这些配置：
 
 - `onebot.access_token`：必须和 NapCat WebSocket token 一致。

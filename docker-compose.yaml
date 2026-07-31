@@ -47,6 +47,9 @@ services:
       - "5000:5000"
 
   bot:
+    build:
+      context: ./
+      dockerfile: Dockerfile
     image: jxh-bot:latest
     container_name: jxh-bot
     restart: unless-stopped

@@ -71,6 +71,59 @@ func TestRestartHTTPMapsUnavailableAndRejectsConfirmationBeforeService(t *testin
 	assertErrorCode(t, response, http.StatusServiceUnavailable, "dependency_unavailable")
 }
 
+func TestBotRestartHTTPAcceptsAndSchedulesOnlyFreshOperation(t *testing.T) {
+	service := &fakeSystemOperations{
+		botOperation: managersystem.Operation{ID: "op_bot", Type: "bot_restart", Status: managersystem.StatusAccepted, RequestedAt: time.Unix(100, 0)},
+		botFresh:     true,
+	}
+	router := newSystemHTTPFixture(t, service)
+	request := userMutationRequest(t, http.MethodPost, "/api/admin/v1/system/bot/restart", `{"confirmation":"restart","configuration_version":7}`)
+	request.Header.Set("Idempotency-Key", "bot-restart-key")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || service.botAcceptCalls != 1 || service.botScheduleCalls != 1 ||
+		service.botInput.ConfigurationVersion != 7 || service.request.RequestID == "" ||
+		!strings.Contains(response.Body.String(), `"operation_id":"op_bot"`) {
+		t.Fatalf("status=%d accept=%d schedule=%d input=%#v context=%#v body=%s", response.Code, service.botAcceptCalls, service.botScheduleCalls, service.botInput, service.request, response.Body.String())
+	}
+
+	service.botFresh = false
+	request = userMutationRequest(t, http.MethodPost, "/api/admin/v1/system/bot/restart", `{"confirmation":"restart","configuration_version":7}`)
+	request.Header.Set("Idempotency-Key", "bot-restart-key")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted || service.botScheduleCalls != 1 {
+		t.Fatalf("replay status=%d schedule=%d", response.Code, service.botScheduleCalls)
+	}
+}
+
+func TestBotRestartHTTPRejectsInvalidConfirmationAndMapsConflicts(t *testing.T) {
+	service := &fakeSystemOperations{}
+	router := newSystemHTTPFixture(t, service)
+	request := userMutationRequest(t, http.MethodPost, "/api/admin/v1/system/bot/restart", `{"confirmation":"RESTART","configuration_version":7}`)
+	request.Header.Set("Idempotency-Key", "bot-restart-key")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	assertErrorCode(t, response, http.StatusBadRequest, CodeBadRequest)
+	if service.botAcceptCalls != 0 {
+		t.Fatal("invalid confirmation reached service")
+	}
+	for _, test := range []struct {
+		err  error
+		code string
+	}{
+		{managersystem.ErrBotRestartNotSupported, "bot_restart_not_supported"},
+		{managersystem.ErrConfigurationVersionConflict, "resource_version_conflict"},
+	} {
+		service.err = test.err
+		request = userMutationRequest(t, http.MethodPost, "/api/admin/v1/system/bot/restart", `{"confirmation":"restart","configuration_version":7}`)
+		request.Header.Set("Idempotency-Key", "bot-restart-key")
+		response = httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		assertErrorCode(t, response, http.StatusConflict, test.code)
+	}
+}
+
 func TestSystemConfigurationHTTPReturnsStructuredEffectiveValuesAndAppliedVersion(t *testing.T) {
 	service := &fakeSystemOperations{configuration: managersystem.Configuration{
 		WPS: platformconfig.WPSSettings{
@@ -186,6 +239,11 @@ type fakeSystemOperations struct {
 	configurationUpdates int
 	expectedVersion      uint64
 	patch                platformconfig.SettingsPatch
+	botOperation         managersystem.Operation
+	botFresh             bool
+	botAcceptCalls       int
+	botScheduleCalls     int
+	botInput             managersystem.BotRestartInput
 }
 
 func (s *fakeSystemOperations) Health(context.Context, auth.Principal) (managersystem.Health, error) {
@@ -210,4 +268,16 @@ func (s *fakeSystemOperations) UpdateConfiguration(_ context.Context, _ auth.Pri
 	s.patch = patch
 	s.request = request
 	return s.configuration, s.err
+}
+
+func (s *fakeSystemOperations) AcceptBotRestart(_ context.Context, _ auth.Principal, input managersystem.BotRestartInput, _ string, request auth.MutationContext) (managersystem.Operation, bool, error) {
+	s.botAcceptCalls++
+	s.botInput = input
+	s.request = request
+	return s.botOperation, s.botFresh, s.err
+}
+
+func (s *fakeSystemOperations) ScheduleBotRestart(string) bool {
+	s.botScheduleCalls++
+	return true
 }

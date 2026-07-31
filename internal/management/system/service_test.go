@@ -210,6 +210,66 @@ func TestConfigurationIsUnavailableWithoutAnEditor(t *testing.T) {
 	}
 }
 
+func TestAcceptBotRestartValidatesPermissionSupportVersionAndInput(t *testing.T) {
+	service, _, _ := newSystemFixture(t)
+	defer service.Close()
+	valid := BotRestartInput{Confirmation: "restart", ConfigurationVersion: 7}
+	request := auth.MutationContext{RequestID: "req_bot_restart"}
+	if _, _, err := service.AcceptBotRestart(t.Context(), auth.Principal{Role: auth.RoleMaintainer}, valid, "bot-restart-key", request); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("permission error = %v", err)
+	}
+	service.restartSupported = false
+	if _, _, err := service.AcceptBotRestart(t.Context(), superPrincipal(), valid, "bot-restart-key", request); !errors.Is(err, ErrBotRestartNotSupported) {
+		t.Fatalf("support error = %v", err)
+	}
+	service.restartSupported = true
+	for _, test := range []struct {
+		input   BotRestartInput
+		key     string
+		request auth.MutationContext
+		want    error
+	}{
+		{BotRestartInput{Confirmation: "RESTART", ConfigurationVersion: 7}, "bot-restart-key", request, ErrInvalidInput},
+		{valid, "short", request, ErrInvalidInput},
+		{valid, "bot-restart-key", auth.MutationContext{}, ErrInvalidInput},
+		{BotRestartInput{Confirmation: "restart", ConfigurationVersion: 6}, "bot-restart-key", request, ErrConfigurationVersionConflict},
+	} {
+		if _, _, err := service.AcceptBotRestart(t.Context(), superPrincipal(), test.input, test.key, test.request); !errors.Is(err, test.want) {
+			t.Fatalf("AcceptBotRestart(%#v) error = %v, want %v", test.input, err, test.want)
+		}
+	}
+}
+
+func TestAcceptBotRestartReplaysWithoutCreatingAnotherOperation(t *testing.T) {
+	service, store, _ := newSystemFixture(t)
+	defer service.Close()
+	input := BotRestartInput{Confirmation: "restart", ConfigurationVersion: 7}
+	request := auth.MutationContext{RequestID: "req_bot_restart"}
+	operation, fresh, err := service.AcceptBotRestart(t.Context(), superPrincipal(), input, "bot-restart-key", request)
+	if err != nil || !fresh || operation.Type != "bot_restart" || store.botBeginCalls != 1 {
+		t.Fatalf("operation=%#v fresh=%v begin=%d err=%v", operation, fresh, store.botBeginCalls, err)
+	}
+	store.botFound = true
+	store.botReplay = operation
+	replayed, fresh, err := service.AcceptBotRestart(t.Context(), superPrincipal(), input, "bot-restart-key", request)
+	if err != nil || fresh || replayed.ID != operation.ID || store.botBeginCalls != 1 {
+		t.Fatalf("replay=%#v fresh=%v begin=%d err=%v", replayed, fresh, store.botBeginCalls, err)
+	}
+}
+
+func TestScheduleBotRestartDelegatesOnlyExplicitFreshOperation(t *testing.T) {
+	service, _, _ := newSystemFixture(t)
+	defer service.Close()
+	scheduler := &fakeBotRestartScheduler{}
+	service.botRestartScheduler = scheduler
+	if !service.ScheduleBotRestart("op_bot") || scheduler.calls != 1 || scheduler.operationID != "op_bot" {
+		t.Fatalf("scheduler = %#v", scheduler)
+	}
+	if service.ScheduleBotRestart("") || scheduler.calls != 1 {
+		t.Fatal("invalid operation was scheduled")
+	}
+}
+
 func TestRecoverInterruptedPublishesUnknownOperations(t *testing.T) {
 	service, store, _ := newSystemFixture(t)
 	defer service.Close()
@@ -221,6 +281,19 @@ func TestRecoverInterruptedPublishesUnknownOperations(t *testing.T) {
 	count, err := service.RecoverInterrupted(t.Context())
 	if err != nil || count != 1 || !store.recoveredAt.Equal(time.Unix(100, 0).UTC()) {
 		t.Fatalf("recovery count=%d at=%s error=%v", count, store.recoveredAt, err)
+	}
+}
+
+func TestRecoverInterruptedMarksBotRestartSucceeded(t *testing.T) {
+	service, store, _ := newSystemFixture(t)
+	defer service.Close()
+	store.recoveredBot = []Operation{{
+		ID: "op_bot_recovered", Type: "bot_restart", Status: StatusSucceeded,
+		RequestedAt: time.Unix(50, 0).UTC(), CompletedAt: timePointerForSystemTest(time.Unix(100, 0).UTC()),
+	}}
+	count, err := service.RecoverInterrupted(t.Context())
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d error=%v", count, err)
 	}
 }
 
@@ -294,6 +367,17 @@ type fakeRestartGateway struct {
 	calls     int
 }
 
+type fakeBotRestartScheduler struct {
+	calls       int
+	operationID string
+}
+
+func (s *fakeBotRestartScheduler) Schedule(operationID string) bool {
+	s.calls++
+	s.operationID = operationID
+	return true
+}
+
 func (g *fakeRestartGateway) Snapshot() napcat.Snapshot {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -323,6 +407,24 @@ type fakeSystemStore struct {
 	configurationCompletion         ConfigurationAuditCompletion
 	configurationCompletionCalls    int
 	configurationCompletionFailures int
+	botBeginCalls                   int
+	botFound                        bool
+	botReplay                       Operation
+	recoveredBot                    []Operation
+}
+
+func (s *fakeSystemStore) FindBotRestart(_ context.Context, _ FindBotRestart) (Operation, bool, error) {
+	return cloneOperation(s.botReplay), s.botFound, nil
+}
+
+func (s *fakeSystemStore) BeginBotRestart(_ context.Context, begin BeginBotRestart) (Operation, bool, error) {
+	s.botBeginCalls++
+	operation := Operation{ID: "op_bot", Type: "bot_restart", Status: StatusAccepted, RequestedAt: begin.RequestedAt}
+	return operation, true, nil
+}
+
+func (s *fakeSystemStore) RecoverInterruptedBotRestarts(_ context.Context, _ time.Time) ([]Operation, error) {
+	return append([]Operation(nil), s.recoveredBot...), nil
 }
 
 func (s *fakeSystemStore) BeginConfigurationUpdate(_ context.Context, request ConfigurationAuditRequest) (string, error) {

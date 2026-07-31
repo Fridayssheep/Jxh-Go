@@ -86,8 +86,8 @@ func TestOpenAPISystemConfigurationIsStructured(t *testing.T) {
 	if !ok {
 		t.Fatal("POST /system/bot/restart is missing")
 	}
-	if restartOperation["x-status"] != "planned" {
-		t.Fatalf("POST /system/bot/restart x-status = %v, want planned", restartOperation["x-status"])
+	if restartOperation["x-status"] != "implemented" {
+		t.Fatalf("POST /system/bot/restart x-status = %v, want implemented", restartOperation["x-status"])
 	}
 	restartRequest := requireOpenAPIRequestSchema(t, spec.Components.Schemas, restartOperation)
 	requireOpenAPIRequired(t, restartRequest, "confirmation")

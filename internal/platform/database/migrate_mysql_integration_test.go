@@ -21,6 +21,25 @@ import (
 
 var mysqlIntegrationSchemaID atomic.Uint64
 
+func TestMySQLBotRestartMigrationAllowsAllSystemOperationTypes(t *testing.T) {
+	db := openMySQLIntegrationSchema(t)
+	migrations := repositoryMigrations(t)
+	if _, err := (Runner{DB: db, LockTimeout: 5 * time.Second}).Apply(t.Context(), migrations); err != nil {
+		t.Fatal(err)
+	}
+	var clause string
+	if err := db.QueryRowContext(t.Context(), `SELECT check_clause
+FROM information_schema.check_constraints
+WHERE constraint_schema = DATABASE() AND constraint_name = 'chk_system_operations_type'`).Scan(&clause); err != nil {
+		t.Fatal(err)
+	}
+	for _, operationType := range []string{"napcat_restart", "knowledge_reload", "bot_restart"} {
+		if !strings.Contains(clause, operationType) {
+			t.Fatalf("system operation constraint %q does not allow %s", clause, operationType)
+		}
+	}
+}
+
 func TestMySQLHistoricalSchemaFingerprintsMatchEveryVersion(t *testing.T) {
 	db := openMySQLIntegrationSchema(t)
 	migrations := repositoryMigrations(t)

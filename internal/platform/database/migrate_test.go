@@ -46,6 +46,25 @@ func TestLoadMigrationsSortsAndChecksums(t *testing.T) {
 	}
 }
 
+func TestBotRestartMigrationExtendsSystemOperationConstraint(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "deploy", "mysql")
+	migration, err := os.ReadFile(filepath.Join(root, "migrations", "012_support_bot_restart_operations.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := os.ReadFile(filepath.Join(root, "init", "001_schema.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, document := range map[string][]byte{"migration": migration, "initial schema": initial} {
+		text := string(document)
+		if !strings.Contains(text, "chk_system_operations_type") || !strings.Contains(text, "'napcat_restart'") ||
+			!strings.Contains(text, "'knowledge_reload'") || !strings.Contains(text, "'bot_restart'") {
+			t.Fatalf("%s does not allow all system operation types", name)
+		}
+	}
+}
+
 func TestLoadMigrationsRejectsInvalidManifest(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -411,8 +430,8 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadMigrations(repository) error = %v", err)
 	}
-	if len(migrations) != 11 {
-		t.Fatalf("len(migrations) = %d, want 11", len(migrations))
+	if len(migrations) != 12 {
+		t.Fatalf("len(migrations) = %d, want 12", len(migrations))
 	}
 	wantChecksums := map[int]string{
 		1:  "81f71d4c8db2a412f0f9b0f1d4d61d6d53ecc538b801b2c365d570f789fa66a9",
@@ -426,6 +445,7 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 		9:  "b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e",
 		10: "88f21f5ff3e088e8b9be196c7cb3cc129451235e5bb580a0cfa713da4364571b",
 		11: "3fcb3f67001e95141787c891c4e8751de1bd8501b9074d3dcfe9e66d687560c4",
+		12: "7cf41441d8e11afd1abe4926d4e6d0d39b7d6942717d39a0d1d716218c23d1f6",
 	}
 	for _, migration := range migrations {
 		if want := wantChecksums[migration.Version]; want != "" && migration.Checksum != want {
@@ -437,11 +457,11 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read init schema: %v", err)
 	}
-	if got := bytes.Count(initSQL, []byte("DELIMITER $$\n")); got != 9 {
-		t.Fatalf("init schema compound delimiter count = %d, want 9", got)
+	if got := bytes.Count(initSQL, []byte("DELIMITER $$\n")); got != 10 {
+		t.Fatalf("init schema compound delimiter count = %d, want 10", got)
 	}
-	if got := bytes.Count(initSQL, []byte("DELIMITER ;\n")); got != 9 {
-		t.Fatalf("init schema delimiter reset count = %d, want 9", got)
+	if got := bytes.Count(initSQL, []byte("DELIMITER ;\n")); got != 10 {
+		t.Fatalf("init schema delimiter reset count = %d, want 10", got)
 	}
 	const clientCharsetPrologue = "SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;"
 	if got := bytes.Count(initSQL, []byte(clientCharsetPrologue)); got != 1 {
@@ -453,7 +473,7 @@ func TestRepositoryMigrationManifestAndInitMetadata(t *testing.T) {
 		t.Fatalf("render repository init: %v", err)
 	}
 	if !bytes.Equal(initSQL, []byte(wantInitSQL)) {
-		t.Fatalf("init schema is not the deterministic reversible MySQL CLI rendering of migrations 001..011")
+		t.Fatalf("init schema is not the deterministic reversible MySQL CLI rendering of migrations 001..012")
 	}
 
 	initText := string(initSQL)
@@ -540,6 +560,9 @@ func renderRepositoryMySQLCLIInit(migrations []Migration) (string, error) {
 		9: {
 			{kind: "procedure", name: "jxh_extend_system_operations_009", after: "CALL `jxh_extend_system_operations_009`();"},
 		},
+		12: {
+			{kind: "procedure", name: "jxh_extend_system_operations_012", after: "CALL `jxh_extend_system_operations_012`();"},
+		},
 	}
 
 	const header = "-- Jxh Manager final MySQL schema.\n" +
@@ -575,8 +598,8 @@ func renderRepositoryMySQLCLIInit(migrations []Migration) (string, error) {
 		rendered.WriteString(migrationSQL)
 		rendered.WriteByte('\n')
 	}
-	if compoundCount != 9 {
-		return "", fmt.Errorf("repository compound CREATE count = %d, want 9", compoundCount)
+	if compoundCount != 10 {
+		return "", fmt.Errorf("repository compound CREATE count = %d, want 10", compoundCount)
 	}
 
 	rendered.WriteString(ledgerDDL)
@@ -1946,6 +1969,8 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("-- Permit the existing per-group policy flag"),
 		execStep("INSERT INTO `schema_migrations`"),
+		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_012`"),
+		execStep("INSERT INTO `schema_migrations`"),
 		queryStep("RELEASE_LOCK", []string{"released"}, [][]driver.Value{{int64(1)}}),
 	)
 	db, state := newScriptDB(t, steps...)
@@ -1954,8 +1979,8 @@ func TestRunnerApplyAdoptsPost007LegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if len(applied) != 4 || applied[0].Version != 8 || applied[1].Version != 9 || applied[2].Version != 10 || applied[3].Version != 11 {
-		t.Fatalf("applied = %+v, want 008 through 011", applied)
+	if len(applied) != 5 || applied[0].Version != 8 || applied[1].Version != 9 || applied[2].Version != 10 || applied[3].Version != 11 || applied[4].Version != 12 {
+		t.Fatalf("applied = %+v, want 008 through 012", applied)
 	}
 	state.assertComplete(t)
 }
@@ -2012,6 +2037,8 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through011(t *testing.T) {
 		execStep("INSERT INTO `schema_migrations`"),
 		execStep("-- Permit the existing per-group policy flag"),
 		execStep("INSERT INTO `schema_migrations`"),
+		execStep("DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_012`"),
+		execStep("INSERT INTO `schema_migrations`"),
 		queryStep("RELEASE_LOCK", []string{"released"}, [][]driver.Value{{int64(1)}}),
 	)
 	db, state := newScriptDB(t, steps...)
@@ -2020,8 +2047,8 @@ func TestRunnerApplyAdoptsPost005ThenExecutes006Through011(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply() error = %v", err)
 	}
-	if len(applied) != 6 || applied[0].Version != 6 || applied[1].Version != 7 || applied[2].Version != 8 || applied[3].Version != 9 || applied[4].Version != 10 || applied[5].Version != 11 {
-		t.Fatalf("applied = %+v, want 006 through 011", applied)
+	if len(applied) != 7 || applied[0].Version != 6 || applied[1].Version != 7 || applied[2].Version != 8 || applied[3].Version != 9 || applied[4].Version != 10 || applied[5].Version != 11 || applied[6].Version != 12 {
+		t.Fatalf("applied = %+v, want 006 through 012", applied)
 	}
 	state.assertComplete(t)
 	state.assertSingleConnection(t)

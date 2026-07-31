@@ -24,6 +24,9 @@ func TestPermissionsMatchRoleMatrix(t *testing.T) {
 	if !Allowed(RoleSuperAdmin, PermissionNapCatRestart) {
 		t.Fatal("super admin must restart NapCat")
 	}
+	if !Allowed(RoleSuperAdmin, PermissionBotRestart) || Allowed(RoleMaintainer, PermissionBotRestart) || Allowed(RoleObserver, PermissionBotRestart) {
+		t.Fatal("only super admin may restart the Bot")
+	}
 	if !Allowed(RoleSuperAdmin, PermissionConfigWrite) || Allowed(RoleMaintainer, PermissionConfigWrite) || Allowed(RoleObserver, PermissionConfigWrite) {
 		t.Fatal("only super admin may write the process configuration")
 	}
@@ -56,6 +59,7 @@ func TestPermissionMatrixExactlyCoversOpenAPIEnums(t *testing.T) {
 		PermissionSystemRead,
 		PermissionConfigWrite,
 		PermissionNapCatRestart,
+		PermissionBotRestart,
 		PermissionEventsRead,
 	}
 	if got := AllPermissions(); !reflect.DeepEqual(got, want) {

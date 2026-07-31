@@ -28,6 +28,7 @@ var (
 	ErrConfigurationUnavailable       = errors.New("configuration file unavailable")
 	ErrConfigurationVersionConflict   = errors.New("configuration version conflict")
 	ErrConfigurationManagedExternally = errors.New("configuration field managed externally")
+	ErrBotRestartNotSupported         = errors.New("bot restart not supported")
 )
 
 type DependencyKey string
@@ -160,6 +161,11 @@ type RestartInput struct {
 	Reason       string
 }
 
+type BotRestartInput struct {
+	Confirmation         string
+	ConfigurationVersion uint64
+}
+
 type BeginRestart struct {
 	Actor          auth.Principal
 	Context        auth.MutationContext
@@ -176,6 +182,22 @@ type FindRestart struct {
 	At             time.Time
 }
 
+type FindBotRestart struct {
+	ActorID        string
+	IdempotencyKey string
+	RequestHash    string
+	At             time.Time
+}
+
+type BeginBotRestart struct {
+	Actor                auth.Principal
+	Context              auth.MutationContext
+	IdempotencyKey       string
+	RequestHash          string
+	ConfigurationVersion uint64
+	RequestedAt          time.Time
+}
+
 type Transition struct {
 	OperationID string
 	From        OperationStatus
@@ -187,6 +209,9 @@ type Transition struct {
 type Store interface {
 	BeginConfigurationUpdate(ctx context.Context, request ConfigurationAuditRequest) (string, error)
 	CompleteConfigurationUpdate(ctx context.Context, completion ConfigurationAuditCompletion) error
+	FindBotRestart(ctx context.Context, find FindBotRestart) (operation Operation, found bool, err error)
+	BeginBotRestart(ctx context.Context, begin BeginBotRestart) (operation Operation, fresh bool, err error)
+	RecoverInterruptedBotRestarts(ctx context.Context, recoveredAt time.Time) ([]Operation, error)
 	// FindNapCatRestart returns an unexpired prior operation without creating a
 	// new reservation. This lets retries replay while NapCat is disconnected.
 	FindNapCatRestart(ctx context.Context, find FindRestart) (operation Operation, found bool, err error)
@@ -205,6 +230,10 @@ type EventPublisher interface {
 	Publish(draft events.Draft) (events.Event, error)
 }
 
+type BotRestartScheduler interface {
+	Schedule(operationID string) bool
+}
+
 type Options struct {
 	Store                       Store
 	Health                      HealthSource
@@ -213,6 +242,7 @@ type Options struct {
 	Configuration               ConfigurationEditor
 	AppliedConfigurationVersion uint64
 	RestartSupported            bool
+	BotRestartScheduler         BotRestartScheduler
 	IdempotencySecret           []byte
 	Dependencies                map[DependencyKey]DependencyConfiguration
 	Now                         func() time.Time
@@ -230,6 +260,7 @@ type Service struct {
 	configuration               ConfigurationEditor
 	appliedConfigurationVersion uint64
 	restartSupported            bool
+	botRestartScheduler         BotRestartScheduler
 	secret                      []byte
 	dependencies                map[DependencyKey]DependencyConfiguration
 	now                         func() time.Time
@@ -272,8 +303,9 @@ func NewService(options Options) (*Service, error) {
 	return &Service{
 		store: options.Store, health: options.Health, gateway: options.Gateway, events: options.Events,
 		configuration: options.Configuration, appliedConfigurationVersion: options.AppliedConfigurationVersion,
-		restartSupported: options.RestartSupported,
-		secret:           append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
+		restartSupported:    options.RestartSupported,
+		botRestartScheduler: options.BotRestartScheduler,
+		secret:              append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
 		workerCtx: workerContext, cancel: cancel, workerTimeout: options.WorkerTimeout,
 		retryDelay: options.TransitionRetryDelay,
 		workers:    make(chan struct{}, options.MaxConcurrentWorkers),
@@ -438,6 +470,82 @@ func (s *Service) publishConfigurationChanged(version uint64) {
 	})
 }
 
+func (s *Service) AcceptBotRestart(
+	ctx context.Context,
+	principal auth.Principal,
+	input BotRestartInput,
+	idempotencyKey string,
+	request auth.MutationContext,
+) (Operation, bool, error) {
+	if !principal.Has(auth.PermissionBotRestart) {
+		return Operation{}, false, ErrForbidden
+	}
+	if input.Confirmation != "restart" || input.ConfigurationVersion == 0 ||
+		!systemIdempotencyKeyPattern.MatchString(idempotencyKey) || principal.UserID == "" || !validRequestContext(request) {
+		return Operation{}, false, ErrInvalidInput
+	}
+	if !s.restartSupported {
+		return Operation{}, false, ErrBotRestartNotSupported
+	}
+	if s.configuration == nil {
+		return Operation{}, false, ErrConfigurationUnavailable
+	}
+	configuration, err := s.configuration.Read(ctx)
+	if err != nil {
+		return Operation{}, false, ErrConfigurationUnavailable
+	}
+	if configuration.Version != input.ConfigurationVersion {
+		return Operation{}, false, ErrConfigurationVersionConflict
+	}
+	now := s.now().UTC()
+	requestHash := s.botRestartRequestHash(input)
+	replayed, found, err := s.store.FindBotRestart(ctx, FindBotRestart{
+		ActorID: principal.UserID, IdempotencyKey: idempotencyKey, RequestHash: requestHash, At: now,
+	})
+	if err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) {
+			return Operation{}, false, ErrIdempotencyConflict
+		}
+		return Operation{}, false, fmt.Errorf("find bot restart: %w", err)
+	}
+	if found {
+		if !validBotRestartOperation(replayed) {
+			return Operation{}, false, errors.New("invalid bot restart operation store result")
+		}
+		return cloneOperation(replayed), false, nil
+	}
+	operation, fresh, err := s.store.BeginBotRestart(ctx, BeginBotRestart{
+		Actor: principal, Context: request, IdempotencyKey: idempotencyKey, RequestHash: requestHash,
+		ConfigurationVersion: input.ConfigurationVersion, RequestedAt: now,
+	})
+	if err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) {
+			return Operation{}, false, ErrIdempotencyConflict
+		}
+		return Operation{}, false, fmt.Errorf("begin bot restart: %w", err)
+	}
+	if !validBotRestartOperation(operation) || (fresh && operation.Status != StatusAccepted) {
+		return Operation{}, false, errors.New("invalid bot restart operation store result")
+	}
+	return cloneOperation(operation), fresh, nil
+}
+
+func (s *Service) ScheduleBotRestart(operationID string) bool {
+	if s.botRestartScheduler == nil || operationID == "" || !utf8.ValidString(operationID) || utf8.RuneCountInString(operationID) > 256 {
+		return false
+	}
+	return s.botRestartScheduler.Schedule(operationID)
+}
+
+func (s *Service) botRestartRequestHash(input BotRestartInput) string {
+	mac := hmac.New(sha256.New, s.secret)
+	_, _ = mac.Write([]byte("jxh-admin/bot-restart/v1\x00"))
+	_, _ = mac.Write([]byte(input.Confirmation))
+	_, _ = mac.Write([]byte{0})
+	_, _ = fmt.Fprintf(mac, "%d", input.ConfigurationVersion)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func (s *Service) RecoverInterrupted(ctx context.Context) (int, error) {
 	operations, err := s.store.RecoverInterruptedNapCatRestarts(ctx, s.now().UTC())
 	if err != nil {
@@ -449,7 +557,17 @@ func (s *Service) RecoverInterrupted(ctx context.Context) (int, error) {
 		}
 		s.publish(operation, "restart_interrupted")
 	}
-	return len(operations), nil
+	botOperations, err := s.store.RecoverInterruptedBotRestarts(ctx, s.now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted bot restarts: %w", err)
+	}
+	for _, operation := range botOperations {
+		if !validBotRestartOperation(operation) || operation.Status != StatusSucceeded {
+			return 0, errors.New("invalid recovered bot restart operation")
+		}
+		s.publish(operation, "bot_restart_completed")
+	}
+	return len(operations) + len(botOperations), nil
 }
 
 func (s *Service) RestartNapCat(ctx context.Context, principal auth.Principal, input RestartInput, idempotencyKey string, request ...auth.MutationContext) (Operation, error) {
@@ -649,6 +767,12 @@ func validOperation(operation Operation) bool {
 	validStatus := operation.Status == StatusAccepted || operation.Status == StatusRunning || operation.Status == StatusSucceeded ||
 		operation.Status == StatusFailed || operation.Status == StatusUnknown
 	return operation.ID != "" && operation.Type == "napcat_restart" && validStatus && !operation.RequestedAt.IsZero()
+}
+
+func validBotRestartOperation(operation Operation) bool {
+	validStatus := operation.Status == StatusAccepted || operation.Status == StatusRunning || operation.Status == StatusSucceeded ||
+		operation.Status == StatusFailed || operation.Status == StatusUnknown
+	return operation.ID != "" && operation.Type == "bot_restart" && validStatus && !operation.RequestedAt.IsZero()
 }
 
 func validRequestContext(value auth.MutationContext) bool {

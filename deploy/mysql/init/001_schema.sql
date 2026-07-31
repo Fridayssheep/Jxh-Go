@@ -1176,6 +1176,32 @@ VALUES
 ALTER TABLE `group_join_policies`
   DROP CHECK `chk_group_join_policies_auto_reject`;
 
+-- 012_support_bot_restart_operations
+-- Bot restarts use the same durable operation and idempotency lifecycle as
+-- other externally visible management actions.
+DROP PROCEDURE IF EXISTS `jxh_extend_system_operations_012`;
+DELIMITER $$
+CREATE PROCEDURE `jxh_extend_system_operations_012`()
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.table_constraints
+    WHERE constraint_schema = DATABASE()
+      AND BINARY table_name = BINARY 'system_operations'
+      AND BINARY constraint_name = BINARY 'chk_system_operations_type'
+      AND BINARY constraint_type = BINARY 'CHECK'
+  ) THEN
+    ALTER TABLE `system_operations` DROP CHECK `chk_system_operations_type`;
+  END IF;
+
+  ALTER TABLE `system_operations`
+    ADD CONSTRAINT `chk_system_operations_type`
+    CHECK (`type` IN ('napcat_restart', 'knowledge_reload', 'bot_restart'));
+END$$
+DELIMITER ;
+CALL `jxh_extend_system_operations_012`();
+DROP PROCEDURE `jxh_extend_system_operations_012`;
+
 CREATE TABLE IF NOT EXISTS `schema_migrations` (
   `version` int unsigned NOT NULL,
   `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
@@ -1205,4 +1231,5 @@ INSERT INTO `schema_migrations` (`version`, `name`, `checksum`, `applied_at`) VA
   (8, '008_create_manager_schema', 'a52e9d085d265ebb39339e57931d95bbc396f2a4c3b675559b9dec0430a25db9', CURRENT_TIMESTAMP(3)),
   (9, '009_support_knowledge_reload_operations', 'b0ddb67f10af91b6ff7b9b4e94276c5bc8f1f5a3e4205de78cfd48e8712e620e', CURRENT_TIMESTAMP(3)),
   (10, '010_add_student_id_rules', '88f21f5ff3e088e8b9be196c7cb3cc129451235e5bb580a0cfa713da4364571b', CURRENT_TIMESTAMP(3)),
-  (11, '011_enable_automatic_join_rejection', '3fcb3f67001e95141787c891c4e8751de1bd8501b9074d3dcfe9e66d687560c4', CURRENT_TIMESTAMP(3));
+  (11, '011_enable_automatic_join_rejection', '3fcb3f67001e95141787c891c4e8751de1bd8501b9074d3dcfe9e66d687560c4', CURRENT_TIMESTAMP(3)),
+  (12, '012_support_bot_restart_operations', '7cf41441d8e11afd1abe4926d4e6d0d39b7d6942717d39a0d1d716218c23d1f6', CURRENT_TIMESTAMP(3));

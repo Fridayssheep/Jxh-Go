@@ -35,6 +35,7 @@ const (
 	PermissionSystemRead         Permission = "system:read"
 	PermissionConfigWrite        Permission = "config:write"
 	PermissionNapCatRestart      Permission = "napcat:restart"
+	PermissionBotRestart         Permission = "bot:restart"
 	PermissionEventsRead         Permission = "events:read"
 )
 

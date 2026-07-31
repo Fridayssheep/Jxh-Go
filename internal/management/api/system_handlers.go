@@ -16,6 +16,8 @@ type SystemOperations interface {
 	Health(ctx context.Context, principal auth.Principal) (managersystem.Health, error)
 	Configuration(ctx context.Context, principal auth.Principal) (managersystem.Configuration, error)
 	UpdateConfiguration(ctx context.Context, principal auth.Principal, expectedVersion uint64, patch platformconfig.SettingsPatch, request auth.MutationContext) (managersystem.Configuration, error)
+	AcceptBotRestart(ctx context.Context, principal auth.Principal, input managersystem.BotRestartInput, idempotencyKey string, request auth.MutationContext) (managersystem.Operation, bool, error)
+	ScheduleBotRestart(operationID string) bool
 	RestartNapCat(ctx context.Context, principal auth.Principal, input managersystem.RestartInput, idempotencyKey string, request ...auth.MutationContext) (managersystem.Operation, error)
 }
 
@@ -41,6 +43,9 @@ func (h *SystemHandlers) Register(router *Router) error {
 		return err
 	}
 	if err := router.HandleFunc(http.MethodPatch, "/api/admin/v1/system/configuration", mutationRoute(auth.PermissionConfigWrite), h.updateConfiguration); err != nil {
+		return err
+	}
+	if err := router.HandleFunc(http.MethodPost, "/api/admin/v1/system/bot/restart", mutationRoute(auth.PermissionBotRestart), h.botRestart); err != nil {
 		return err
 	}
 	return router.HandleFunc(http.MethodPost, "/api/admin/v1/system/napcat/restart", mutationRoute(auth.PermissionNapCatRestart), h.restart)
@@ -97,6 +102,40 @@ func (h *SystemHandlers) updateConfiguration(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, mapSystemConfiguration(document))
 }
 
+type botRestartRequest struct {
+	Confirmation         string `json:"confirmation"`
+	ConfigurationVersion uint64 `json:"configuration_version"`
+}
+
+func (h *SystemHandlers) botRestart(w http.ResponseWriter, r *http.Request) {
+	idempotencyKey, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var body botRestartRequest
+	if !decodeRequestJSON(w, r, &body) {
+		return
+	}
+	if body.Confirmation != "restart" || body.ConfigurationVersion == 0 {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "重启确认或配置版本无效", nil, false)
+		return
+	}
+	identity, _ := AuthFromContext(r.Context())
+	operation, fresh, err := h.service.AcceptBotRestart(
+		r.Context(), principalFromAuth(identity), managersystem.BotRestartInput{
+			Confirmation: body.Confirmation, ConfigurationVersion: body.ConfigurationVersion,
+		}, idempotencyKey, mutationContextFromRequest(r),
+	)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, mapSystemOperation(operation))
+	if fresh {
+		h.service.ScheduleBotRestart(operation.ID)
+	}
+}
+
 type napcatRestartRequest struct {
 	Confirmation string `json:"confirmation"`
 	Reason       string `json:"reason"`
@@ -141,6 +180,8 @@ func (h *SystemHandlers) writeServiceError(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, r, http.StatusConflict, "resource_version_conflict", "配置文件已被其他操作修改", nil, false)
 	case errors.Is(err, managersystem.ErrConfigurationManagedExternally):
 		writeAPIError(w, r, http.StatusConflict, "configuration_field_managed_externally", "配置字段由部署环境管理", configurationManagedFields(err), false)
+	case errors.Is(err, managersystem.ErrBotRestartNotSupported):
+		writeAPIError(w, r, http.StatusConflict, "bot_restart_not_supported", "当前部署不支持受控重启 Bot", nil, false)
 	case errors.Is(err, managersystem.ErrConfigurationUnavailable):
 		w.Header().Set("Retry-After", "3")
 		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "配置文件当前不可用", nil, true)

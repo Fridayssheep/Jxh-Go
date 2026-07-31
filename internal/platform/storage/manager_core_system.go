@@ -14,6 +14,7 @@ import (
 )
 
 const managerNapCatRestartOperation = "system.napcat_restart"
+const managerBotRestartOperation = "system.bot_restart"
 const managerConfigurationUpdateAction = "system.configuration.update"
 
 type managerConfigurationAuditMetadata struct {
@@ -28,6 +29,12 @@ type managerRestartAuditMetadata struct {
 	Reason    string `json:"reason,omitempty"`
 	Status    string `json:"status"`
 	ErrorCode string `json:"error_code,omitempty"`
+}
+
+type managerBotRestartAuditMetadata struct {
+	Phase                string `json:"phase"`
+	Status               string `json:"status"`
+	ConfigurationVersion uint64 `json:"configuration_version"`
 }
 
 func (s *Store) BeginConfigurationUpdate(ctx context.Context, request managersystem.ConfigurationAuditRequest) (string, error) {
@@ -97,6 +104,182 @@ func (s *Store) CompleteConfigurationUpdate(ctx context.Context, completion mana
 		}
 		return nil
 	})
+}
+
+func (s *Store) FindBotRestart(ctx context.Context, find managersystem.FindBotRestart) (
+	operation managersystem.Operation,
+	found bool,
+	err error,
+) {
+	var idempotency managerIdempotencyKey
+	err = s.db.WithContext(ctx).Where(
+		"actor_type = ? AND actor_id = ? AND operation = ? AND idempotency_key = ? AND expires_at > ?",
+		managerActorAdminUser, find.ActorID, managerBotRestartOperation, find.IdempotencyKey, find.At.UTC(),
+	).Take(&idempotency).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return managersystem.Operation{}, false, nil
+	}
+	if err != nil {
+		return managersystem.Operation{}, false, err
+	}
+	if idempotency.RequestHash != find.RequestHash {
+		return managersystem.Operation{}, false, managersystem.ErrIdempotencyConflict
+	}
+	if idempotency.ResourceID == nil || *idempotency.ResourceID == "" {
+		return managersystem.Operation{}, false, errManagerInvalidState
+	}
+	var model managerSystemOperation
+	if err = s.db.WithContext(ctx).Where(
+		"operation_id = ? AND idempotency_id = ? AND type = ?", *idempotency.ResourceID, idempotency.ID, "bot_restart",
+	).Take(&model).Error; err != nil {
+		return managersystem.Operation{}, false, err
+	}
+	return managerSystemOperationValue(model), true, nil
+}
+
+func (s *Store) BeginBotRestart(ctx context.Context, begin managersystem.BeginBotRestart) (
+	operation managersystem.Operation,
+	fresh bool,
+	err error,
+) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		requestedAt := begin.RequestedAt.UTC()
+		var existing managerIdempotencyKey
+		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+			"actor_type = ? AND actor_id = ? AND operation = ? AND idempotency_key = ?",
+			managerActorAdminUser, begin.Actor.UserID, managerBotRestartOperation, begin.IdempotencyKey,
+		).Take(&existing).Error
+		if findErr == nil {
+			if !existing.ExpiresAt.After(requestedAt) {
+				if deleteErr := tx.Delete(&existing).Error; deleteErr != nil {
+					return deleteErr
+				}
+				findErr = gorm.ErrRecordNotFound
+			} else {
+				if existing.RequestHash != begin.RequestHash {
+					return managersystem.ErrIdempotencyConflict
+				}
+				if existing.ResourceID == nil || *existing.ResourceID == "" {
+					return errManagerInvalidState
+				}
+				var model managerSystemOperation
+				if loadErr := tx.Where("operation_id = ? AND idempotency_id = ? AND type = ?", *existing.ResourceID, existing.ID, "bot_restart").
+					Take(&model).Error; loadErr != nil {
+					return loadErr
+				}
+				operation = managerSystemOperationValue(model)
+				return nil
+			}
+		}
+		if !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return findErr
+		}
+		operationID, idErr := newManagerID("op")
+		if idErr != nil {
+			return idErr
+		}
+		auditContext, contextErr := managerAuditContextForMutation(tx, begin.Actor, begin.Context)
+		if contextErr != nil {
+			return contextErr
+		}
+		resourceType := "system_operation"
+		idempotency := managerIdempotencyKey{
+			ActorType: managerActorAdminUser, ActorID: begin.Actor.UserID, Operation: managerBotRestartOperation,
+			IdempotencyKey: begin.IdempotencyKey, RequestHash: begin.RequestHash, State: managerIdempotencyInProgress,
+			ResourceType: &resourceType, ResourceID: &operationID, TraceID: &operationID,
+			CreatedAt: requestedAt, ExpiresAt: requestedAt.Add(managerIdempotencyTTL),
+		}
+		if createErr := tx.Create(&idempotency).Error; createErr != nil {
+			if isManagerDuplicateKey(createErr) {
+				return managersystem.ErrIdempotencyConflict
+			}
+			return createErr
+		}
+		model := managerSystemOperation{
+			OperationID: operationID, Type: "bot_restart", Status: string(managersystem.StatusAccepted),
+			RequestedByType: managerActorAdminUser, RequestedBy: begin.Actor.UserID, IdempotencyID: &idempotency.ID,
+			RequestID: begin.Context.RequestID, RequestedAt: requestedAt,
+		}
+		if createErr := tx.Create(&model).Error; createErr != nil {
+			return createErr
+		}
+		if auditErr := insertManagerAudit(tx, managerAuditEntry{
+			Context: auditContext, OccurredAt: requestedAt, ScopeType: "system", Action: managerBotRestartOperation,
+			TargetType: resourceType, TargetID: operationID, Result: audit.ResultSuccess,
+			Metadata: managerBotRestartAuditMetadata{
+				Phase: "requested", Status: string(managersystem.StatusAccepted),
+				ConfigurationVersion: begin.ConfigurationVersion,
+			},
+		}); auditErr != nil {
+			return auditErr
+		}
+		operation = managerSystemOperationValue(model)
+		fresh = true
+		return nil
+	})
+	return operation, fresh, err
+}
+
+func (s *Store) RecoverInterruptedBotRestarts(ctx context.Context, recoveredAt time.Time) (
+	operations []managersystem.Operation,
+	err error,
+) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var models []managerSystemOperation
+		if loadErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("type = ? AND status IN ?", "bot_restart", []string{
+				string(managersystem.StatusAccepted), string(managersystem.StatusRunning),
+			}).Order("requested_at ASC").Order("operation_id ASC").Find(&models).Error; loadErr != nil {
+			return loadErr
+		}
+		completedAt := recoveredAt.UTC()
+		for _, model := range models {
+			if model.IdempotencyID == nil {
+				return errManagerInvalidState
+			}
+			operationUpdate := tx.Model(&managerSystemOperation{}).
+				Where("operation_id = ? AND type = ? AND status IN ?", model.OperationID, "bot_restart", []string{
+					string(managersystem.StatusAccepted), string(managersystem.StatusRunning),
+				}).Updates(map[string]any{"status": managersystem.StatusSucceeded, "completed_at": completedAt, "error_code": nil})
+			if operationUpdate.Error != nil {
+				return operationUpdate.Error
+			}
+			if operationUpdate.RowsAffected != 1 {
+				continue
+			}
+			resultStatus := string(managersystem.StatusSucceeded)
+			responseStatus := uint16(202)
+			idempotencyUpdate := tx.Model(&managerIdempotencyKey{}).
+				Where("idempotency_id = ? AND state = ?", *model.IdempotencyID, managerIdempotencyInProgress).
+				Updates(map[string]any{
+					"state": managerIdempotencyCompleted, "result_status": resultStatus,
+					"response_status": responseStatus, "error_code": nil, "completed_at": completedAt,
+				})
+			if idempotencyUpdate.Error != nil {
+				return idempotencyUpdate.Error
+			}
+			if idempotencyUpdate.RowsAffected != 1 {
+				return errManagerInvalidState
+			}
+			auditContext, contextErr := findManagerAuditContext(tx, managerBotRestartOperation, model.OperationID)
+			if contextErr != nil {
+				return contextErr
+			}
+			if auditErr := insertManagerAudit(tx, managerAuditEntry{
+				Context: auditContext, OccurredAt: completedAt, ScopeType: "system", Action: managerBotRestartOperation,
+				TargetType: "system_operation", TargetID: model.OperationID, Result: audit.ResultSuccess,
+				Metadata: managerBotRestartAuditMetadata{Phase: "completed", Status: resultStatus},
+			}); auditErr != nil {
+				return auditErr
+			}
+			model.Status = resultStatus
+			model.CompletedAt = &completedAt
+			model.ErrorCode = nil
+			operations = append(operations, managerSystemOperationValue(model))
+		}
+		return nil
+	})
+	return operations, err
 }
 
 func (s *Store) FindNapCatRestart(ctx context.Context, find managersystem.FindRestart) (

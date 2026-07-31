@@ -30,6 +30,7 @@ var allPermissions = []Permission{
 	PermissionSystemRead,
 	PermissionConfigWrite,
 	PermissionNapCatRestart,
+	PermissionBotRestart,
 	PermissionEventsRead,
 }
 

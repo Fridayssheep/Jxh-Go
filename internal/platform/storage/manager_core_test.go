@@ -54,6 +54,32 @@ func TestManagerConfigurationAuditRecordsOnlyPathsAndVersions(t *testing.T) {
 	}
 }
 
+func TestManagerBotRestartPersistsReplaysAndRecovers(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	now := time.Unix(1700001000, 0).UTC()
+	insertManagerAuthTestUser(t, sqlDB, "usr_bot_restart", "bot-restart-admin", auth.RoleSuperAdmin, now)
+	begin := managersystem.BeginBotRestart{
+		Actor:          auth.Principal{UserID: "usr_bot_restart", Role: auth.RoleSuperAdmin},
+		Context:        auth.MutationContext{RequestID: "req_bot_restart", IPAddress: "127.0.0.1", UserAgent: "test"},
+		IdempotencyKey: "bot-restart-key", RequestHash: strings.Repeat("a", 64),
+		ConfigurationVersion: 7, RequestedAt: now,
+	}
+	operation, fresh, err := store.BeginBotRestart(t.Context(), begin)
+	if err != nil || !fresh || operation.Type != "bot_restart" || operation.Status != managersystem.StatusAccepted {
+		t.Fatalf("operation=%#v fresh=%v error=%v", operation, fresh, err)
+	}
+	replayed, found, err := store.FindBotRestart(t.Context(), managersystem.FindBotRestart{
+		ActorID: begin.Actor.UserID, IdempotencyKey: begin.IdempotencyKey, RequestHash: begin.RequestHash, At: now,
+	})
+	if err != nil || !found || replayed.ID != operation.ID {
+		t.Fatalf("replay=%#v found=%v error=%v", replayed, found, err)
+	}
+	recovered, err := store.RecoverInterruptedBotRestarts(t.Context(), now.Add(time.Minute))
+	if err != nil || len(recovered) != 1 || recovered[0].ID != operation.ID || recovered[0].Status != managersystem.StatusSucceeded {
+		t.Fatalf("recovered=%#v error=%v", recovered, err)
+	}
+}
+
 func TestManagerGlobalSettingsDocumentDefaultsAndRoundTrip(t *testing.T) {
 	globalDefaults, err := decodeManagerGlobalSettings([]byte(`{}`))
 	if err != nil {

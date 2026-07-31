@@ -14,7 +14,7 @@ import (
 
 var _ auth.BootstrapStore = (*Store)(nil)
 
-// CreateFirstSuperAdmin serializes bootstrap attempts on the migration baseline
+// CreateFirstSuperAdmin serializes bootstrap attempts on the global settings
 // row. The lock remains held until the user and its audit record commit.
 func (s *Store) CreateFirstSuperAdmin(ctx context.Context, admin auth.BootstrapAdmin) (auth.User, bool, error) {
 	db, err := s.managerDB(ctx)
@@ -29,12 +29,9 @@ func (s *Store) CreateFirstSuperAdmin(ctx context.Context, admin auth.BootstrapA
 	var created auth.User
 	var inserted bool
 	err = managerTransaction(db, "create first super administrator", func(tx *gorm.DB) error {
-		var migration struct {
-			Version uint64 `gorm:"column:version"`
-		}
-		result := tx.Table("schema_migrations").
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Select("version").Order("version ASC").Limit(1).Take(&migration)
+		var bootstrapLock managerFeatureSetting
+		result := tx.Select("setting_id").Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("scope_type = ? AND group_id IS NULL", managerSettingsScopeGlobal).Take(&bootstrapLock)
 		if result.Error != nil {
 			return result.Error
 		}

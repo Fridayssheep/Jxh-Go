@@ -22,6 +22,7 @@ const (
 	requestIDContextKey requestContextKey = iota
 	clientIPContextKey
 	authContextKey
+	secureCookieContextKey
 )
 
 func RequestIDFromContext(ctx context.Context) string {
@@ -37,6 +38,11 @@ func ClientIPFromContext(ctx context.Context) string {
 func AuthFromContext(ctx context.Context) (auth.AuthContext, bool) {
 	value, ok := ctx.Value(authContextKey).(auth.AuthContext)
 	return value, ok
+}
+
+func secureCookieFromContext(ctx context.Context) bool {
+	secure, _ := ctx.Value(secureCookieContextKey).(bool)
+	return secure
 }
 
 func DecodeJSON(r *http.Request, target any) error {

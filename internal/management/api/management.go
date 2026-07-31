@@ -15,7 +15,6 @@ type ManagementEvents interface {
 // partially registered management API.
 type ManagementOptions struct {
 	Middleware   MiddlewareOptions
-	CookieSecure bool
 	SSEHeartbeat time.Duration
 
 	Auth          AuthOperations
@@ -49,11 +48,11 @@ func NewManagementRouter(options ManagementOptions) (*Router, error) {
 		return nil, fmt.Errorf("create admin router: %w", err)
 	}
 
-	authHandlers, err := NewAuthHandlers(options.Auth, options.Events, options.CookieSecure)
+	authHandlers, err := NewAuthHandlers(options.Auth, options.Events)
 	if err != nil {
 		return nil, err
 	}
-	userHandlers, err := NewUsersHandlers(options.Users, options.Events, options.CookieSecure)
+	userHandlers, err := NewUsersHandlers(options.Users, options.Events)
 	if err != nil {
 		return nil, err
 	}

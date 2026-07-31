@@ -6,13 +6,8 @@ app:
 admin:
   # 管理 API 监听地址。生产环境建议只监听内网或回环地址，并由 HTTPS 反向代理转发。
   addr: "127.0.0.1:8090"
-  # 浏览器访问管理面板的唯一 Origin，用于 Origin/CSRF 校验；部署前必须改为实际 HTTPS 地址。
-  # 与 session_secret 任一缺失时只禁用管理后端，QQ Bot 和 /healthz 继续运行。
-  public_origin: "https://manager.example.com"
-  # 会话令牌服务端摘要使用的至少 32 字节随机密钥，建议仅通过 JXH_ADMIN_SESSION_SECRET 注入。
+  # 会话令牌服务端摘要使用的至少 32 字节随机密钥，建议仅通过 JXH_ADMIN_SESSION_SECRET 注入；缺失时只禁用管理后端。
   session_secret: ""
-  # 生产环境必须为 true；仅在隔离的本地 HTTP 开发环境临时关闭。
-  cookie_secure: true
   # 会话绝对有效期，单位秒；可用 JXH_ADMIN_SESSION_TTL_SECONDS 覆盖，非正值恢复为 43200。
   session_ttl_seconds: 43200
   # 会话无操作空闲有效期，单位秒；可用 JXH_ADMIN_SESSION_IDLE_TIMEOUT_SECONDS 覆盖，非正值恢复为 1800。

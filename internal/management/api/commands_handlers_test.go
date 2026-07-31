@@ -205,8 +205,8 @@ func newCommandHTTPFixture(t *testing.T, service CommandOperations) *Router {
 		t.Fatal(err)
 	}
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 1 << 20,
-		Random: bytes.NewReader(bytes.Repeat([]byte{2}, 8192)), Authenticator: testAuthenticator{},
+		MaxBodyBytes: 1 << 20,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{2}, 8192)), Authenticator: testAuthenticator{},
 	})
 	if err != nil {
 		t.Fatal(err)

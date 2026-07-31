@@ -14,9 +14,6 @@ func TestDefaultIncludesAdminAndDatabasePool(t *testing.T) {
 	if cfg.Admin.Addr != "127.0.0.1:8090" {
 		t.Fatalf("admin addr = %q, want %q", cfg.Admin.Addr, "127.0.0.1:8090")
 	}
-	if !cfg.Admin.CookieSecure {
-		t.Fatal("admin cookie must be secure by default")
-	}
 	if cfg.Admin.SessionTTLSeconds != 12*60*60 {
 		t.Fatalf("session ttl = %d, want %d", cfg.Admin.SessionTTLSeconds, 12*60*60)
 	}
@@ -45,9 +42,7 @@ func TestDefaultIncludesAdminAndDatabasePool(t *testing.T) {
 
 func TestLoadAppliesAdminAndDatabaseEnvironment(t *testing.T) {
 	t.Setenv("JXH_ADMIN_ADDR", ":9090")
-	t.Setenv("JXH_ADMIN_PUBLIC_ORIGIN", "https://manager.example.test")
 	t.Setenv("JXH_ADMIN_SESSION_SECRET", "test-only-secret")
-	t.Setenv("JXH_ADMIN_COOKIE_SECURE", "false")
 	t.Setenv("JXH_ADMIN_TRUSTED_PROXIES", "127.0.0.1/32, 10.0.0.0/8")
 	t.Setenv("JXH_ADMIN_SESSION_TTL_SECONDS", "7200")
 	t.Setenv("JXH_ADMIN_MAX_CONCURRENT_REQUESTS", "17")
@@ -58,11 +53,11 @@ func TestLoadAppliesAdminAndDatabaseEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.Admin.Addr != ":9090" || cfg.Admin.PublicOrigin != "https://manager.example.test" {
-		t.Fatalf("admin addr/origin = %q/%q", cfg.Admin.Addr, cfg.Admin.PublicOrigin)
+	if cfg.Admin.Addr != ":9090" {
+		t.Fatalf("admin addr = %q", cfg.Admin.Addr)
 	}
-	if cfg.Admin.SessionSecret != "test-only-secret" || cfg.Admin.CookieSecure {
-		t.Fatalf("admin secret configured = %t, cookie secure = %t", cfg.Admin.SessionSecret != "", cfg.Admin.CookieSecure)
+	if cfg.Admin.SessionSecret != "test-only-secret" {
+		t.Fatal("admin secret was not configured")
 	}
 	if len(cfg.Admin.TrustedProxies) != 2 || cfg.Admin.TrustedProxies[1] != "10.0.0.0/8" {
 		t.Fatalf("trusted proxies = %#v", cfg.Admin.TrustedProxies)
@@ -78,17 +73,17 @@ func TestLoadAppliesAdminAndDatabaseEnvironment(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidAdminEnvironment(t *testing.T) {
-	t.Setenv("JXH_ADMIN_COOKIE_SECURE", "sometimes")
+func TestLoadRejectsInvalidBooleanEnvironment(t *testing.T) {
+	t.Setenv("JXH_DATABASE_PARSE_TIME", "sometimes")
 
 	if _, err := Load(""); err == nil {
 		t.Fatal("Load() error = nil, want invalid boolean error")
 	}
 }
 
-func TestLoadRedactsInvalidAdminEnvironmentValue(t *testing.T) {
+func TestLoadRedactsInvalidBooleanEnvironmentValue(t *testing.T) {
 	const (
-		key         = "JXH_ADMIN_COOKIE_SECURE"
+		key         = "JXH_DATABASE_PARSE_TIME"
 		secretValue = "invalid-sensitive-cookie-value-7f03"
 	)
 	t.Setenv(key, secretValue)

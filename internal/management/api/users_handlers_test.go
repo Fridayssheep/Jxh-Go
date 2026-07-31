@@ -175,13 +175,13 @@ func TestSessionCurrentFilterUsesAuthenticatedSession(t *testing.T) {
 
 func newUsersHTTPFixture(t *testing.T, service AdminUserService, sink SessionEventSink) *Router {
 	t.Helper()
-	handlers, err := NewUsersHandlers(service, sink, true)
+	handlers, err := NewUsersHandlers(service, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 1 << 20,
-		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Authenticator: testAuthenticator{},
+		MaxBodyBytes: 1 << 20,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Authenticator: testAuthenticator{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func userMutationRequest(t *testing.T, method, target, body string) *http.Reques
 	t.Helper()
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	request.Header.Set("X-CSRF-Token", "valid-csrf-token")
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")

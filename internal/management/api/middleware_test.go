@@ -23,6 +23,7 @@ func TestMutatingRouteRejectsUntrustedOriginAndCSRF(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/test", nil)
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
+	setManagerOrigin(request)
 	request.Header.Set("Origin", "https://attacker.example")
 	request.Header.Set("X-CSRF-Token", "valid-csrf-token")
 	response := httptest.NewRecorder()
@@ -31,10 +32,94 @@ func TestMutatingRouteRejectsUntrustedOriginAndCSRF(t *testing.T) {
 
 	request = httptest.NewRequest(http.MethodPost, "/api/admin/v1/test", nil)
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assertErrorCode(t, response, http.StatusForbidden, CodeCSRFInvalid)
+}
+
+func TestMutatingRouteDerivesAllowedOriginFromRequest(t *testing.T) {
+	router, err := NewRouter(MiddlewareOptions{
+		MaxBodyBytes: 64, Random: bytes.NewReader(bytes.Repeat([]byte{1}, 512)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleFunc(http.MethodPost, "/api/admin/v1/test", RouteOptions{
+		Public: true, Mutation: true,
+	}, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name           string
+		host           string
+		forwardedProto string
+		forwardedHost  string
+		origin         string
+		wantStatus     int
+	}{
+		{name: "LAN HTTP", host: "192.168.2.6:8080", forwardedProto: "http", origin: "http://192.168.2.6:8080", wantStatus: http.StatusNoContent},
+		{name: "HTTPS hostname", host: "manager.example", forwardedProto: "https", origin: "https://manager.example", wantStatus: http.StatusNoContent},
+		{name: "default HTTPS port", host: "manager.example:443", forwardedProto: "https", origin: "https://manager.example", wantStatus: http.StatusNoContent},
+		{name: "IPv6 LAN HTTP", host: "[fd00::1]:8080", forwardedProto: "http", origin: "http://[fd00::1]:8080", wantStatus: http.StatusNoContent},
+		{name: "forwarded host ignored", host: "manager.example", forwardedProto: "https", forwardedHost: "attacker.example", origin: "https://manager.example", wantStatus: http.StatusNoContent},
+		{name: "different host", host: "192.168.2.6:8080", forwardedProto: "http", origin: "http://attacker.example", wantStatus: http.StatusForbidden},
+		{name: "different port", host: "192.168.2.6:8080", forwardedProto: "http", origin: "http://192.168.2.6:8081", wantStatus: http.StatusForbidden},
+		{name: "different scheme", host: "manager.example", forwardedProto: "https", origin: "http://manager.example", wantStatus: http.StatusForbidden},
+		{name: "missing forwarded scheme", host: "manager.example", origin: "https://manager.example", wantStatus: http.StatusForbidden},
+		{name: "uppercase forwarded scheme", host: "manager.example", forwardedProto: "HTTPS", origin: "https://manager.example", wantStatus: http.StatusForbidden},
+		{name: "forwarded scheme chain", host: "manager.example", forwardedProto: "https,http", origin: "https://manager.example", wantStatus: http.StatusForbidden},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/test", nil)
+			request.Host = test.host
+			request.Header.Set("Origin", test.origin)
+			if test.forwardedProto != "" {
+				request.Header.Set("X-Forwarded-Proto", test.forwardedProto)
+			}
+			if test.forwardedHost != "" {
+				request.Header.Set("X-Forwarded-Host", test.forwardedHost)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestMutatingRouteRejectsOriginBeforeAuthentication(t *testing.T) {
+	authenticator := &countingAuthenticator{}
+	router, err := NewRouter(MiddlewareOptions{
+		MaxBodyBytes: 64, Random: bytes.NewReader(bytes.Repeat([]byte{1}, 512)), Authenticator: authenticator,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleFunc(http.MethodPost, "/api/admin/v1/test", RouteOptions{
+		Mutation: true,
+	}, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/test", nil)
+	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
+	setManagerOrigin(request)
+	request.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	assertErrorCode(t, response, http.StatusForbidden, CodeOriginForbidden)
+	if authenticator.calls != 0 {
+		t.Fatalf("authentication calls=%d want=0", authenticator.calls)
+	}
 }
 
 func TestAdminMiddlewareIgnoresInboundRequestIDAndSetsSecurityHeaders(t *testing.T) {
@@ -66,14 +151,14 @@ func TestAdminMiddlewareRejectsOversizedAndWrongContentType(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/login", strings.NewReader(strings.Repeat("x", 65)))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assertErrorCode(t, response, http.StatusRequestEntityTooLarge, CodePayloadTooLarge)
 
 	request = httptest.NewRequest(http.MethodPost, "/api/admin/v1/login", strings.NewReader(`{"ok":true}`))
 	request.Header.Set("Content-Type", "text/plain")
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assertErrorCode(t, response, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType)
@@ -81,7 +166,7 @@ func TestAdminMiddlewareRejectsOversizedAndWrongContentType(t *testing.T) {
 
 func TestAdminMiddlewareRejectsExcessConcurrencyWithoutBlocking(t *testing.T) {
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 64, MaxConcurrentRequests: 1,
+		MaxBodyBytes: 64, MaxConcurrentRequests: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +224,7 @@ func TestAdminMiddlewareRejectsExcessConcurrencyWithoutBlocking(t *testing.T) {
 
 func TestAdminMiddlewareUsesTrustedProxyChain(t *testing.T) {
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", TrustedProxies: []string{"10.0.0.0/8"}, MaxBodyBytes: 64,
+		TrustedProxies: []string{"10.0.0.0/8"}, MaxBodyBytes: 64,
 		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 256)), Authenticator: testAuthenticator{},
 	})
 	if err != nil {
@@ -211,8 +296,8 @@ func TestAdminAuthenticationInfrastructureFailureReturns503WithoutRotationFallba
 	var logs strings.Builder
 	authenticator := &failingReplacementAuthenticator{}
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 64,
-		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 256)), Logger: log.New(&logs, "", 0), Authenticator: authenticator,
+		MaxBodyBytes: 64,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{1}, 256)), Logger: log.New(&logs, "", 0), Authenticator: authenticator,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -263,13 +348,19 @@ func newHTTPFixture(t *testing.T) *Router {
 func newHTTPFixtureWithLogger(t *testing.T, logger *log.Logger) *Router {
 	t.Helper()
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 64,
-		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Logger: logger, Authenticator: testAuthenticator{},
+		MaxBodyBytes: 64,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Logger: logger, Authenticator: testAuthenticator{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return router
+}
+
+func setManagerOrigin(request *http.Request) {
+	request.Host = "manager.example"
+	request.Header.Set("Origin", "https://manager.example")
+	request.Header.Set("X-Forwarded-Proto", "https")
 }
 
 type testAuthenticator struct{}
@@ -286,6 +377,15 @@ func (testAuthenticator) Authenticate(_ context.Context, credential string) (aut
 		Session:     auth.Session{ID: "ses_1", UserID: "usr_1", Status: auth.SessionStatusActive},
 		Permissions: auth.PermissionsFor(role), CSRFToken: "valid-csrf-token",
 	}, nil
+}
+
+type countingAuthenticator struct {
+	calls int
+}
+
+func (a *countingAuthenticator) Authenticate(context.Context, string) (auth.AuthContext, error) {
+	a.calls++
+	return auth.AuthContext{}, auth.ErrUnauthenticated
 }
 
 func (a testAuthenticator) AuthenticatePassive(ctx context.Context, credential string) (auth.AuthContext, error) {

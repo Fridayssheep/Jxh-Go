@@ -19,7 +19,7 @@ func TestLoginSetsStrictCookieWithoutReturningToken(t *testing.T) {
 	router := newAuthHTTPFixture(t, service)
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/login", strings.NewReader(`{"username":"root-admin","password":"valid-password-123"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	request.RemoteAddr = "192.0.2.5:1234"
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
@@ -36,6 +36,37 @@ func TestLoginSetsStrictCookieWithoutReturningToken(t *testing.T) {
 	}
 	if service.loginRequest.ClientIP != "192.0.2.5" || service.loginRequest.UserAgent != "" {
 		t.Fatalf("request=%+v", service.loginRequest)
+	}
+}
+
+func TestLoginCookieSecurityFollowsValidatedOrigin(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		scheme string
+		secure bool
+	}{
+		{name: "HTTP", scheme: "http", secure: false},
+		{name: "HTTPS", scheme: "https", secure: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := newFakeAuthOperations()
+			router := newAuthHTTPFixture(t, service)
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/login", strings.NewReader(`{"username":"root-admin","password":"valid-password-123"}`))
+			request.Host = "manager.example"
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Origin", test.scheme+"://manager.example")
+			request.Header.Set("X-Forwarded-Proto", test.scheme)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			cookies := response.Result().Cookies()
+			if len(cookies) != 1 || cookies[0].Secure != test.secure {
+				t.Fatalf("cookies=%+v want_secure=%t", cookies, test.secure)
+			}
+		})
 	}
 }
 
@@ -122,7 +153,7 @@ func TestLoginUsesUniformSafeErrors(t *testing.T) {
 		router := newAuthHTTPFixture(t, service)
 		request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/login", strings.NewReader(`{"username":"root-admin","password":"valid-password-123"}`))
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Origin", "https://manager.example")
+		setManagerOrigin(request)
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
 		if strings.Contains(response.Body.String(), "database leaked secret") || strings.Contains(response.Body.String(), "valid-password-123") {
@@ -141,7 +172,7 @@ func TestLoginValidatesContractBeforeService(t *testing.T) {
 		router := newAuthHTTPFixture(t, service)
 		request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/auth/login", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("Origin", "https://manager.example")
+		setManagerOrigin(request)
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, request)
 		assertErrorCode(t, response, http.StatusBadRequest, CodeBadRequest)
@@ -158,13 +189,13 @@ func newAuthHTTPFixture(t *testing.T, service *fakeAuthOperations) *Router {
 func newAuthHTTPFixtureWithEvents(t *testing.T, service *fakeAuthOperations, eventSink SessionEventSink) *Router {
 	t.Helper()
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 1 << 20,
-		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Authenticator: service,
+		MaxBodyBytes: 1 << 20,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Authenticator: service,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	handlers, err := NewAuthHandlers(service, eventSink, true)
+	handlers, err := NewAuthHandlers(service, eventSink)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +208,7 @@ func newAuthHTTPFixtureWithEvents(t *testing.T, service *fakeAuthOperations, eve
 func authMutationRequest(method, target, body string) *http.Request {
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "credential"})
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	request.Header.Set("X-CSRF-Token", "valid-csrf-token")
 	if body != "" {
 		request.Header.Set("Content-Type", "application/json")

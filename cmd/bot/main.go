@@ -113,6 +113,7 @@ type applicationRunner interface {
 
 type runtimeDependencies struct {
 	openDatabase     func(context.Context, config.DatabaseConfig) (databaseResources, error)
+	schemaAutomation database.SchemaAutomation
 	buildApplication func(context.Context, config.Config, databaseResources) (applicationRunner, error)
 }
 
@@ -144,6 +145,11 @@ func runWithDependencies(ctx context.Context, cfg config.Config, dependencies ru
 			err = errors.Join(err, errors.New("close database: database operation failed"))
 		}
 	}()
+	if dependencies.schemaAutomation != nil {
+		if err := dependencies.schemaAutomation.Apply(ctx, resources.ORM); err != nil {
+			return errors.New("apply schema automation: database operation failed")
+		}
+	}
 
 	application, err := dependencies.buildApplication(ctx, cfg, resources)
 	if err != nil {
@@ -421,7 +427,7 @@ func initializeKnowledge(ctx context.Context, configuration config.WPSConfig, he
 }
 
 func adminHTTPConfigured(configuration config.AdminConfig) bool {
-	return strings.TrimSpace(configuration.PublicOrigin) != "" && len([]byte(configuration.SessionSecret)) >= 32
+	return len([]byte(configuration.SessionSecret)) >= 32
 }
 
 type closeFunc func() error

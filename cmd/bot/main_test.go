@@ -97,6 +97,48 @@ func TestRunWithDependenciesClosesDatabaseAfterApplicationStops(t *testing.T) {
 	}
 }
 
+func TestRunWithDependenciesAppliesSchemaAutomationBeforeBuildingApplication(t *testing.T) {
+	db := &gorm.DB{}
+	automation := &botSchemaAutomation{}
+	err := runWithDependencies(t.Context(), config.Default(), runtimeDependencies{
+		openDatabase: func(context.Context, config.DatabaseConfig) (databaseResources, error) {
+			return databaseResources{ORM: db, Pinger: botDatabasePinger{}, Closer: &botDatabaseCloser{}}, nil
+		},
+		schemaAutomation: automation,
+		buildApplication: func(context.Context, config.Config, databaseResources) (applicationRunner, error) {
+			if automation.calls != 1 || automation.db != db {
+				t.Fatalf("schema automation calls=%d db=%p want_db=%p", automation.calls, automation.db, db)
+			}
+			return &botApplicationRunner{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunWithDependenciesClosesDatabaseWhenSchemaAutomationFails(t *testing.T) {
+	closer := &botDatabaseCloser{}
+	secret := "schema automation leaked secret"
+	buildCalls := 0
+	err := runWithDependencies(t.Context(), config.Default(), runtimeDependencies{
+		openDatabase: func(context.Context, config.DatabaseConfig) (databaseResources, error) {
+			return databaseResources{ORM: &gorm.DB{}, Pinger: botDatabasePinger{}, Closer: closer}, nil
+		},
+		schemaAutomation: &botSchemaAutomation{err: errors.New(secret)},
+		buildApplication: func(context.Context, config.Config, databaseResources) (applicationRunner, error) {
+			buildCalls++
+			return &botApplicationRunner{}, nil
+		},
+	})
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("runWithDependencies() error=%v", err)
+	}
+	if closer.calls != 1 || buildCalls != 0 {
+		t.Fatalf("database close calls=%d build calls=%d", closer.calls, buildCalls)
+	}
+}
+
 func TestRunWithDependenciesSanitizesDatabaseCloseFailure(t *testing.T) {
 	secret := "database-password"
 	err := runWithDependencies(t.Context(), config.Default(), runtimeDependencies{
@@ -115,23 +157,18 @@ func TestRunWithDependenciesSanitizesDatabaseCloseFailure(t *testing.T) {
 	}
 }
 
-func TestAdminHTTPRequiresCompleteSecureConfiguration(t *testing.T) {
+func TestAdminHTTPRequiresSessionSecret(t *testing.T) {
 	configuration := config.Default().Admin
 	if adminHTTPConfigured(configuration) {
 		t.Fatal("default incomplete admin configuration was enabled")
 	}
-	configuration.PublicOrigin = "https://manager.example"
 	configuration.SessionSecret = strings.Repeat("x", 31)
 	if adminHTTPConfigured(configuration) {
 		t.Fatal("short admin session secret was accepted")
 	}
 	configuration.SessionSecret += "x"
 	if !adminHTTPConfigured(configuration) {
-		t.Fatal("complete secure admin configuration was disabled")
-	}
-	configuration.PublicOrigin = "  "
-	if adminHTTPConfigured(configuration) {
-		t.Fatal("blank admin origin was accepted")
+		t.Fatal("admin configuration with a strong session secret was disabled")
 	}
 }
 
@@ -384,6 +421,18 @@ func (p botDatabasePinger) PingContext(context.Context) error { return p.err }
 type botDatabaseCloser struct {
 	calls int
 	err   error
+}
+
+type botSchemaAutomation struct {
+	calls int
+	db    *gorm.DB
+	err   error
+}
+
+func (a *botSchemaAutomation) Apply(_ context.Context, db *gorm.DB) error {
+	a.calls++
+	a.db = db
+	return a.err
 }
 
 func (c *botDatabaseCloser) Close() error {

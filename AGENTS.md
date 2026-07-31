@@ -7,7 +7,7 @@
 - 项目是 Go 1.25+ 编写的精弘 QQ 群助手，通过 NapCat SDK v1.0.2 接入 OneBot 11。入口是 `cmd/bot/main.go`。
 - WPS XLSX 是知识唯一真源。启动和 `/reload` 下载并解析表格，验证成功后写入 `data/cache/knowledge.xlsx`，再原子替换进程内 `knowledge.IndexRef`。MySQL 不保存知识正文。
 - 普通关键词回复使用 keyword/alias 精确匹配（大小写和首尾空格已归一化）；`/ai` 使用 Eino ReAct Agent 调用内存 `search_knowledge` 工具，支持 AND、OR 和 Go 正则搜索。
-- MySQL 保存 Bot 运行数据和管理端账号、会话、审计、设置、任务、审批、命令与统计数据。表结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`。schema 变更后需在 `deploy/mysql/migrations/` 追加迁移脚本供已有部署使用。
+- MySQL 保存 Bot 运行数据和管理端账号、会话、审计、设置、任务、审批、命令与统计数据。空库结构以 `deploy/mysql/init/001_schema.sql` 为准，运行时禁止 `AutoMigrate`；后续自动扩展只能通过显式注入的 `database.SchemaAutomation` 实现。
 - 数据访问统一位于 `internal/platform/storage`，使用直接 GORM 调用与手写模型（`internal/platform/storage/models.go`）。修改字段时先改 `deploy/mysql/init/001_schema.sql`，再同步本地模型；运行时仍禁止 `AutoMigrate`。
 - `internal/` 按功能边界组织；新增包前先阅读 `internal/README.md`，优先放入既有的 management、automation、groups、knowledge、messaging、bot 或 platform 边界，不恢复根目录平铺结构。
 - Compose 包含 MySQL、NapCat、quote 和 bot。quote 服务从 `zjutjh/qq-quote-generator` 构建，客户端先请求 `/gif/base64/`，失败后回退 `/png/base64/`。

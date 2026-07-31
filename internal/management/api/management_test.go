@@ -124,9 +124,8 @@ func newCompleteManagementRouter(t *testing.T) *Router {
 	}
 	options := ManagementOptions{
 		Middleware: MiddlewareOptions{
-			PublicOrigin: "https://manager.example", MaxBodyBytes: 1 << 20,
+			MaxBodyBytes: 1 << 20,
 		},
-		CookieSecure:  true,
 		Auth:          newFakeAuthOperations(),
 		Users:         &fakeAdminUserService{},
 		Audit:         auditService,

@@ -145,8 +145,8 @@ func TestAnalyticsRoutesEnforceAuthenticationPermissionAndAllowObserver(t *testi
 	}
 
 	deniedRouter, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 64,
-		Random: bytes.NewReader(bytes.Repeat([]byte{2}, 128)), Authenticator: analyticsDeniedAuthenticator{},
+		MaxBodyBytes: 64,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{2}, 128)), Authenticator: analyticsDeniedAuthenticator{},
 	})
 	if err != nil {
 		t.Fatal(err)

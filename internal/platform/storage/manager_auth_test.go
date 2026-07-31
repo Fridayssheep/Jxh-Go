@@ -19,7 +19,6 @@ import (
 	"github.com/zjutjh/jxh-go/internal/management/audit"
 	"github.com/zjutjh/jxh-go/internal/management/auth"
 	"github.com/zjutjh/jxh-go/internal/management/idempotency"
-	"github.com/zjutjh/jxh-go/internal/platform/database"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -624,18 +623,49 @@ func openManagerAuthTestStore(t *testing.T) (*Store, *sql.DB) {
 	if !ok {
 		t.Fatal("locate manager auth test source")
 	}
-	migrations, err := database.LoadMigrations(filepath.Join(filepath.Dir(filename), "..", "..", "..", "deploy", "mysql", "migrations"))
+	schemaSQL, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "..", "..", "deploy", "mysql", "init", "001_schema.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (database.Runner{DB: sqlDB, LockTimeout: 5 * time.Second}).Apply(t.Context(), migrations); err != nil {
-		t.Fatalf("apply MySQL migrations: %v", err)
-	}
+	applyManagerAuthTestSchema(t, sqlDB, string(schemaSQL))
 	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: sqlDB, SkipInitializeWithVersion: true}), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
 		t.Fatalf("open GORM database: %v", err)
 	}
 	return NewStore(gormDB), sqlDB
+}
+
+func applyManagerAuthTestSchema(t *testing.T, db *sql.DB, schemaSQL string) {
+	t.Helper()
+	delimiter := ";"
+	var statement strings.Builder
+	for _, line := range strings.Split(schemaSQL, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "DELIMITER ") {
+			delimiter = strings.TrimSpace(strings.TrimPrefix(trimmed, "DELIMITER "))
+			if delimiter == "" {
+				t.Fatal("empty schema delimiter")
+			}
+			continue
+		}
+		statement.WriteString(line)
+		statement.WriteByte('\n')
+		if !strings.HasSuffix(trimmed, delimiter) {
+			continue
+		}
+		query := strings.TrimSpace(statement.String())
+		query = strings.TrimSpace(strings.TrimSuffix(query, delimiter))
+		statement.Reset()
+		if query == "" {
+			continue
+		}
+		if _, err := db.ExecContext(t.Context(), query); err != nil {
+			t.Fatalf("initialize MySQL integration schema: %v", err)
+		}
+	}
+	if strings.TrimSpace(statement.String()) != "" {
+		t.Fatal("unterminated statement in MySQL integration schema")
+	}
 }
 
 func insertManagerAuthTestUser(t *testing.T, db *sql.DB, id, username string, role auth.Role, at time.Time) {

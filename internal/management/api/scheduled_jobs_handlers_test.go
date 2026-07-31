@@ -192,8 +192,8 @@ func newScheduledJobHTTPFixture(t *testing.T, service ScheduledJobOperations) *R
 		t.Fatal(err)
 	}
 	router, err := NewRouter(MiddlewareOptions{
-		PublicOrigin: "https://manager.example", MaxBodyBytes: 1 << 20,
-		Random: bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Authenticator: testAuthenticator{},
+		MaxBodyBytes: 1 << 20,
+		Random:       bytes.NewReader(bytes.Repeat([]byte{1}, 4096)), Authenticator: testAuthenticator{},
 	})
 	if err != nil {
 		t.Fatal(err)

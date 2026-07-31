@@ -31,7 +31,6 @@ type ReplacementAuthenticator interface {
 }
 
 type MiddlewareOptions struct {
-	PublicOrigin          string
 	TrustedProxies        []string
 	MaxBodyBytes          int64
 	MaxConcurrentRequests int
@@ -41,7 +40,6 @@ type MiddlewareOptions struct {
 }
 
 type middleware struct {
-	publicOrigin  string
 	trusted       []netip.Prefix
 	maxBodyBytes  int64
 	requestSlots  chan struct{}
@@ -51,10 +49,6 @@ type middleware struct {
 }
 
 func newMiddleware(options MiddlewareOptions) (*middleware, error) {
-	origin, err := canonicalOrigin(options.PublicOrigin)
-	if err != nil {
-		return nil, err
-	}
 	trusted, err := parseTrustedProxies(options.TrustedProxies)
 	if err != nil {
 		return nil, err
@@ -75,7 +69,7 @@ func newMiddleware(options MiddlewareOptions) (*middleware, error) {
 		options.Logger = log.New(io.Discard, "", 0)
 	}
 	return &middleware{
-		publicOrigin: origin, trusted: trusted, maxBodyBytes: options.MaxBodyBytes,
+		trusted: trusted, maxBodyBytes: options.MaxBodyBytes,
 		requestSlots: make(chan struct{}, options.MaxConcurrentRequests),
 		random:       options.Random, logger: options.Logger, authenticator: options.Authenticator,
 	}, nil
@@ -105,11 +99,11 @@ func (m *middleware) route(options RouteOptions, next http.Handler) http.Handler
 	if options.CSRF {
 		next = m.csrf(next)
 	}
-	if options.Mutation {
-		next = m.origin(next)
-	}
 	if !options.Public {
 		next = m.authenticate(options.AllowReplacedAuth, next)
+	}
+	if options.Mutation {
+		next = m.origin(next)
 	}
 	return next
 }
@@ -217,12 +211,25 @@ func (m *middleware) authenticate(allowReplaced bool, next http.Handler) http.Ha
 func (m *middleware) origin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin, err := canonicalOrigin(r.Header.Get("Origin"))
-		if err != nil || origin != m.publicOrigin {
+		expected, expectedErr := requestOrigin(r)
+		if err != nil || expectedErr != nil || origin != expected {
 			writeAPIError(w, r, http.StatusForbidden, CodeOriginForbidden, "请求来源不受信任", nil, false)
 			return
 		}
-		next.ServeHTTP(w, r)
+		secure := strings.HasPrefix(origin, "https://")
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), secureCookieContextKey, secure)))
 	})
+}
+
+func requestOrigin(r *http.Request) (string, error) {
+	if r == nil {
+		return "", errors.New("request is required")
+	}
+	scheme := r.Header.Get("X-Forwarded-Proto")
+	if scheme != "http" && scheme != "https" {
+		return "", errors.New("forwarded scheme is required")
+	}
+	return canonicalOrigin(scheme + "://" + r.Host)
 }
 
 func (m *middleware) csrf(next http.Handler) http.Handler {

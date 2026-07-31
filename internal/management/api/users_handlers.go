@@ -33,16 +33,15 @@ type SessionEventSink interface {
 }
 
 type UsersHandlers struct {
-	service      AdminUserService
-	events       SessionEventSink
-	cookieSecure bool
+	service AdminUserService
+	events  SessionEventSink
 }
 
-func NewUsersHandlers(service AdminUserService, eventSink SessionEventSink, cookieSecure bool) (*UsersHandlers, error) {
+func NewUsersHandlers(service AdminUserService, eventSink SessionEventSink) (*UsersHandlers, error) {
 	if service == nil {
 		return nil, fmt.Errorf("admin user service is required")
 	}
-	return &UsersHandlers{service: service, events: eventSink, cookieSecure: cookieSecure}, nil
+	return &UsersHandlers{service: service, events: eventSink}, nil
 }
 
 func (h *UsersHandlers) Register(router *Router) error {
@@ -225,7 +224,7 @@ func (h *UsersHandlers) resetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if userID == identity.User.ID {
-		h.clearSessionCookie(w)
+		clearSessionCookie(w, r)
 	}
 	if h.events != nil {
 		h.events.CloseUser(userID)
@@ -251,7 +250,7 @@ func (h *UsersHandlers) revokeUserSessions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if userID == identity.User.ID {
-		h.clearSessionCookie(w)
+		clearSessionCookie(w, r)
 	}
 	h.publishRevocation(result)
 	writeJSON(w, http.StatusOK, mapSessionRevoke(result))
@@ -293,7 +292,7 @@ func (h *UsersHandlers) revokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if sessionID == identity.Session.ID {
-		h.clearSessionCookie(w)
+		clearSessionCookie(w, r)
 	}
 	h.publishRevocation(result)
 	writeJSON(w, http.StatusOK, mapSessionRevoke(result))
@@ -313,13 +312,6 @@ func (h *UsersHandlers) publishRevocation(result auth.SessionRevokeResult) {
 		Resource: &events.Resource{Type: events.ResourceSession, ID: resourceID}, Reason: "revoked",
 	})
 	h.events.CloseSession(resourceID)
-}
-
-func (h *UsersHandlers) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name: SessionCookieName, Value: "", Path: "/api/admin/v1", MaxAge: -1, Expires: time.Unix(1, 0),
-		HttpOnly: true, Secure: h.cookieSecure, SameSite: http.SameSiteStrictMode,
-	})
 }
 
 func (h *UsersHandlers) writeServiceError(w http.ResponseWriter, r *http.Request, err error) {

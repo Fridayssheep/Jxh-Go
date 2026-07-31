@@ -46,22 +46,6 @@ services:
     ports:
       - "5000:5000"
 
-  migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: jxh-bot:latest
-    container_name: jxh-migrate
-    restart: "no"
-    depends_on:
-      mysql:
-        condition: service_healthy
-    environment:
-      JXH_MYSQL_DSN: ${JXH_MYSQL_DSN:-${MYSQL_USER:-jxh}:${MYSQL_PASSWORD:-jxh_password}@tcp(mysql:3306)/${MYSQL_DATABASE:-jxh_bot}?charset=utf8mb4&parseTime=True&loc=Local}
-    volumes:
-      - ./data/config:/app/config
-    command: ["jxh-migrate", "-config", "/app/config/config.yaml", "-dir", "/app/migrations"]
-
   bot:
     image: jxh-bot:latest
     container_name: jxh-bot
@@ -69,8 +53,8 @@ services:
     expose:
       - "8090"
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
       napcat:
         condition: service_started
       quote:
@@ -81,9 +65,7 @@ services:
       JXH_ONEBOT_WS_URL: ws://napcat:3001
       JXH_ONEBOT_TOKEN: ${JXH_ONEBOT_TOKEN:-change-me}
       JXH_ADMIN_ADDR: ":8090"
-      JXH_ADMIN_PUBLIC_ORIGIN: ${JXH_ADMIN_PUBLIC_ORIGIN:-http://localhost:${WEB_PORT:-8080}}
       JXH_ADMIN_SESSION_SECRET: ${JXH_ADMIN_SESSION_SECRET:-}
-      JXH_ADMIN_COOKIE_SECURE: ${JXH_ADMIN_COOKIE_SECURE:-false}
       JXH_ADMIN_TRUSTED_PROXIES: ${JXH_ADMIN_TRUSTED_PROXIES:-}
       JXH_ADMIN_MAX_CONCURRENT_REQUESTS: ${JXH_ADMIN_MAX_CONCURRENT_REQUESTS:-128}
       JXH_BOT_RESTART_MODE: supervised_exit

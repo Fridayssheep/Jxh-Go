@@ -150,13 +150,14 @@ func TestKnowledgeReloadHTTPRequiresPermissionCSRFAndIdempotencyKey(t *testing.T
 	router := newKnowledgeHTTPFixture(t, service)
 
 	request := httptest.NewRequest(http.MethodPost, "/api/admin/v1/knowledge/reload", nil)
+	setManagerOrigin(request)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assertErrorCode(t, response, http.StatusUnauthorized, CodeUnauthorized)
 
 	request = httptest.NewRequest(http.MethodPost, "/api/admin/v1/knowledge/reload", nil)
 	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "observer"})
-	request.Header.Set("Origin", "https://manager.example")
+	setManagerOrigin(request)
 	request.Header.Set("X-CSRF-Token", "valid-csrf-token")
 	request.Header.Set("Idempotency-Key", "reload-key-1")
 	response = httptest.NewRecorder()

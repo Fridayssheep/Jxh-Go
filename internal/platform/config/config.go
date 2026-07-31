@@ -36,9 +36,7 @@ type AppConfig struct {
 
 type AdminConfig struct {
 	Addr                      string   `yaml:"addr"`
-	PublicOrigin              string   `yaml:"public_origin"`
 	SessionSecret             string   `yaml:"session_secret"`
-	CookieSecure              bool     `yaml:"cookie_secure"`
 	SessionTTLSeconds         int      `yaml:"session_ttl_seconds"`
 	SessionIdleTimeoutSeconds int      `yaml:"session_idle_timeout_seconds"`
 	LoginWindowSeconds        int      `yaml:"login_window_seconds"`
@@ -141,7 +139,6 @@ func Default() Config {
 		App:            AppConfig{Timezone: "Asia/Shanghai"},
 		Admin: AdminConfig{
 			Addr:                      "127.0.0.1:8090",
-			CookieSecure:              true,
 			SessionTTLSeconds:         12 * 60 * 60,
 			SessionIdleTimeoutSeconds: 30 * 60,
 			LoginWindowSeconds:        5 * 60,
@@ -234,14 +231,10 @@ func applyEnv(cfg *Config) error {
 	}
 
 	override("JXH_ADMIN_ADDR", func(v string) { cfg.Admin.Addr = v })
-	override("JXH_ADMIN_PUBLIC_ORIGIN", func(v string) { cfg.Admin.PublicOrigin = v })
 	override("JXH_ADMIN_SESSION_SECRET", func(v string) { cfg.Admin.SessionSecret = v })
 	override("JXH_ADMIN_TRUSTED_PROXIES", func(v string) {
 		cfg.Admin.TrustedProxies = splitCommaSeparated(v)
 	})
-	if err := overrideBool("JXH_ADMIN_COOKIE_SECURE", func(v bool) { cfg.Admin.CookieSecure = v }); err != nil {
-		return err
-	}
 	adminInts := []struct {
 		key string
 		set func(int)

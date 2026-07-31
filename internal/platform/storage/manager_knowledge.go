@@ -28,11 +28,9 @@ func (s *Store) BeginKnowledgeReload(ctx context.Context, begin knowledgeadmin.B
 	err error,
 ) {
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var migration struct {
-			Version uint64 `gorm:"column:version"`
-		}
-		if lockErr := tx.Table("schema_migrations").Clauses(clause.Locking{Strength: "UPDATE"}).
-			Select("version").Order("version ASC").Limit(1).Take(&migration).Error; lockErr != nil {
+		var reloadLock managerFeatureSetting
+		if lockErr := tx.Select("setting_id").Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("scope_type = ? AND group_id IS NULL", managerSettingsScopeGlobal).Take(&reloadLock).Error; lockErr != nil {
 			return lockErr
 		}
 

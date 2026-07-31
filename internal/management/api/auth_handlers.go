@@ -23,18 +23,17 @@ type AuthOperations interface {
 }
 
 type AuthHandlers struct {
-	service      AuthOperations
-	events       SessionEventSink
-	cookieSecure bool
+	service AuthOperations
+	events  SessionEventSink
 }
 
 var loginUsernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_.-]{2,31}$`)
 
-func NewAuthHandlers(service AuthOperations, eventSink SessionEventSink, cookieSecure bool) (*AuthHandlers, error) {
+func NewAuthHandlers(service AuthOperations, eventSink SessionEventSink) (*AuthHandlers, error) {
 	if service == nil {
 		return nil, fmt.Errorf("auth service is required")
 	}
-	return &AuthHandlers{service: service, events: eventSink, cookieSecure: cookieSecure}, nil
+	return &AuthHandlers{service: service, events: eventSink}, nil
 }
 
 func (h *AuthHandlers) Register(router *Router) error {
@@ -87,7 +86,7 @@ func (h *AuthHandlers) login(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, err, true)
 		return
 	}
-	h.setSessionCookie(w, result.SessionToken)
+	setSessionCookie(w, r, result.SessionToken)
 	writeJSON(w, http.StatusOK, mapAuthContext(result.AuthContext))
 }
 
@@ -111,7 +110,7 @@ func (h *AuthHandlers) logout(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, err, false)
 		return
 	}
-	h.clearSessionCookie(w)
+	clearSessionCookie(w, r)
 	h.publishRevocation(identity.Session.ID, time.Now())
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -144,7 +143,7 @@ func (h *AuthHandlers) changePassword(w http.ResponseWriter, r *http.Request) {
 		h.writeServiceError(w, r, err, false)
 		return
 	}
-	h.setSessionCookie(w, result.SessionToken)
+	setSessionCookie(w, r, result.SessionToken)
 	h.publishRevocation(identity.Session.ID, result.Session.CreatedAt)
 	if h.events != nil {
 		h.events.CloseUser(identity.User.ID)
@@ -170,20 +169,6 @@ func (h *AuthHandlers) writeServiceError(w http.ResponseWriter, r *http.Request,
 	default:
 		writeAPIError(w, r, http.StatusInternalServerError, CodeInternal, "服务器内部错误", nil, false)
 	}
-}
-
-func (h *AuthHandlers) setSessionCookie(w http.ResponseWriter, credential string) {
-	http.SetCookie(w, &http.Cookie{
-		Name: SessionCookieName, Value: credential, Path: "/api/admin/v1", HttpOnly: true,
-		Secure: h.cookieSecure, SameSite: http.SameSiteStrictMode,
-	})
-}
-
-func (h *AuthHandlers) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name: SessionCookieName, Value: "", Path: "/api/admin/v1", MaxAge: -1, Expires: time.Unix(1, 0),
-		HttpOnly: true, Secure: h.cookieSecure, SameSite: http.SameSiteStrictMode,
-	})
 }
 
 func (h *AuthHandlers) publishRevocation(sessionID string, occurredAt time.Time) {

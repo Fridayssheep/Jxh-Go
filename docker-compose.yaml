@@ -113,7 +113,7 @@ services:
 
   frontend:
     build:
-      context: ../../jxh-manager
+      context: "https://github.com/Fridayssheep/Jxh-Manager.git#main:jxh-manager"
       dockerfile: Dockerfile
     image: jxh-manager:latest
     container_name: jxh-manager

@@ -9,12 +9,13 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/management/auth"
 	managersystem "github.com/zjutjh/jxh-go/internal/management/system"
+	platformconfig "github.com/zjutjh/jxh-go/internal/platform/config"
 )
 
 type SystemOperations interface {
 	Health(ctx context.Context, principal auth.Principal) (managersystem.Health, error)
 	Configuration(ctx context.Context, principal auth.Principal) (managersystem.Configuration, error)
-	UpdateConfiguration(ctx context.Context, principal auth.Principal, expectedVersion uint64, yaml string) (managersystem.Configuration, error)
+	UpdateConfiguration(ctx context.Context, principal auth.Principal, expectedVersion uint64, patch platformconfig.SettingsPatch, request auth.MutationContext) (managersystem.Configuration, error)
 	RestartNapCat(ctx context.Context, principal auth.Principal, input managersystem.RestartInput, idempotencyKey string, request ...auth.MutationContext) (managersystem.Operation, error)
 }
 
@@ -73,9 +74,7 @@ func (h *SystemHandlers) configuration(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mapSystemConfiguration(document))
 }
 
-type systemConfigurationPatchRequest struct {
-	YAML string `json:"yaml"`
-}
+type systemConfigurationPatchRequest = platformconfig.SettingsPatch
 
 func (h *SystemHandlers) updateConfiguration(w http.ResponseWriter, r *http.Request) {
 	version, ok := requiredRevision(w, r)
@@ -87,7 +86,9 @@ func (h *SystemHandlers) updateConfiguration(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	identity, _ := AuthFromContext(r.Context())
-	document, err := h.service.UpdateConfiguration(r.Context(), principalFromAuth(identity), version, body.YAML)
+	document, err := h.service.UpdateConfiguration(
+		r.Context(), principalFromAuth(identity), version, body, mutationContextFromRequest(r),
+	)
 	if err != nil {
 		h.writeServiceError(w, r, err)
 		return
@@ -130,7 +131,7 @@ func (h *SystemHandlers) writeServiceError(w http.ResponseWriter, r *http.Reques
 	case errors.Is(err, managersystem.ErrForbidden):
 		writeAPIError(w, r, http.StatusForbidden, CodeForbidden, "没有执行系统操作的权限", nil, false)
 	case errors.Is(err, managersystem.ErrInvalidInput):
-		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "系统操作参数无效", nil, false)
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "系统操作参数无效", configurationValidationFields(err), false)
 	case errors.Is(err, managersystem.ErrIdempotencyConflict):
 		writeAPIError(w, r, http.StatusConflict, CodeConflict, "Idempotency-Key 已用于不同请求", nil, false)
 	case errors.Is(err, managersystem.ErrNapCatUnavailable):
@@ -138,6 +139,8 @@ func (h *SystemHandlers) writeServiceError(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "NapCat 当前不可用", nil, true)
 	case errors.Is(err, managersystem.ErrConfigurationVersionConflict):
 		writeAPIError(w, r, http.StatusConflict, "resource_version_conflict", "配置文件已被其他操作修改", nil, false)
+	case errors.Is(err, managersystem.ErrConfigurationManagedExternally):
+		writeAPIError(w, r, http.StatusConflict, "configuration_field_managed_externally", "配置字段由部署环境管理", configurationManagedFields(err), false)
 	case errors.Is(err, managersystem.ErrConfigurationUnavailable):
 		w.Header().Set("Retry-After", "3")
 		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "配置文件当前不可用", nil, true)
@@ -175,11 +178,16 @@ type systemOperationDTO struct {
 }
 
 type systemConfigurationDTO struct {
-	YAML                 string   `json:"yaml"`
-	Version              uint64   `json:"version"`
-	MaskedFields         []string `json:"masked_fields"`
-	EnvironmentOverrides []string `json:"environment_overrides"`
-	RestartRequired      bool     `json:"restart_required"`
+	WPS                  platformconfig.WPSSettings       `json:"wps"`
+	AI                   platformconfig.AISettings        `json:"ai"`
+	Quote                platformconfig.QuoteSettings     `json:"quote"`
+	Time                 platformconfig.TimeSettings      `json:"time"`
+	Retention            platformconfig.RetentionSettings `json:"retention"`
+	EnvironmentOverrides []string                         `json:"environment_overrides"`
+	Version              uint64                           `json:"version"`
+	AppliedVersion       uint64                           `json:"applied_version"`
+	RestartRequired      bool                             `json:"restart_required"`
+	RestartSupported     bool                             `json:"restart_supported"`
 }
 
 func mapDependencyHealth(value managersystem.DependencyHealth) dependencyHealthDTO {
@@ -223,9 +231,33 @@ func mapSystemOperation(value managersystem.Operation) systemOperationDTO {
 
 func mapSystemConfiguration(value managersystem.Configuration) systemConfigurationDTO {
 	return systemConfigurationDTO{
-		YAML: value.YAML, Version: value.Version,
-		MaskedFields:         append([]string{}, value.MaskedFields...),
+		WPS: value.WPS, AI: value.AI, Quote: value.Quote, Time: value.Time, Retention: value.Retention,
+		Version: value.Version, AppliedVersion: value.AppliedVersion,
 		EnvironmentOverrides: append([]string{}, value.EnvironmentOverrides...),
-		RestartRequired:      value.RestartRequired,
+		RestartRequired:      value.RestartRequired, RestartSupported: value.RestartSupported,
 	}
+}
+
+func configurationValidationFields(err error) map[string][]string {
+	var validation *platformconfig.ValidationError
+	if !errors.As(err, &validation) {
+		return nil
+	}
+	fields := make(map[string][]string, len(validation.Fields))
+	for _, field := range validation.Fields {
+		fields[field.Path] = append(fields[field.Path], field.Code)
+	}
+	return fields
+}
+
+func configurationManagedFields(err error) map[string][]string {
+	var managed *managersystem.ConfigurationManagedFieldsError
+	if !errors.As(err, &managed) {
+		return nil
+	}
+	fields := make(map[string][]string, len(managed.Fields))
+	for _, path := range managed.Fields {
+		fields[path] = []string{"managed_by_environment"}
+	}
+	return fields
 }

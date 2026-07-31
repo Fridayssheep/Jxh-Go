@@ -35,19 +35,20 @@ const (
 type EventType string
 
 const (
-	EventOverviewUpdated          EventType = "overview.updated"
-	EventGroupUpdated             EventType = "group.updated"
-	EventSettingsUpdated          EventType = "settings.updated"
-	EventJoinRequestCreated       EventType = "join_request.created"
-	EventJoinRequestUpdated       EventType = "join_request.updated"
-	EventCommandUpdated           EventType = "command.updated"
-	EventCommandRunCompleted      EventType = "command.run_completed"
-	EventScheduledJobUpdated      EventType = "scheduled_job.updated"
-	EventScheduledJobRunCompleted EventType = "scheduled_job.run_completed"
-	EventKnowledgeReloadCompleted EventType = "knowledge.reload_completed"
-	EventSystemHealthChanged      EventType = "system.health_changed"
-	EventStreamReset              EventType = "stream.reset"
-	EventAuthSessionRevoked       EventType = "auth.session_revoked"
+	EventOverviewUpdated            EventType = "overview.updated"
+	EventGroupUpdated               EventType = "group.updated"
+	EventSettingsUpdated            EventType = "settings.updated"
+	EventJoinRequestCreated         EventType = "join_request.created"
+	EventJoinRequestUpdated         EventType = "join_request.updated"
+	EventCommandUpdated             EventType = "command.updated"
+	EventCommandRunCompleted        EventType = "command.run_completed"
+	EventScheduledJobUpdated        EventType = "scheduled_job.updated"
+	EventScheduledJobRunCompleted   EventType = "scheduled_job.run_completed"
+	EventKnowledgeReloadCompleted   EventType = "knowledge.reload_completed"
+	EventSystemHealthChanged        EventType = "system.health_changed"
+	EventSystemConfigurationChanged EventType = "system.configuration_changed"
+	EventStreamReset                EventType = "stream.reset"
+	EventAuthSessionRevoked         EventType = "auth.session_revoked"
 )
 
 type ResourceType string
@@ -407,7 +408,7 @@ func topicForEvent(eventType EventType) (Topic, bool) {
 		return TopicScheduledJobs, true
 	case EventKnowledgeReloadCompleted:
 		return TopicKnowledge, true
-	case EventSystemHealthChanged, EventStreamReset:
+	case EventSystemHealthChanged, EventSystemConfigurationChanged, EventStreamReset:
 		return TopicSystem, true
 	case EventAuthSessionRevoked:
 		return TopicAuth, true
@@ -432,7 +433,7 @@ func resourceTypeForEvent(eventType EventType) ResourceType {
 		return ResourceScheduledJob
 	case EventKnowledgeReloadCompleted:
 		return ResourceKnowledge
-	case EventSystemHealthChanged:
+	case EventSystemHealthChanged, EventSystemConfigurationChanged:
 		return ResourceSystem
 	case EventAuthSessionRevoked:
 		return ResourceSession

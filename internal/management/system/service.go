@@ -21,12 +21,13 @@ import (
 )
 
 var (
-	ErrForbidden                    = errors.New("system operation forbidden")
-	ErrInvalidInput                 = errors.New("invalid system operation input")
-	ErrNapCatUnavailable            = errors.New("napcat unavailable")
-	ErrIdempotencyConflict          = errors.New("system idempotency conflict")
-	ErrConfigurationUnavailable     = errors.New("configuration file unavailable")
-	ErrConfigurationVersionConflict = errors.New("configuration version conflict")
+	ErrForbidden                      = errors.New("system operation forbidden")
+	ErrInvalidInput                   = errors.New("invalid system operation input")
+	ErrNapCatUnavailable              = errors.New("napcat unavailable")
+	ErrIdempotencyConflict            = errors.New("system idempotency conflict")
+	ErrConfigurationUnavailable       = errors.New("configuration file unavailable")
+	ErrConfigurationVersionConflict   = errors.New("configuration version conflict")
+	ErrConfigurationManagedExternally = errors.New("configuration field managed externally")
 )
 
 type DependencyKey string
@@ -77,16 +78,53 @@ type Health struct {
 }
 
 type Configuration struct {
-	YAML                 string
-	Version              uint64
-	MaskedFields         []string
+	WPS                  platformconfig.WPSSettings
+	AI                   platformconfig.AISettings
+	Quote                platformconfig.QuoteSettings
+	Time                 platformconfig.TimeSettings
+	Retention            platformconfig.RetentionSettings
 	EnvironmentOverrides []string
+	Version              uint64
+	AppliedVersion       uint64
 	RestartRequired      bool
+	RestartSupported     bool
 }
 
 type ConfigurationEditor interface {
-	Read() (platformconfig.EditableDocument, error)
-	Update(expectedVersion uint64, candidate string) (platformconfig.EditableDocument, error)
+	Read(context.Context) (platformconfig.Settings, error)
+	Update(context.Context, uint64, platformconfig.SettingsPatch) (platformconfig.Settings, []string, error)
+}
+
+type ConfigurationManagedFieldsError struct {
+	Fields []string
+}
+
+func (e *ConfigurationManagedFieldsError) Error() string {
+	return ErrConfigurationManagedExternally.Error()
+}
+func (e *ConfigurationManagedFieldsError) Unwrap() error { return ErrConfigurationManagedExternally }
+
+type ConfigurationAuditResult string
+
+const (
+	ConfigurationAuditSuccess ConfigurationAuditResult = "success"
+	ConfigurationAuditFailed  ConfigurationAuditResult = "failed"
+)
+
+type ConfigurationAuditRequest struct {
+	Actor           auth.Principal
+	Context         auth.MutationContext
+	ExpectedVersion uint64
+	Fields          []string
+	RequestedAt     time.Time
+}
+
+type ConfigurationAuditCompletion struct {
+	AuditID   string
+	Result    ConfigurationAuditResult
+	Version   uint64
+	Fields    []string
+	ErrorCode string
 }
 
 type HealthSource interface {
@@ -147,6 +185,8 @@ type Transition struct {
 }
 
 type Store interface {
+	BeginConfigurationUpdate(ctx context.Context, request ConfigurationAuditRequest) (string, error)
+	CompleteConfigurationUpdate(ctx context.Context, completion ConfigurationAuditCompletion) error
 	// FindNapCatRestart returns an unexpired prior operation without creating a
 	// new reservation. This lets retries replay while NapCat is disconnected.
 	FindNapCatRestart(ctx context.Context, find FindRestart) (operation Operation, found bool, err error)
@@ -166,35 +206,39 @@ type EventPublisher interface {
 }
 
 type Options struct {
-	Store                Store
-	Health               HealthSource
-	Gateway              RestartGateway
-	Events               EventPublisher
-	Configuration        ConfigurationEditor
-	IdempotencySecret    []byte
-	Dependencies         map[DependencyKey]DependencyConfiguration
-	Now                  func() time.Time
-	WorkerContext        context.Context
-	WorkerTimeout        time.Duration
-	TransitionRetryDelay time.Duration
-	MaxConcurrentWorkers int
+	Store                       Store
+	Health                      HealthSource
+	Gateway                     RestartGateway
+	Events                      EventPublisher
+	Configuration               ConfigurationEditor
+	AppliedConfigurationVersion uint64
+	RestartSupported            bool
+	IdempotencySecret           []byte
+	Dependencies                map[DependencyKey]DependencyConfiguration
+	Now                         func() time.Time
+	WorkerContext               context.Context
+	WorkerTimeout               time.Duration
+	TransitionRetryDelay        time.Duration
+	MaxConcurrentWorkers        int
 }
 
 type Service struct {
-	store         Store
-	health        HealthSource
-	gateway       RestartGateway
-	events        EventPublisher
-	configuration ConfigurationEditor
-	secret        []byte
-	dependencies  map[DependencyKey]DependencyConfiguration
-	now           func() time.Time
-	workerCtx     context.Context
-	cancel        context.CancelFunc
-	workerTimeout time.Duration
-	retryDelay    time.Duration
-	workers       chan struct{}
-	wait          sync.WaitGroup
+	store                       Store
+	health                      HealthSource
+	gateway                     RestartGateway
+	events                      EventPublisher
+	configuration               ConfigurationEditor
+	appliedConfigurationVersion uint64
+	restartSupported            bool
+	secret                      []byte
+	dependencies                map[DependencyKey]DependencyConfiguration
+	now                         func() time.Time
+	workerCtx                   context.Context
+	cancel                      context.CancelFunc
+	workerTimeout               time.Duration
+	retryDelay                  time.Duration
+	workers                     chan struct{}
+	wait                        sync.WaitGroup
 }
 
 var systemIdempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
@@ -227,8 +271,9 @@ func NewService(options Options) (*Service, error) {
 	}
 	return &Service{
 		store: options.Store, health: options.Health, gateway: options.Gateway, events: options.Events,
-		configuration: options.Configuration,
-		secret:        append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
+		configuration: options.Configuration, appliedConfigurationVersion: options.AppliedConfigurationVersion,
+		restartSupported: options.RestartSupported,
+		secret:           append([]byte(nil), options.IdempotencySecret...), dependencies: dependencies, now: options.Now,
 		workerCtx: workerContext, cancel: cancel, workerTimeout: options.WorkerTimeout,
 		retryDelay: options.TransitionRetryDelay,
 		workers:    make(chan struct{}, options.MaxConcurrentWorkers),
@@ -256,48 +301,141 @@ func (s *Service) Health(_ context.Context, principal auth.Principal) (Health, e
 	return Health{GeneratedAt: s.now().UTC(), Live: snapshot.Live, Ready: snapshot.Ready, Dependencies: dependencies}, nil
 }
 
-func (s *Service) Configuration(_ context.Context, principal auth.Principal) (Configuration, error) {
+func (s *Service) Configuration(ctx context.Context, principal auth.Principal) (Configuration, error) {
 	if !principal.Has(auth.PermissionSystemRead) {
 		return Configuration{}, ErrForbidden
 	}
 	if s.configuration == nil {
 		return Configuration{}, ErrConfigurationUnavailable
 	}
-	document, err := s.configuration.Read()
+	settings, err := s.configuration.Read(ctx)
 	if err != nil {
 		return Configuration{}, ErrConfigurationUnavailable
 	}
-	return mapConfiguration(document), nil
+	return s.mapConfiguration(settings), nil
 }
 
-func (s *Service) UpdateConfiguration(_ context.Context, principal auth.Principal, expectedVersion uint64, candidate string) (Configuration, error) {
+func (s *Service) UpdateConfiguration(
+	ctx context.Context,
+	principal auth.Principal,
+	expectedVersion uint64,
+	patch platformconfig.SettingsPatch,
+	request auth.MutationContext,
+) (Configuration, error) {
 	if !principal.Has(auth.PermissionConfigWrite) {
 		return Configuration{}, ErrForbidden
 	}
-	if s.configuration == nil {
+	if s.configuration == nil || expectedVersion == 0 || principal.UserID == "" || !validRequestContext(request) || len(patch.Paths()) == 0 {
+		if s.configuration == nil {
+			return Configuration{}, ErrConfigurationUnavailable
+		}
+		return Configuration{}, ErrInvalidInput
+	}
+	requestedFields := patch.Paths()
+	auditID, err := s.store.BeginConfigurationUpdate(ctx, ConfigurationAuditRequest{
+		Actor: principal, Context: request, ExpectedVersion: expectedVersion,
+		Fields: append([]string(nil), requestedFields...), RequestedAt: s.now().UTC(),
+	})
+	if err != nil || auditID == "" {
 		return Configuration{}, ErrConfigurationUnavailable
 	}
-	document, err := s.configuration.Update(expectedVersion, candidate)
+	settings, changedFields, err := s.configuration.Update(ctx, expectedVersion, patch)
 	if err != nil {
+		s.completeConfigurationAudit(ConfigurationAuditCompletion{
+			AuditID: auditID, Result: ConfigurationAuditFailed, Version: expectedVersion,
+			Fields: requestedFields, ErrorCode: configurationErrorCode(err),
+		})
 		switch {
-		case errors.Is(err, platformconfig.ErrInvalidDocument):
-			return Configuration{}, ErrInvalidInput
+		case errors.Is(err, platformconfig.ErrInvalidDocument), errors.Is(err, platformconfig.ErrEmptyPatch):
+			return Configuration{}, fmt.Errorf("%w: %w", ErrInvalidInput, err)
+		case isConfigurationValidationError(err):
+			return Configuration{}, fmt.Errorf("%w: %w", ErrInvalidInput, err)
+		case errors.Is(err, platformconfig.ErrFieldManagedExternally):
+			var managed *platformconfig.ManagedFieldsError
+			if errors.As(err, &managed) {
+				return Configuration{}, &ConfigurationManagedFieldsError{Fields: append([]string(nil), managed.Fields...)}
+			}
+			return Configuration{}, ErrConfigurationManagedExternally
 		case errors.Is(err, platformconfig.ErrVersionConflict):
 			return Configuration{}, ErrConfigurationVersionConflict
 		default:
 			return Configuration{}, ErrConfigurationUnavailable
 		}
 	}
-	return mapConfiguration(document), nil
+	completion := ConfigurationAuditCompletion{
+		AuditID: auditID, Result: ConfigurationAuditSuccess, Version: settings.Version,
+		Fields: append([]string(nil), changedFields...),
+	}
+	s.completeConfigurationAudit(completion)
+	if len(changedFields) != 0 {
+		s.publishConfigurationChanged(settings.Version)
+	}
+	return s.mapConfiguration(settings), nil
 }
 
-func mapConfiguration(document platformconfig.EditableDocument) Configuration {
+func (s *Service) mapConfiguration(settings platformconfig.Settings) Configuration {
 	return Configuration{
-		YAML: document.YAML, Version: document.Version,
-		MaskedFields:         append([]string(nil), document.MaskedFields...),
-		EnvironmentOverrides: append([]string(nil), document.EnvironmentOverrides...),
-		RestartRequired:      true,
+		WPS: settings.WPS, AI: settings.AI, Quote: settings.Quote, Time: settings.Time, Retention: settings.Retention,
+		EnvironmentOverrides: append([]string(nil), settings.EnvironmentOverrides...),
+		Version:              settings.Version, AppliedVersion: s.appliedConfigurationVersion,
+		RestartRequired: settings.Version != s.appliedConfigurationVersion, RestartSupported: s.restartSupported,
 	}
+}
+
+func isConfigurationValidationError(err error) bool {
+	var validation *platformconfig.ValidationError
+	return errors.As(err, &validation)
+}
+
+func configurationErrorCode(err error) string {
+	switch {
+	case errors.Is(err, platformconfig.ErrVersionConflict):
+		return "resource_version_conflict"
+	case errors.Is(err, platformconfig.ErrFieldManagedExternally):
+		return "configuration_field_managed_externally"
+	case errors.Is(err, platformconfig.ErrInvalidDocument), errors.Is(err, platformconfig.ErrEmptyPatch), isConfigurationValidationError(err):
+		return "invalid_request"
+	default:
+		return "dependency_unavailable"
+	}
+}
+
+func (s *Service) completeConfigurationAudit(completion ConfigurationAuditCompletion) {
+	if err := s.store.CompleteConfigurationUpdate(s.workerCtx, completion); err == nil {
+		return
+	}
+	s.wait.Add(1)
+	go func() {
+		defer s.wait.Done()
+		for attempt := 0; attempt < 3; attempt++ {
+			timer := time.NewTimer(s.retryDelay)
+			select {
+			case <-s.workerCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+			ctx, cancel := context.WithTimeout(s.workerCtx, 5*time.Second)
+			err := s.store.CompleteConfigurationUpdate(ctx, completion)
+			cancel()
+			if err == nil {
+				return
+			}
+		}
+	}()
+}
+
+func (s *Service) publishConfigurationChanged(version uint64) {
+	if s.events == nil {
+		return
+	}
+	_, _ = s.events.Publish(events.Draft{
+		Type: events.EventSystemConfigurationChanged, OccurredAt: s.now().UTC(),
+		Resource: &events.Resource{Type: events.ResourceSystem, ID: fmt.Sprintf("%d", version), Version: version},
+		Reason:   "configuration_updated",
+	})
 }
 
 func (s *Service) RecoverInterrupted(ctx context.Context) (int, error) {

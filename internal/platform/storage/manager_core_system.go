@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -13,12 +14,89 @@ import (
 )
 
 const managerNapCatRestartOperation = "system.napcat_restart"
+const managerConfigurationUpdateAction = "system.configuration.update"
+
+type managerConfigurationAuditMetadata struct {
+	Phase           string   `json:"phase"`
+	ExpectedVersion uint64   `json:"expected_version"`
+	Version         uint64   `json:"version,omitempty"`
+	Fields          []string `json:"fields"`
+}
 
 type managerRestartAuditMetadata struct {
 	Phase     string `json:"phase"`
 	Reason    string `json:"reason,omitempty"`
 	Status    string `json:"status"`
 	ErrorCode string `json:"error_code,omitempty"`
+}
+
+func (s *Store) BeginConfigurationUpdate(ctx context.Context, request managersystem.ConfigurationAuditRequest) (string, error) {
+	var auditID string
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		auditContext, err := managerAuditContextForMutation(tx, request.Actor, request.Context)
+		if err != nil {
+			return err
+		}
+		auditID, err = insertManagerAuditWithID(tx, managerAuditEntry{
+			Context: auditContext, OccurredAt: request.RequestedAt.UTC(), ScopeType: "system",
+			Action: managerConfigurationUpdateAction, TargetType: "system_configuration", TargetID: "configuration",
+			Result: audit.ResultUnknown, Metadata: managerConfigurationAuditMetadata{
+				Phase: "requested", ExpectedVersion: request.ExpectedVersion,
+				Fields: append([]string(nil), request.Fields...),
+			},
+		})
+		return err
+	})
+	return auditID, err
+}
+
+func (s *Store) CompleteConfigurationUpdate(ctx context.Context, completion managersystem.ConfigurationAuditCompletion) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var model managerAdminAuditLog
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("audit_log_id = ? AND action = ?", completion.AuditID, managerConfigurationUpdateAction).
+			Take(&model).Error; err != nil {
+			return err
+		}
+		result := audit.ResultFailed
+		if completion.Result == managersystem.ConfigurationAuditSuccess {
+			result = audit.ResultSuccess
+		} else if completion.Result != managersystem.ConfigurationAuditFailed {
+			return errManagerInvalidState
+		}
+		if model.Result != string(audit.ResultUnknown) {
+			if model.Result == string(result) {
+				return nil
+			}
+			return errManagerInvalidState
+		}
+		var metadata managerConfigurationAuditMetadata
+		if err := json.Unmarshal(model.Metadata, &metadata); err != nil || metadata.ExpectedVersion == 0 {
+			return errManagerInvalidState
+		}
+		metadata.Phase = "completed"
+		metadata.Version = completion.Version
+		metadata.Fields = append([]string(nil), completion.Fields...)
+		encoded, err := marshalManagerJSON(metadata)
+		if err != nil {
+			return err
+		}
+		updates := map[string]any{"result": result, "metadata": encoded}
+		if completion.ErrorCode == "" {
+			updates["error_code"] = nil
+		} else {
+			updates["error_code"] = completion.ErrorCode
+		}
+		update := tx.Model(&managerAdminAuditLog{}).
+			Where("audit_log_id = ? AND result = ?", completion.AuditID, audit.ResultUnknown).Updates(updates)
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected != 1 {
+			return errManagerInvalidState
+		}
+		return nil
+	})
 }
 
 func (s *Store) FindNapCatRestart(ctx context.Context, find managersystem.FindRestart) (

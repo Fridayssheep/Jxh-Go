@@ -126,6 +126,22 @@ func TestPublishRejectsUnsafeOrInvalidEnvelopeValues(t *testing.T) {
 	}
 }
 
+func TestPublishSystemConfigurationChangedCarriesOnlyVersionIdentity(t *testing.T) {
+	hub := newTestHub(t, Options{Capacity: 8, Retention: time.Hour, SubscriberBuffer: 2})
+	event, err := hub.Publish(Draft{
+		Type:     EventSystemConfigurationChanged,
+		Resource: &Resource{Type: ResourceSystem, ID: "42", Version: 42},
+		Reason:   "configuration_updated",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Topic != TopicSystem || event.Resource == nil || event.Resource.ID != "42" || event.Resource.Version != 42 ||
+		event.Reason != "configuration_updated" {
+		t.Fatalf("configuration event = %#v", event)
+	}
+}
+
 func TestSlowSubscriberIsClosedWithoutBlockingPublish(t *testing.T) {
 	hub := newTestHub(t, Options{Capacity: 8, Retention: time.Hour, SubscriberBuffer: 1})
 	sub, _, err := hub.Subscribe(t.Context(), SubscribeOptions{AllowedTopics: []Topic{TopicGroups}})

@@ -185,21 +185,26 @@ func managerAuditContextForMutation(tx *gorm.DB, principal auth.Principal, reque
 }
 
 func insertManagerAudit(tx *gorm.DB, entry managerAuditEntry) error {
+	_, err := insertManagerAuditWithID(tx, entry)
+	return err
+}
+
+func insertManagerAuditWithID(tx *gorm.DB, entry managerAuditEntry) (string, error) {
 	auditID, err := newManagerID("aud")
 	if err != nil {
-		return err
+		return "", err
 	}
 	metadata, err := marshalManagerJSON(entry.Metadata)
 	if err != nil {
-		return err
+		return "", err
 	}
 	before, err := marshalOptionalManagerJSON(entry.Before)
 	if err != nil {
-		return err
+		return "", err
 	}
 	after, err := marshalOptionalManagerJSON(entry.After)
 	if err != nil {
-		return err
+		return "", err
 	}
 	model := managerAdminAuditLog{
 		AuditLogID: auditID, OccurredAt: entry.OccurredAt.UTC(), ActorType: entry.Context.Actor.Type,
@@ -212,7 +217,10 @@ func insertManagerAudit(tx *gorm.DB, entry managerAuditEntry) error {
 		IPAddress: entry.Context.IPAddress, UserAgent: entry.Context.UserAgent, BeforeSnapshot: before,
 		AfterSnapshot: after, Metadata: metadata, Redacted: true,
 	}
-	return tx.Create(&model).Error
+	if err := tx.Create(&model).Error; err != nil {
+		return "", err
+	}
+	return auditID, nil
 }
 
 func managerAuditContextFromLog(model managerAdminAuditLog) managerAuditContext {

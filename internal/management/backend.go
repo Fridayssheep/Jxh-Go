@@ -167,8 +167,10 @@ func NewBackend(options Options) (*Backend, error) {
 	}
 	systemService, err := system.NewService(system.Options{
 		Store: options.Store, Health: options.Health, Gateway: options.Gateway, Events: hub,
-		Configuration:     newConfigurationEditor(options.Config.SourcePath),
-		IdempotencySecret: secrets.SystemOperation, Dependencies: dependencyConfiguration(options.Config),
+		Configuration:               newConfigurationEditor(options.Config.SourcePath),
+		AppliedConfigurationVersion: options.Config.SourceVersion,
+		RestartSupported:            options.Config.BotRestartMode == config.BotRestartSupervisedExit,
+		IdempotencySecret:           secrets.SystemOperation, Dependencies: dependencyConfiguration(options.Config),
 		Now: options.Now, WorkerContext: options.Context,
 	})
 	if err != nil {

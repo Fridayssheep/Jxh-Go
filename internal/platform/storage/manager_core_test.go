@@ -21,6 +21,39 @@ func TestManagerStoreInterfaceSatisfaction(t *testing.T) {
 	var _ managersystem.Store = store
 }
 
+func TestManagerConfigurationAuditRecordsOnlyPathsAndVersions(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	now := time.Unix(1700000000, 0).UTC()
+	insertManagerAuthTestUser(t, sqlDB, "usr_configuration", "configuration-admin", auth.RoleSuperAdmin, now)
+	request := managersystem.ConfigurationAuditRequest{
+		Actor:           auth.Principal{UserID: "usr_configuration", Role: auth.RoleSuperAdmin},
+		Context:         auth.MutationContext{RequestID: "req_configuration", IPAddress: "127.0.0.1", UserAgent: "test"},
+		ExpectedVersion: 7, Fields: []string{"ai.api_key", "wps.sheet"}, RequestedAt: now,
+	}
+	auditID, err := store.BeginConfigurationUpdate(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteConfigurationUpdate(t.Context(), managersystem.ConfigurationAuditCompletion{
+		AuditID: auditID, Result: managersystem.ConfigurationAuditSuccess, Version: 8,
+		Fields: []string{"ai.api_key", "wps.sheet"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var result string
+	var metadata []byte
+	if err := sqlDB.QueryRowContext(t.Context(),
+		"SELECT result, metadata FROM admin_audit_logs WHERE audit_log_id = ?", auditID,
+	).Scan(&result, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	text := string(metadata)
+	if result != "success" || !strings.Contains(text, `"expected_version":7`) || !strings.Contains(text, `"version":8`) ||
+		!strings.Contains(text, `"fields":["ai.api_key","wps.sheet"]`) || strings.Contains(text, "secret") {
+		t.Fatalf("result=%q metadata=%s", result, metadata)
+	}
+}
+
 func TestManagerGlobalSettingsDocumentDefaultsAndRoundTrip(t *testing.T) {
 	globalDefaults, err := decodeManagerGlobalSettings([]byte(`{}`))
 	if err != nil {

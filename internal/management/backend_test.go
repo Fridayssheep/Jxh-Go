@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,7 +42,7 @@ func TestConfigurationEditorIsOptionalAndUsesTheLoadedSource(t *testing.T) {
 	if editor == nil {
 		t.Fatal("loaded source path did not create a configuration editor")
 	}
-	if document, err := editor.Read(); err != nil || document.Version == 0 {
+	if document, err := editor.Read(context.Background()); err != nil || document.Version == 0 {
 		t.Fatalf("configuration document=%+v error=%v", document, err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/zjutjh/jxh-go/internal/management/auth"
 	managersystem "github.com/zjutjh/jxh-go/internal/management/system"
+	platformconfig "github.com/zjutjh/jxh-go/internal/platform/config"
 )
 
 func TestSystemHealthMapsSnapshotWithoutSensitiveConfiguration(t *testing.T) {
@@ -70,10 +71,18 @@ func TestRestartHTTPMapsUnavailableAndRejectsConfirmationBeforeService(t *testin
 	assertErrorCode(t, response, http.StatusServiceUnavailable, "dependency_unavailable")
 }
 
-func TestSystemConfigurationHTTPReturnsMaskedYAMLAndUpdatesByVersion(t *testing.T) {
+func TestSystemConfigurationHTTPReturnsStructuredEffectiveValuesAndAppliedVersion(t *testing.T) {
 	service := &fakeSystemOperations{configuration: managersystem.Configuration{
-		YAML: "ai:\n  api_key: __JXH_SECRET_UNCHANGED__\n", Version: 7,
-		MaskedFields: []string{"ai.api_key"}, EnvironmentOverrides: []string{"ai.model"}, RestartRequired: true,
+		WPS: platformconfig.WPSSettings{
+			ShareURL: platformconfig.SecretState{Configured: true, Source: platformconfig.SourceFile},
+			SID:      platformconfig.SecretState{Configured: true, Source: platformconfig.SourceEnvironment}, Sheet: "release", TimeoutSec: 120,
+		},
+		AI: platformconfig.AISettings{Provider: "openai", BaseURL: "https://api.example.test/v1",
+			APIKey: platformconfig.SecretState{Configured: true, Source: platformconfig.SourceFile}, Model: "model", TimeoutSec: 30, MaxQuestionChars: 500},
+		Quote:                platformconfig.QuoteSettings{BaseURL: "http://quote:5000", TimeoutSec: 10},
+		Time:                 platformconfig.TimeSettings{AppTimezone: "Asia/Shanghai", SchedulerTimezone: "Asia/Shanghai"},
+		Retention:            platformconfig.RetentionSettings{TriggerLogRetentionDays: 180},
+		EnvironmentOverrides: []string{"wps.sid"}, Version: 7, AppliedVersion: 6, RestartRequired: true, RestartSupported: true,
 	}}
 	router := newSystemHTTPFixture(t, service)
 	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/system/configuration", nil)
@@ -81,35 +90,45 @@ func TestSystemConfigurationHTTPReturnsMaskedYAMLAndUpdatesByVersion(t *testing.
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("ETag") != `"7"` ||
-		!strings.Contains(response.Body.String(), `"masked_fields":["ai.api_key"]`) || strings.Contains(response.Body.String(), "real-secret") {
+		!strings.Contains(response.Body.String(), `"applied_version":6`) ||
+		!strings.Contains(response.Body.String(), `"share_url":{"configured":true,"source":"file"}`) ||
+		strings.Contains(response.Body.String(), `"yaml"`) || strings.Contains(response.Body.String(), "api-key-secret") {
 		t.Fatalf("status=%d etag=%q body=%s", response.Code, response.Header().Get("ETag"), response.Body.String())
-	}
-
-	service.configuration.Version = 8
-	request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"yaml":"ai:\n  enabled: false\n"}`)
-	request.Header.Set("If-Match", `"7"`)
-	response = httptest.NewRecorder()
-	router.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || service.configurationUpdates != 1 || service.expectedVersion != 7 || service.candidateYAML != "ai:\n  enabled: false\n" {
-		t.Fatalf("status=%d calls=%d version=%d yaml=%q body=%s", response.Code, service.configurationUpdates, service.expectedVersion, service.candidateYAML, response.Body.String())
 	}
 }
 
-func TestSystemConfigurationHTTPReturnsEmptyListsAsArrays(t *testing.T) {
-	service := &fakeSystemOperations{configuration: managersystem.Configuration{
-		YAML: "app:\n  timezone: Asia/Shanghai\n", Version: 7,
-	}}
+func TestUpdateConfigurationPassesPatchVersionAndMutationContext(t *testing.T) {
+	service := &fakeSystemOperations{configuration: managersystem.Configuration{Version: 8, AppliedVersion: 7}}
 	router := newSystemHTTPFixture(t, service)
-	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/system/configuration", nil)
-	request.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "observer"})
+
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"wps":{"sheet":"next"},"ai":{"timeout_sec":45}}`)
+	request.Header.Set("If-Match", `"7"`)
 	response := httptest.NewRecorder()
-
 	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || service.configurationUpdates != 1 || service.expectedVersion != 7 || service.request.RequestID == "" ||
+		service.patch.WPS == nil || service.patch.WPS.Sheet == nil || *service.patch.WPS.Sheet != "next" ||
+		service.patch.AI == nil || service.patch.AI.TimeoutSec == nil || *service.patch.AI.TimeoutSec != 45 {
+		t.Fatalf("status=%d calls=%d version=%d patch=%#v context=%#v body=%s", response.Code, service.configurationUpdates, service.expectedVersion, service.patch, service.request, response.Body.String())
+	}
+}
 
-	if response.Code != http.StatusOK ||
-		!strings.Contains(response.Body.String(), `"masked_fields":[]`) ||
-		!strings.Contains(response.Body.String(), `"environment_overrides":[]`) {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+func TestConfigurationHTTPNeverAcceptsRawYAMLOrDeploymentFields(t *testing.T) {
+	service := &fakeSystemOperations{}
+	router := newSystemHTTPFixture(t, service)
+	for _, body := range []string{
+		`{"yaml":"admin:\n  addr: 0.0.0.0:8090\n"}`,
+		`{"admin":{"addr":"0.0.0.0:8090"}}`,
+		`{"wps":{"cache_file":"/tmp/override"}}`,
+		`{"ai":{"timeout_sec":45,"unknown":true}}`,
+	} {
+		request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", body)
+		request.Header.Set("If-Match", `"7"`)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		assertErrorCode(t, response, http.StatusBadRequest, CodeBadRequest)
+	}
+	if service.configurationUpdates != 0 {
+		t.Fatal("invalid configuration request reached service")
 	}
 }
 
@@ -117,7 +136,7 @@ func TestSystemConfigurationHTTPRequiresVersionAndMapsEditorErrors(t *testing.T)
 	service := &fakeSystemOperations{}
 	router := newSystemHTTPFixture(t, service)
 
-	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"yaml":"app:\n  timezone: Asia/Shanghai\n"}`)
+	request := userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"time":{"app_timezone":"Asia/Shanghai"}}`)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	assertErrorCode(t, response, http.StatusPreconditionRequired, CodePreconditionRequired)
@@ -131,11 +150,12 @@ func TestSystemConfigurationHTTPRequiresVersionAndMapsEditorErrors(t *testing.T)
 		code   string
 	}{
 		{managersystem.ErrInvalidInput, http.StatusBadRequest, CodeBadRequest},
+		{&managersystem.ConfigurationManagedFieldsError{Fields: []string{"ai.model"}}, http.StatusConflict, "configuration_field_managed_externally"},
 		{managersystem.ErrConfigurationVersionConflict, http.StatusConflict, "resource_version_conflict"},
 		{managersystem.ErrConfigurationUnavailable, http.StatusServiceUnavailable, "dependency_unavailable"},
 	} {
 		service.err = test.err
-		request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"yaml":"app:\n  timezone: Asia/Shanghai\n"}`)
+		request = userMutationRequest(t, http.MethodPatch, "/api/admin/v1/system/configuration", `{"time":{"app_timezone":"Asia/Shanghai"}}`)
 		request.Header.Set("If-Match", `"7"`)
 		response = httptest.NewRecorder()
 		router.ServeHTTP(response, request)
@@ -165,7 +185,7 @@ type fakeSystemOperations struct {
 	configuration        managersystem.Configuration
 	configurationUpdates int
 	expectedVersion      uint64
-	candidateYAML        string
+	patch                platformconfig.SettingsPatch
 }
 
 func (s *fakeSystemOperations) Health(context.Context, auth.Principal) (managersystem.Health, error) {
@@ -184,9 +204,10 @@ func (s *fakeSystemOperations) Configuration(context.Context, auth.Principal) (m
 	return s.configuration, s.err
 }
 
-func (s *fakeSystemOperations) UpdateConfiguration(_ context.Context, _ auth.Principal, version uint64, yaml string) (managersystem.Configuration, error) {
+func (s *fakeSystemOperations) UpdateConfiguration(_ context.Context, _ auth.Principal, version uint64, patch platformconfig.SettingsPatch, request auth.MutationContext) (managersystem.Configuration, error) {
 	s.configurationUpdates++
 	s.expectedVersion = version
-	s.candidateYAML = yaml
+	s.patch = patch
+	s.request = request
 	return s.configuration, s.err
 }

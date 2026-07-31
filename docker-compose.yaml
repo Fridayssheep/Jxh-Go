@@ -58,7 +58,9 @@ services:
         condition: service_healthy
     environment:
       JXH_MYSQL_DSN: ${JXH_MYSQL_DSN:-${MYSQL_USER:-jxh}:${MYSQL_PASSWORD:-jxh_password}@tcp(mysql:3306)/${MYSQL_DATABASE:-jxh_bot}?charset=utf8mb4&parseTime=True&loc=Local}
-    command: ["jxh-migrate", "-config", "/app/config.yaml", "-dir", "/app/migrations"]
+    volumes:
+      - ./data/config:/app/config
+    command: ["jxh-migrate", "-config", "/app/config/config.yaml", "-dir", "/app/migrations"]
 
   bot:
     image: jxh-bot:latest
@@ -83,6 +85,7 @@ services:
       JXH_ADMIN_SESSION_SECRET: ${JXH_ADMIN_SESSION_SECRET:-}
       JXH_ADMIN_COOKIE_SECURE: ${JXH_ADMIN_COOKIE_SECURE:-false}
       JXH_ADMIN_MAX_CONCURRENT_REQUESTS: ${JXH_ADMIN_MAX_CONCURRENT_REQUESTS:-128}
+      JXH_BOT_RESTART_MODE: supervised_exit
       JXH_MYSQL_DSN: ${JXH_MYSQL_DSN:-${MYSQL_USER:-jxh}:${MYSQL_PASSWORD:-jxh_password}@tcp(mysql:3306)/${MYSQL_DATABASE:-jxh_bot}?charset=utf8mb4&parseTime=True&loc=Local}
       JXH_QUOTE_BASE_URL: http://quote:5000
       JXH_WPS_SHARE_URL: ${JXH_WPS_SHARE_URL:-}
@@ -93,6 +96,7 @@ services:
       JXH_AI_MODEL: ${JXH_AI_MODEL:-}
       JXH_HEALTH_ADDR: ":${HEALTH_PORT:-8080}"
     volumes:
+      - ./data/config:/app/config
       - ./data/cache:/app/data/cache
       - ./data/exports:/app/data/exports
       - ./data/flash:/app/data/flash

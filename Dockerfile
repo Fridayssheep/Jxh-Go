@@ -21,10 +21,12 @@ COPY --from=build /out/jxh-bot /usr/local/bin/jxh-bot
 COPY --from=build /out/jxh-migrate /usr/local/bin/jxh-migrate
 COPY --from=build /out/jxh-admin-bootstrap /usr/local/bin/jxh-admin-bootstrap
 COPY deploy/mysql/migrations /app/migrations
-COPY config.example.yaml /app/config.yaml
+COPY config.example.yaml /usr/local/share/jxh/config.example.yaml
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN mkdir -p /app/data/cache /app/data/flash \
+RUN mkdir -p /app/config /app/data/cache /app/data/flash \
     && chown -R appuser:appuser /app \
+    && chown -R root:root /usr/local/share/jxh \
+    && chmod 0444 /usr/local/share/jxh/config.example.yaml \
     && chown -R root:root /app/migrations \
     && find /app/migrations -type d -exec chmod 0555 {} + \
     && find /app/migrations -type f -exec chmod 0444 {} + \
@@ -33,4 +35,4 @@ RUN mkdir -p /app/data/cache /app/data/flash \
 ENV TZ=Asia/Shanghai
 EXPOSE 8080 8090
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["jxh-bot", "-config", "/app/config.yaml"]
+CMD ["jxh-bot", "-config", "/app/config/config.yaml"]

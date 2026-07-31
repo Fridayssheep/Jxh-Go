@@ -33,11 +33,15 @@ Jxh-Go 是精弘 QQ 群助手的 Go 重构版本，面向浙江工业大学相�
 
 本地使用 compose 部署只需要 Docker Compose；如果需要本地运行/调试 bot（make run / go run），还需要 Go 1.25+。`docker-compose.yaml` 会一次启动 MySQL、NapCat、引用图服务和 bot。
 
-### 2. 复制配置
+### 2. 准备配置
+
+本地运行时复制示例配置：
 
 ```bash
 cp config.example.yaml config.yaml
 ```
+
+使用 Compose 时无需执行这条命令；首次启动会自动创建 `./data/config/config.yaml`，之后由管理面板或管理员直接维护该持久化文件。
 
 先重点检查这些配置：
 
@@ -64,6 +68,8 @@ NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up -d --build
 ```
 
 compose 会同时启动 MySQL、NapCat、quote 和 bot。
+
+Compose 会把运行配置保存在 `./data/config/config.yaml`。首次启动时 entrypoint 会从镜像内模板初始化该文件，后续启动不会覆盖管理面板写入的设置；bot 收到受控重启请求后以退出码 75 结束，由 `restart: unless-stopped` 自动拉起。
 
 管理 API 默认监听 `http://127.0.0.1:8090/api/admin/v1`。首次使用前执行迁移并创建唯一的首个超级管理员：
 
@@ -192,7 +198,7 @@ bot 只处理明确 @bot 的 `/admin` 命令，并会在每次执行 `/admin` �
 
 ## 配置和环境变量
 
-主配置文件是 `config.yaml`。示例配置在 `config.example.yaml`，字段说明写在注释里。
+本地运行时主配置文件是 `config.yaml`；Compose 部署时是持久化目录中的 `./data/config/config.yaml`。示例配置在 `config.example.yaml`，字段说明写在注释里。
 
 常用环境变量：
 
@@ -209,6 +215,7 @@ bot 只处理明确 @bot 的 `/admin` 命令，并会在每次执行 `/admin` �
 | `JXH_MYSQL_PASSWORD` | bot 直连运行时的 MySQL 密码；compose 部署通常用 `MYSQL_PASSWORD` |
 | `JXH_MYSQL_DSN` | 完整 MySQL DSN，设置后优先使用 |
 | `PUID` / `PGID` | Compose 中 bot 进程使用的 UID/GID，NAS 挂载目录可据此匹配宿主权限 |
+| `JXH_BOT_RESTART_MODE` | Bot 重启模式；仅在 Docker/systemd 等进程监督器下使用 `supervised_exit`，Compose 已自动设置 |
 | `JXH_AI_PROVIDER` | ChatModel 提供方，支持 `openai`、`ark` |
 | `JXH_AI_BASE_URL` | ChatModel base URL |
 | `JXH_AI_API_KEY` | ChatModel API Key |

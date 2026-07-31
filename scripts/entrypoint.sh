@@ -26,8 +26,13 @@ if [ "$(id -u)" = "0" ]; then
 		usermod -o -u "${TARGET_UID}" -g "${TARGET_GID}" appuser
 	fi
 
-	mkdir -p /app/data/cache /app/data/exports /app/data/flash
-	chown -R appuser:appuser /app/data/cache /app/data/exports /app/data/flash
+	mkdir -p /app/config /app/data/cache /app/data/exports /app/data/flash
+	if [ ! -f "/app/config/config.yaml" ]; then
+		cp /usr/local/share/jxh/config.example.yaml /app/config/config.yaml
+	fi
+	chown -R appuser:appuser /app/config /app/data/cache /app/data/exports /app/data/flash
+	chmod 0750 /app/config
+	chmod 0600 /app/config/config.yaml
 	chmod 0755 /app/data/flash
 	exec gosu appuser "$@"
 fi

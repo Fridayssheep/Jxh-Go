@@ -12,11 +12,49 @@ import (
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/messaging/quote"
+	"github.com/zjutjh/jxh-go/internal/platform/app"
 	"github.com/zjutjh/jxh-go/internal/platform/config"
 	"github.com/zjutjh/jxh-go/internal/platform/health"
 	"github.com/zjutjh/jxh-go/internal/platform/telemetry"
 	"gorm.io/gorm"
 )
+
+func TestMainResultReturns75AfterSupervisedRestart(t *testing.T) {
+	result := mainResultWithDependencies(nil, mainDependencies{
+		loadConfig: func(string) (config.Config, error) { return config.Default(), nil },
+		signalContext: func() (context.Context, context.CancelFunc) {
+			return context.WithCancel(t.Context())
+		},
+		run: func(ctx context.Context, _ config.Config, coordinator *app.RestartCoordinator) error {
+			if !coordinator.Schedule("operation-1") {
+				t.Fatal("restart request was rejected")
+			}
+			<-ctx.Done()
+			return nil
+		},
+	})
+	if result != 75 {
+		t.Fatalf("main result = %d, want 75", result)
+	}
+}
+
+func TestMainResultReturnsZeroForSignalShutdown(t *testing.T) {
+	signalCtx, signalCancel := context.WithCancel(t.Context())
+	signalCancel()
+	result := mainResultWithDependencies(nil, mainDependencies{
+		loadConfig: func(string) (config.Config, error) { return config.Default(), nil },
+		signalContext: func() (context.Context, context.CancelFunc) {
+			return signalCtx, func() {}
+		},
+		run: func(ctx context.Context, _ config.Config, _ *app.RestartCoordinator) error {
+			<-ctx.Done()
+			return nil
+		},
+	})
+	if result != 0 {
+		t.Fatalf("main result = %d, want 0", result)
+	}
+}
 
 func TestRunWithDependenciesClosesDatabaseAfterInitializationFailure(t *testing.T) {
 	closer := &botDatabaseCloser{}

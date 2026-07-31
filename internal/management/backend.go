@@ -60,18 +60,19 @@ type Store interface {
 }
 
 type Options struct {
-	Context           context.Context
-	Config            config.Config
-	Store             Store
-	Gateway           *napcat.Gateway
-	Health            *health.Service
-	SettingsRuntime   *settings.Runtime
-	KnowledgeStore    knowledgeadmin.Store
-	KnowledgeReloader knowledgeadmin.Reloader
-	Location          *time.Location
-	Now               func() time.Time
-	Random            io.Reader
-	Logger            *log.Logger
+	Context             context.Context
+	Config              config.Config
+	Store               Store
+	Gateway             *napcat.Gateway
+	Health              *health.Service
+	SettingsRuntime     *settings.Runtime
+	KnowledgeStore      knowledgeadmin.Store
+	KnowledgeReloader   knowledgeadmin.Reloader
+	BotRestartScheduler system.BotRestartScheduler
+	Location            *time.Location
+	Now                 func() time.Time
+	Random              io.Reader
+	Logger              *log.Logger
 }
 
 type Backend struct {
@@ -169,7 +170,8 @@ func NewBackend(options Options) (*Backend, error) {
 		Store: options.Store, Health: options.Health, Gateway: options.Gateway, Events: hub,
 		Configuration:               newConfigurationEditor(options.Config.SourcePath),
 		AppliedConfigurationVersion: options.Config.SourceVersion,
-		RestartSupported:            options.Config.BotRestartMode == config.BotRestartSupervisedExit,
+		RestartSupported:            options.Config.BotRestartMode == config.BotRestartSupervisedExit && options.BotRestartScheduler != nil,
+		BotRestartScheduler:         options.BotRestartScheduler,
 		IdempotencySecret:           secrets.SystemOperation, Dependencies: dependencyConfiguration(options.Config),
 		Now: options.Now, WorkerContext: options.Context,
 	})

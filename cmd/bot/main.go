@@ -43,21 +43,54 @@ func main() {
 }
 
 func mainResult(arguments []string) int {
+	return mainResultWithDependencies(arguments, mainDependencies{
+		loadConfig: config.Load,
+		signalContext: func() (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		},
+		run: run,
+	})
+}
+
+type mainDependencies struct {
+	loadConfig    func(string) (config.Config, error)
+	signalContext func() (context.Context, context.CancelFunc)
+	run           func(context.Context, config.Config, *app.RestartCoordinator) error
+}
+
+func mainResultWithDependencies(arguments []string, dependencies mainDependencies) int {
 	flags := flag.NewFlagSet("jxh-bot", flag.ContinueOnError)
 	configPath := flags.String("config", "config.yaml", "path to config file")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
+	if dependencies.loadConfig == nil || dependencies.signalContext == nil || dependencies.run == nil {
+		log.Print("initialize bot runtime: invalid main dependencies")
+		return 1
+	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := dependencies.loadConfig(*configPath)
 	if err != nil {
 		log.Printf("load config: %v", err)
 		return 1
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signalCtx, stop := dependencies.signalContext()
+	if signalCtx == nil || stop == nil {
+		log.Print("initialize bot runtime: invalid signal context")
+		return 1
+	}
 	defer stop()
-	if err := run(ctx, cfg); err != nil {
+	ctx, cancel := context.WithCancelCause(signalCtx)
+	defer cancel(nil)
+	restartCoordinator := app.NewRestartCoordinator(cancel)
+	err = dependencies.run(ctx, cfg, restartCoordinator)
+	if errors.Is(context.Cause(ctx), app.ErrRestartRequested) {
+		if err == nil || errors.Is(err, app.ErrRestartRequested) {
+			return 75
+		}
+	}
+	if err != nil {
 		log.Printf("run bot: %v", err)
 		return 1
 	}
@@ -83,10 +116,12 @@ type runtimeDependencies struct {
 	buildApplication func(context.Context, config.Config, databaseResources) (applicationRunner, error)
 }
 
-func run(ctx context.Context, cfg config.Config) error {
+func run(ctx context.Context, cfg config.Config, restartCoordinator *app.RestartCoordinator) error {
 	return runWithDependencies(ctx, cfg, runtimeDependencies{
-		openDatabase:     openDatabaseResources,
-		buildApplication: buildApplication,
+		openDatabase: openDatabaseResources,
+		buildApplication: func(ctx context.Context, cfg config.Config, database databaseResources) (applicationRunner, error) {
+			return buildApplication(ctx, cfg, database, restartCoordinator)
+		},
 	})
 }
 
@@ -135,7 +170,12 @@ func openDatabaseResources(ctx context.Context, cfg config.DatabaseConfig) (data
 	return databaseResources{ORM: db, Pinger: sqlDB, Closer: sqlDB}, nil
 }
 
-func buildApplication(ctx context.Context, cfg config.Config, database databaseResources) (_ applicationRunner, err error) {
+func buildApplication(
+	ctx context.Context,
+	cfg config.Config,
+	database databaseResources,
+	restartCoordinator *app.RestartCoordinator,
+) (_ applicationRunner, err error) {
 	db := database.ORM
 	sqlDB := database.Pinger
 	store := storage.NewStore(db)
@@ -190,7 +230,7 @@ func buildApplication(ctx context.Context, cfg config.Config, database databaseR
 		managementBackend, err = management.NewBackend(management.Options{
 			Context: ctx, Config: cfg, Store: store, Gateway: napcatGateway, Health: healthService,
 			SettingsRuntime: settingsRuntime, KnowledgeStore: knowledgeRuntime, KnowledgeReloader: knowledgeRuntime,
-			Location: location, Now: now, Logger: log.Default(),
+			BotRestartScheduler: restartCoordinator, Location: location, Now: now, Logger: log.Default(),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("initialize management backend: %w", err)

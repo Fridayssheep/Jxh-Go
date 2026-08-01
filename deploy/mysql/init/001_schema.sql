@@ -412,7 +412,7 @@ CREATE TABLE `group_join_requests` (
   `source` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL COMMENT '来源：event/system',
   `raw_json` mediumtext COMMENT 'NapCat 原始事件或系统消息 JSON',
   `system_raw_json` mediumtext COMMENT 'NapCat 最近一次系统消息 JSON',
-  `ai_parse_status` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'pending' COMMENT 'AI 解析状态：pending/completed/failed/skipped',
+  `ai_parse_status` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'pending' COMMENT 'AI 解析状态：pending/running/succeeded/failed/skipped',
   `ai_parse_attempts` int unsigned NOT NULL DEFAULT '0' COMMENT 'AI 解析尝试次数',
   `ai_error_code` varchar(100) DEFAULT NULL,
   `validation_snapshot` json DEFAULT NULL,

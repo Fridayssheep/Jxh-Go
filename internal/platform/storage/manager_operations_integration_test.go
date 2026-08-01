@@ -12,6 +12,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/automation/scheduledjobs"
 	"github.com/zjutjh/jxh-go/internal/automation/scheduler"
 	"github.com/zjutjh/jxh-go/internal/groups"
+	"github.com/zjutjh/jxh-go/internal/groups/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/groups/joinrequests"
 	"github.com/zjutjh/jxh-go/internal/management/analytics"
 	"github.com/zjutjh/jxh-go/internal/management/audit"
@@ -54,6 +55,28 @@ func TestManagerOperationsMySQLResourceLifecycle(t *testing.T) {
 	if err != nil || command.ID == "" || command.Version != 1 || command.Status != customcommand.StatusActive || command.UpdatedBy.UserID == nil {
 		t.Fatalf("create custom command: command=%+v error=%v", command, err)
 	}
+	freshProcessedAt := now.Add(time.Minute)
+	if err := store.UpsertGroupJoinRequest(t.Context(), grouprequest.Record{
+		Flag: "join-flag-new-system-processed", GroupID: 10002, UserID: 20000, SubType: "add", Comment: "verification",
+		Status: grouprequest.StatusProcessed, Source: grouprequest.SourceSystem, SystemRawJSON: `{}`,
+		AIParseStatus: string(joinrequests.AIParseSucceeded), AIParseAttempts: 1,
+		RequestedAt: now, ProcessedAt: &freshProcessedAt, FirstSeenAt: now, LastSeenAt: freshProcessedAt, AIParsedAt: &now,
+	}); err != nil {
+		t.Fatalf("create already processed join request: %v", err)
+	}
+	var freshObservedStatus, freshDecisionStatus string
+	var freshDecisionSource sql.NullString
+	if err := sqlDB.QueryRowContext(t.Context(), `SELECT observed_status, decision_status, decision_source
+FROM group_join_requests WHERE flag = ?`, "join-flag-new-system-processed").Scan(
+		&freshObservedStatus, &freshDecisionStatus, &freshDecisionSource,
+	); err != nil {
+		t.Fatalf("load newly created processed join request: %v", err)
+	}
+	if freshObservedStatus != string(joinrequests.ObservedChecked) ||
+		freshDecisionStatus != string(joinrequests.DecisionExternalProcessed) ||
+		!freshDecisionSource.Valid || freshDecisionSource.String != string(joinrequests.SourceExternal) {
+		t.Fatalf("new processed statuses: observed=%q decision=%q source=%+v", freshObservedStatus, freshDecisionStatus, freshDecisionSource)
+	}
 
 	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
 (flag, group_id, user_id, applicant_nickname, student_id, student_name, major, sub_type, comment,
@@ -64,6 +87,17 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 		`{"valid":true,"validation_errors":[]}`, now, now, now, now,
 	); err != nil {
 		t.Fatalf("seed join request: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
+(flag, group_id, user_id, student_id, student_name, major, sub_type, comment, status, source,
+ ai_parse_status, ai_parse_attempts, validation_snapshot, observed_status, decision_status, revision,
+ requested_at, processed_at, first_seen_at, last_seen_at, ai_parsed_at)
+VALUES (?, ?, ?, ?, ?, ?, 'add', ?, 'processed', 'system', 'succeeded', 1, ?, 'pending', 'pending', 1,
+ ?, ?, ?, ?, ?)`,
+		"join-flag-already-processed", 10001, 20003, "20260003", "Processed Student", "Computer Science",
+		"verification", `{"valid":true,"validation_errors":[]}`, now, now, now, now, now,
+	); err != nil {
+		t.Fatalf("seed already processed join request: %v", err)
 	}
 	policy, found, err := store.GetPolicy(t.Context(), "10001")
 	if err != nil || !found {
@@ -79,10 +113,59 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	if err != nil || policy.Enabled || !policy.AutoReject {
 		t.Fatalf("enable automatic rejection: policy=%+v error=%v", policy, err)
 	}
+	insertedAIRequest, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
+(flag, group_id, user_id, sub_type, comment, status, source, ai_parse_status, ai_parse_attempts,
+ observed_status, decision_status, revision, requested_at, first_seen_at, last_seen_at)
+VALUES (?, ?, ?, 'add', ?, 'pending', 'event', 'pending', 0, 'pending', 'pending', 1, ?, ?, ?)`,
+		"join-flag-ai-completion", 10002, 20002, "verification", now, now, now,
+	)
+	if err != nil {
+		t.Fatalf("seed pending AI parse: %v", err)
+	}
+	insertedAIRequestID, err := insertedAIRequest.LastInsertId()
+	if err != nil {
+		t.Fatalf("load pending AI parse ID: %v", err)
+	}
+	if err := store.CompleteGroupJoinRequestAI(t.Context(), uint64(insertedAIRequestID), grouprequest.ExtractedFields{
+		StudentID: "20260002", StudentName: "Second Student", Major: "Software Engineering",
+	}, now); err != nil {
+		t.Fatalf("complete group request AI parse: %v", err)
+	}
+	var completedAIStatus string
+	if err := sqlDB.QueryRowContext(t.Context(),
+		"SELECT ai_parse_status FROM group_join_requests WHERE flag = ?", "join-flag-ai-completion",
+	).Scan(&completedAIStatus); err != nil {
+		t.Fatalf("load completed AI parse status: %v", err)
+	}
+	if completedAIStatus != string(joinrequests.AIParseSucceeded) {
+		t.Fatalf("completed AI parse status=%q", completedAIStatus)
+	}
 	autoCandidates, err := store.ListAutoCandidates(t.Context(), 20)
 	if err != nil || len(autoCandidates) != 1 || autoCandidates[0].Request.ID != "join-flag-1" ||
+		autoCandidates[0].Request.Group.ID != "10001" || autoCandidates[0].Policy.GroupID != "10001" ||
 		autoCandidates[0].Policy.Enabled || !autoCandidates[0].Policy.AutoReject {
 		t.Fatalf("automatic rejection candidates=%+v error=%v", autoCandidates, err)
+	}
+	processedAt := now.Add(3 * time.Minute)
+	if err := store.UpsertGroupJoinRequest(t.Context(), grouprequest.Record{
+		Flag: "join-flag-already-processed", GroupID: 10001, UserID: 20003, SubType: "add", Comment: "verification",
+		Status: grouprequest.StatusProcessed, Source: grouprequest.SourceSystem, SystemRawJSON: `{}`,
+		AIParseStatus: string(joinrequests.AIParseSucceeded), AIParseAttempts: 1,
+		RequestedAt: now, ProcessedAt: &processedAt, FirstSeenAt: now, LastSeenAt: processedAt, AIParsedAt: &now,
+	}); err != nil {
+		t.Fatalf("synchronize already processed join request: %v", err)
+	}
+	var observedStatus, decisionStatus string
+	var decisionSource sql.NullString
+	if err := sqlDB.QueryRowContext(t.Context(), `SELECT observed_status, decision_status, decision_source
+FROM group_join_requests WHERE flag = ?`, "join-flag-already-processed").Scan(
+		&observedStatus, &decisionStatus, &decisionSource,
+	); err != nil {
+		t.Fatalf("load synchronized join request: %v", err)
+	}
+	if observedStatus != string(joinrequests.ObservedChecked) || decisionStatus != string(joinrequests.DecisionExternalProcessed) ||
+		!decisionSource.Valid || decisionSource.String != string(joinrequests.SourceExternal) {
+		t.Fatalf("synchronized statuses: observed=%q decision=%q source=%+v", observedStatus, decisionStatus, decisionSource)
 	}
 	joinReservation, err := store.BeginDecisions(t.Context(), joinrequests.BeginMutation{
 		Context: joinrequests.MutationContext{
@@ -120,6 +203,28 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'p
 	})
 	if err != nil || !joinReplay.Replay || len(joinReplay.Items) != 1 || joinReplay.Items[0].Decision.ID != decisionID {
 		t.Fatalf("replay join decision: reservation=%+v error=%v", joinReplay, err)
+	}
+	confirmedSnapshotAt := now.Add(3*time.Minute + 2*time.Second)
+	if err := store.UpsertGroupJoinRequest(t.Context(), grouprequest.Record{
+		Flag: "join-flag-1", GroupID: 10001, UserID: 20001, SubType: "add", Comment: "verification",
+		Status: grouprequest.StatusProcessed, Source: grouprequest.SourceSystem, SystemRawJSON: `{}`,
+		AIParseStatus: string(joinrequests.AIParseSucceeded), AIParseAttempts: 1,
+		RequestedAt: now, ProcessedAt: &confirmedSnapshotAt, FirstSeenAt: now, LastSeenAt: confirmedSnapshotAt, AIParsedAt: &now,
+	}); err != nil {
+		t.Fatalf("synchronize locally approved join request: %v", err)
+	}
+	var confirmedObservedStatus, confirmedDecisionStatus string
+	var confirmedDecisionSource sql.NullString
+	if err := sqlDB.QueryRowContext(t.Context(), `SELECT observed_status, decision_status, decision_source
+FROM group_join_requests WHERE flag = ?`, "join-flag-1").Scan(
+		&confirmedObservedStatus, &confirmedDecisionStatus, &confirmedDecisionSource,
+	); err != nil {
+		t.Fatalf("load locally approved join request: %v", err)
+	}
+	if confirmedObservedStatus != string(joinrequests.ObservedChecked) ||
+		confirmedDecisionStatus != string(joinrequests.DecisionApproved) ||
+		!confirmedDecisionSource.Valid || confirmedDecisionSource.String != string(joinrequests.SourceManual) {
+		t.Fatalf("locally approved statuses: observed=%q decision=%q source=%+v", confirmedObservedStatus, confirmedDecisionStatus, confirmedDecisionSource)
 	}
 
 	testSend, err := store.BeginScheduledJobTestSend(t.Context(), scheduledjobs.TestSendBegin{

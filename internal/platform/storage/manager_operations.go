@@ -20,6 +20,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/automation/customcommand"
 	"github.com/zjutjh/jxh-go/internal/automation/scheduledjobs"
 	"github.com/zjutjh/jxh-go/internal/automation/scheduler"
+	"github.com/zjutjh/jxh-go/internal/groups/grouprequest"
 	"github.com/zjutjh/jxh-go/internal/groups/joinrequests"
 	"github.com/zjutjh/jxh-go/internal/management/analytics"
 	"github.com/zjutjh/jxh-go/internal/management/audit"
@@ -1091,18 +1092,19 @@ func loadCompletedJoinDecisionResult(_ *gorm.DB, requestRow joinRequestManagerRo
 
 func (s *Store) ListAutoCandidates(ctx context.Context, limit int) ([]joinrequests.AutoCandidate, error) {
 	var rows []struct {
-		joinRequestManagerRow
-		PolicyEnabled        bool      `gorm:"column:policy_enabled"`
-		PolicyMode           string    `gorm:"column:policy_mode"`
-		PolicyRequiredFields []byte    `gorm:"column:policy_required_fields"`
-		PolicyAutoReject     bool      `gorm:"column:policy_auto_reject"`
-		PolicyRevision       uint64    `gorm:"column:policy_revision"`
-		PolicyUpdatedAt      time.Time `gorm:"column:policy_updated_at"`
-		PolicyUpdatedType    string    `gorm:"column:policy_updated_type"`
-		PolicyUpdatedUserID  *string   `gorm:"column:policy_updated_user_id"`
-		PolicyUpdatedQQID    *string   `gorm:"column:policy_updated_qq_id"`
-		PolicyUpdatedDisplay string    `gorm:"column:policy_updated_display"`
-		PolicyUpdatedRole    *string   `gorm:"column:policy_updated_role"`
+		Request              joinRequestManagerRow `gorm:"embedded"`
+		PolicyGroupID        int64                 `gorm:"column:policy_group_id"`
+		PolicyEnabled        bool                  `gorm:"column:policy_enabled"`
+		PolicyMode           string                `gorm:"column:policy_mode"`
+		PolicyRequiredFields []byte                `gorm:"column:policy_required_fields"`
+		PolicyAutoReject     bool                  `gorm:"column:policy_auto_reject"`
+		PolicyRevision       uint64                `gorm:"column:policy_revision"`
+		PolicyUpdatedAt      time.Time             `gorm:"column:policy_updated_at"`
+		PolicyUpdatedType    string                `gorm:"column:policy_updated_type"`
+		PolicyUpdatedUserID  *string               `gorm:"column:policy_updated_user_id"`
+		PolicyUpdatedQQID    *string               `gorm:"column:policy_updated_qq_id"`
+		PolicyUpdatedDisplay string                `gorm:"column:policy_updated_display"`
+		PolicyUpdatedRole    *string               `gorm:"column:policy_updated_role"`
 	}
 	db := s.db.WithContext(ctx).Table("group_join_requests AS request").Select(`request.id AS internal_id, request.flag,
 request.group_id, COALESCE(managed.name, '') AS group_name, request.user_id, request.applicant_nickname,
@@ -1110,26 +1112,27 @@ request.student_id, request.student_name, request.major, request.sub_type, reque
 request.ai_parse_status, request.ai_error_code, request.validation_snapshot, request.ai_parsed_at,
 request.observed_status, request.decision_status, request.decision_source, request.revision,
 request.last_decision_id, request.processing_expires_at, request.requested_at, request.first_seen_at, request.last_seen_at,
-policy.enabled AS policy_enabled, policy.mode AS policy_mode, policy.required_fields AS policy_required_fields,
+policy.group_id AS policy_group_id, policy.enabled AS policy_enabled, policy.mode AS policy_mode, policy.required_fields AS policy_required_fields,
 policy.auto_reject AS policy_auto_reject, policy.revision AS policy_revision, policy.updated_at AS policy_updated_at,
 policy.updated_by_type AS policy_updated_type, policy.updated_by_user_id AS policy_updated_user_id,
 policy.updated_by_qq_user_id AS policy_updated_qq_id, policy.updated_by_display_name AS policy_updated_display,
 policy.updated_by_role AS policy_updated_role`).
 		Joins("JOIN group_join_policies AS policy ON policy.group_id = request.group_id AND (policy.enabled = TRUE OR policy.auto_reject = TRUE)").
 		Joins("LEFT JOIN managed_groups AS managed ON managed.group_id = request.group_id").
-		Where("request.decision_status = ? AND request.sub_type = ? AND request.ai_parse_status = ?", joinrequests.DecisionPending, joinrequests.SubTypeAdd, joinrequests.AIParseSucceeded).
+		Where("request.status = ? AND request.observed_status = ? AND request.decision_status = ? AND request.sub_type = ? AND request.ai_parse_status = ?",
+			grouprequest.StatusPending, joinrequests.ObservedPending, joinrequests.DecisionPending, joinrequests.SubTypeAdd, joinrequests.AIParseSucceeded).
 		Order("request.requested_at ASC").Order("request.id ASC").Limit(limit)
 	if err := db.Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	result := make([]joinrequests.AutoCandidate, len(rows))
 	for index, row := range rows {
-		request, err := joinRequestFromManagerRow(row.joinRequestManagerRow)
+		request, err := joinRequestFromManagerRow(row.Request)
 		if err != nil {
 			return nil, err
 		}
 		policy, err := policyFromManagerRow(joinPolicyManagerRow{
-			GroupID: *row.GroupID, Enabled: row.PolicyEnabled, Mode: row.PolicyMode,
+			GroupID: row.PolicyGroupID, Enabled: row.PolicyEnabled, Mode: row.PolicyMode,
 			RequiredFields: row.PolicyRequiredFields, AutoReject: row.PolicyAutoReject,
 			Revision: row.PolicyRevision, UpdatedAt: row.PolicyUpdatedAt,
 			ManagerUpdatedByColumns: ManagerUpdatedByColumns{

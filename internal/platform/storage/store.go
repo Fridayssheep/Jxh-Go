@@ -7,6 +7,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/automation/scheduler"
 	"github.com/zjutjh/jxh-go/internal/bot/commands"
 	"github.com/zjutjh/jxh-go/internal/groups/grouprequest"
+	"github.com/zjutjh/jxh-go/internal/groups/joinrequests"
 	"github.com/zjutjh/jxh-go/internal/knowledge/triggerstats"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -165,6 +166,17 @@ func systemGroupRequestUpdates(record grouprequest.Record) map[string]any {
 		"system_raw_json": record.SystemRawJSON,
 		"last_seen_at":    record.LastSeenAt,
 	}
+	if record.Status == grouprequest.StatusProcessed {
+		updates["observed_status"] = joinrequests.ObservedChecked
+		updates["decision_status"] = gorm.Expr(
+			"CASE WHEN decision_status IN (?, ?) THEN ? ELSE decision_status END",
+			joinrequests.DecisionPending, joinrequests.DecisionUnknown, joinrequests.DecisionExternalProcessed,
+		)
+		updates["decision_source"] = gorm.Expr(
+			"CASE WHEN decision_status IN (?, ?, ?) THEN ? ELSE decision_source END",
+			joinrequests.DecisionPending, joinrequests.DecisionUnknown, joinrequests.DecisionExternalProcessed, joinrequests.SourceExternal,
+		)
+	}
 	if record.StudentID != "" {
 		updates["student_id"] = record.StudentID
 	}
@@ -216,7 +228,7 @@ func (s *Store) ListPendingGroupJoinRequests(ctx context.Context, limit int) ([]
 
 func (s *Store) CompleteGroupJoinRequestAI(ctx context.Context, id uint64, fields grouprequest.ExtractedFields, at time.Time) error {
 	updates := map[string]any{
-		"ai_parse_status": grouprequest.AIParseCompleted,
+		"ai_parse_status": grouprequest.AIParseSucceeded,
 		"ai_parsed_at":    at,
 	}
 	if fields.StudentID != "" {
@@ -244,6 +256,7 @@ WHERE id = ? AND ai_parse_status = ?`,
 }
 
 func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
+	observedStatus, decisionStatus, decisionSource := groupJoinRequestManagementDefaults(record)
 	return GroupJoinRequest{
 		ID:              record.ID,
 		Flag:            record.Flag,
@@ -255,6 +268,9 @@ func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 		SubType:         record.SubType,
 		Comment:         record.Comment,
 		Status:          record.Status,
+		ObservedStatus:  observedStatus,
+		DecisionStatus:  decisionStatus,
+		DecisionSource:  decisionSource,
 		Source:          record.Source,
 		RawJSON:         record.RawJSON,
 		SystemRawJSON:   record.SystemRawJSON,
@@ -266,6 +282,14 @@ func groupJoinRequestToModel(record grouprequest.Record) GroupJoinRequest {
 		LastSeenAt:      record.LastSeenAt,
 		AIParsedAt:      record.AIParsedAt,
 	}
+}
+
+func groupJoinRequestManagementDefaults(record grouprequest.Record) (string, string, *string) {
+	if record.Source == grouprequest.SourceSystem && record.Status == grouprequest.StatusProcessed {
+		decisionSource := string(joinrequests.SourceExternal)
+		return string(joinrequests.ObservedChecked), string(joinrequests.DecisionExternalProcessed), &decisionSource
+	}
+	return string(joinrequests.ObservedPending), string(joinrequests.DecisionPending), nil
 }
 
 func groupJoinRequestFromModel(model GroupJoinRequest) grouprequest.Record {

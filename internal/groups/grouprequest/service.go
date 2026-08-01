@@ -26,7 +26,7 @@ const (
 	SourceSystem = "system"
 
 	AIParsePending   = "pending"
-	AIParseCompleted = "completed"
+	AIParseSucceeded = "succeeded"
 	AIParseFailed    = "failed"
 	AIParseSkipped   = "skipped"
 

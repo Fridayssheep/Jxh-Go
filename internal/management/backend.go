@@ -340,6 +340,9 @@ func loadRuntimeState(
 	if err := joinRequestService.RecoverInterrupted(ctx); err != nil {
 		return fmt.Errorf("recover join request decisions: %w", err)
 	}
+	if err := joinRequestService.RetireStaleAutomaticRequests(ctx); err != nil {
+		return err
+	}
 	if _, err := scheduledJobService.RecoverInterruptedRuns(ctx); err != nil {
 		return fmt.Errorf("recover scheduled job runs: %w", err)
 	}

@@ -23,6 +23,7 @@ import (
 func TestManagerOperationsMySQLResourceLifecycle(t *testing.T) {
 	store, sqlDB := openManagerAuthTestStore(t)
 	now := time.Date(2026, time.July, 28, 5, 0, 0, 0, time.UTC)
+	freshRequestAt := now.Add(3 * time.Minute)
 	insertManagerAuthTestUser(t, sqlDB, "usr_root", "root-admin", auth.RoleSuperAdmin, now)
 	principal := auth.Principal{UserID: "usr_root", SessionID: "ses_root", Role: auth.RoleSuperAdmin}
 	request := auth.MutationContext{RequestID: "req_operations", IPAddress: "192.0.2.20", UserAgent: "integration-test"}
@@ -84,9 +85,19 @@ FROM group_join_requests WHERE flag = ?`, "join-flag-new-system-processed").Scan
  revision, requested_at, first_seen_at, last_seen_at, ai_parsed_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'pending', 'pending', 1, ?, ?, ?, ?)`,
 		"join-flag-1", 10001, 20001, "Applicant", "20260001", "Student", "Computer Science", "verification",
-		`{"valid":true,"validation_errors":[]}`, now, now, now, now,
+		`{"valid":true,"validation_errors":[]}`, freshRequestAt, freshRequestAt, freshRequestAt, freshRequestAt,
 	); err != nil {
 		t.Fatalf("seed join request: %v", err)
+	}
+	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
+(flag, group_id, user_id, applicant_nickname, student_id, student_name, major, sub_type, comment,
+ status, source, ai_parse_status, ai_parse_attempts, validation_snapshot, observed_status, decision_status,
+ revision, requested_at, first_seen_at, last_seen_at, ai_parsed_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'pending', 'pending', 1, ?, ?, ?, ?)`,
+		"join-flag-policy-cutoff", 10001, 20004, "Old Applicant", "20260004", "Old Student", "Computer Science", "verification",
+		`{"valid":true,"validation_errors":[]}`, now.Add(-2*time.Hour), now.Add(-2*time.Hour), now.Add(-2*time.Hour), now.Add(-2*time.Hour),
+	); err != nil {
+		t.Fatalf("seed old join request: %v", err)
 	}
 	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
 (flag, group_id, user_id, student_id, student_name, major, sub_type, comment, status, source,
@@ -113,6 +124,54 @@ VALUES (?, ?, ?, ?, ?, ?, 'add', ?, 'processed', 'system', 'succeeded', 1, ?, 'p
 	if err != nil || policy.Enabled || !policy.AutoReject {
 		t.Fatalf("enable automatic rejection: policy=%+v error=%v", policy, err)
 	}
+	var cutoffStatus string
+	var cutoffRevision uint64
+	if err := sqlDB.QueryRowContext(t.Context(), "SELECT decision_status, revision FROM group_join_requests WHERE flag = ?", "join-flag-policy-cutoff").Scan(&cutoffStatus, &cutoffRevision); err != nil {
+		t.Fatalf("load retired old join request: %v", err)
+	}
+	if cutoffStatus != string(joinrequests.DecisionUnknown) || cutoffRevision != 2 {
+		t.Fatalf("retired old join request status=%q revision=%d", cutoffStatus, cutoffRevision)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action = 'join_request.auto_policy_cutoff'", 1)
+	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
+(flag, group_id, user_id, sub_type, comment, status, source, ai_parse_status, ai_parse_attempts,
+ observed_status, decision_status, revision, requested_at, first_seen_at, last_seen_at, ai_parsed_at)
+VALUES (?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, 'pending', 'pending', 1, ?, ?, ?, ?),
+       (?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, 'pending', 'pending', 1, NULL, NULL, NULL, NULL)`,
+		"join-flag-startup-cutoff", 10001, 20005, "Old startup Applicant", now.Add(-2*time.Hour), now.Add(-2*time.Hour), now.Add(-2*time.Hour), now.Add(-2*time.Hour),
+		"join-flag-startup-no-time", 10001, 20006, "Unknown time Applicant",
+	); err != nil {
+		t.Fatalf("seed startup stale join requests: %v", err)
+	}
+	if err := store.RetireStaleAutomaticRequests(t.Context(), joinrequests.MutationContext{
+		Actor:   audit.Actor{Type: audit.ActorSystem, DisplayName: "startup"},
+		Request: auth.MutationContext{RequestID: "startup-auto-cutoff"}, OccurredAt: now.Add(3 * time.Minute),
+	}); err != nil {
+		t.Fatalf("retire startup stale join requests: %v", err)
+	}
+	var startupStatuses []string
+	rows, err := sqlDB.QueryContext(t.Context(), `SELECT decision_status FROM group_join_requests
+WHERE flag IN (?, ?) ORDER BY flag`, "join-flag-startup-cutoff", "join-flag-startup-no-time")
+	if err != nil {
+		t.Fatalf("load startup stale join requests: %v", err)
+	}
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			_ = rows.Close()
+			t.Fatalf("scan startup stale join request: %v", err)
+		}
+		startupStatuses = append(startupStatuses, status)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatalf("iterate startup stale join requests: %v", err)
+	}
+	_ = rows.Close()
+	if len(startupStatuses) != 2 || startupStatuses[0] != string(joinrequests.DecisionUnknown) || startupStatuses[1] != string(joinrequests.DecisionUnknown) {
+		t.Fatalf("startup stale join request statuses=%v", startupStatuses)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action = 'join_request.auto_policy_cutoff'", 3)
 	insertedAIRequest, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
 (flag, group_id, user_id, sub_type, comment, status, source, ai_parse_status, ai_parse_attempts,
  observed_status, decision_status, revision, requested_at, first_seen_at, last_seen_at)
@@ -145,6 +204,30 @@ VALUES (?, ?, ?, 'add', ?, 'pending', 'event', 'pending', 0, 'pending', 'pending
 		autoCandidates[0].Request.Group.ID != "10001" || autoCandidates[0].Policy.GroupID != "10001" ||
 		autoCandidates[0].Policy.Enabled || !autoCandidates[0].Policy.AutoReject {
 		t.Fatalf("automatic rejection candidates=%+v error=%v", autoCandidates, err)
+	}
+	stalePolicyRevision := autoCandidates[0].Policy.Version
+	policy, err = store.UpdatePolicy(t.Context(), joinrequests.PolicyMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_root"), Request: request, OccurredAt: now.Add(3*time.Minute + 30*time.Second),
+		},
+		GroupID: "10001", ExpectedRevision: stalePolicyRevision,
+		Patch: joinrequests.PolicyPatch{AutoReject: auth.Field[bool]{Set: true, Value: false}},
+	})
+	if err != nil || policy.Enabled || policy.AutoReject || policy.Version != stalePolicyRevision+1 {
+		t.Fatalf("disable automatic rejection: policy=%+v error=%v", policy, err)
+	}
+	_, err = store.BeginDecisions(t.Context(), joinrequests.BeginMutation{
+		Context: joinrequests.MutationContext{
+			Actor:   audit.Actor{Type: audit.ActorSystem, DisplayName: "automatic_join_rejection"},
+			Request: auth.MutationContext{RequestID: "auto-race-test"}, OccurredAt: now.Add(3*time.Minute + 31*time.Second),
+		},
+		GroupID: "10001", Items: []joinrequests.VersionedRequest{{ID: "join-flag-1", Version: 1}},
+		Action: joinrequests.ActionReject, Source: joinrequests.SourceAutomatic,
+		Reason: stringPointer("automatic rejection"), IdempotencyKey: "auto-race-test-key",
+		ProcessingExpiresAt: now.Add(4 * time.Minute), PolicyRevision: &stalePolicyRevision,
+	})
+	if !errors.Is(err, joinrequests.ErrConflict) {
+		t.Fatalf("automatic decision after policy disable error=%v", err)
 	}
 	processedAt := now.Add(3 * time.Minute)
 	if err := store.UpsertGroupJoinRequest(t.Context(), grouprequest.Record{
@@ -311,6 +394,7 @@ FROM group_join_requests WHERE flag = ?`, "join-flag-1").Scan(
 		{Kind: telemetry.EventScheduledJobRun, OccurredAt: now.Add(6*time.Minute + 3*time.Second), GroupID: "10001", Result: telemetry.ResultSuccess, DurationMS: 50, JobID: job.ID, Count: 1},
 		{Kind: telemetry.EventManualApproval, OccurredAt: now.Add(6*time.Minute + 4*time.Second), GroupID: "10001", Result: telemetry.ResultSuccess, Count: 1},
 		{Kind: telemetry.EventAutomaticApproval, OccurredAt: now.Add(6*time.Minute + 5*time.Second), GroupID: "10001", Result: telemetry.ResultFailed, Count: 1},
+		{Kind: telemetry.EventAutomaticApproval, OccurredAt: now.Add(6*time.Minute + 5500*time.Millisecond), GroupID: "10001", Result: telemetry.ResultSuccess, Count: 1},
 		{Kind: telemetry.EventQuote, OccurredAt: now.Add(6*time.Minute + 6*time.Second), GroupID: "10001", FeatureKey: "quote", Result: telemetry.ResultSuccess, DurationMS: 20, Count: 1},
 		{Kind: telemetry.EventQuote, OccurredAt: now.Add(6*time.Minute + 7*time.Second), GroupID: "10001", FeatureKey: "quote", Result: telemetry.ResultFallback, DurationMS: 30, Count: 1},
 		{Kind: telemetry.EventQuote, OccurredAt: now.Add(6*time.Minute + 8*time.Second), GroupID: "10001", FeatureKey: "quote", Result: telemetry.ResultFailed, DurationMS: 40, Count: 1},
@@ -350,7 +434,9 @@ FROM group_join_requests WHERE flag = ?`, "join-flag-1").Scan(
 		t.Fatalf("load analytics timeseries: timeseries=%+v error=%v", timeseries, err)
 	}
 
-	joinRows, err := store.OpenJoinRequestExport(t.Context(), filter)
+	joinExportFilter := filter
+	joinExportFilter.From = freshRequestAt.Add(-time.Minute)
+	joinRows, err := store.OpenJoinRequestExport(t.Context(), joinExportFilter)
 	if err != nil {
 		t.Fatalf("open join request export: %v", err)
 	}
@@ -502,6 +588,88 @@ func managerMetricValue(summary analytics.SummaryData, key analytics.MetricKey) 
 		return -1
 	}
 	return *value.Value
+}
+
+func TestManagerOperationsPolicyUpdateRetiresPriorAutomaticCandidates(t *testing.T) {
+	store, sqlDB := openManagerAuthTestStore(t)
+	now := time.Date(2026, time.July, 29, 5, 0, 0, 0, time.UTC)
+	insertManagerAuthTestUser(t, sqlDB, "usr_policy", "policy-admin", auth.RoleSuperAdmin, now)
+	principal := auth.Principal{UserID: "usr_policy", SessionID: "ses_policy", Role: auth.RoleSuperAdmin}
+	request := auth.MutationContext{RequestID: "req_policy_cutoff", IPAddress: "192.0.2.21", UserAgent: "integration-test"}
+	managerIntegrationCreateGroup(t, store, principal, request, now, "10001")
+
+	policy, found, err := store.GetPolicy(t.Context(), "10001")
+	if err != nil || !found {
+		t.Fatalf("get default join policy: policy=%+v found=%t error=%v", policy, found, err)
+	}
+	policy, err = store.UpdatePolicy(t.Context(), joinrequests.PolicyMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_policy"), Request: request, OccurredAt: now.Add(10 * time.Second),
+		},
+		GroupID: "10001", ExpectedRevision: policy.Version,
+		Patch: joinrequests.PolicyPatch{Enabled: auth.Field[bool]{Set: true, Value: true}},
+	})
+	if err != nil || !policy.Enabled || policy.AutoReject {
+		t.Fatalf("enable automatic approval: policy=%+v error=%v", policy, err)
+	}
+
+	requestAt := now.Add(20 * time.Second)
+	if _, err := sqlDB.ExecContext(t.Context(), `INSERT INTO group_join_requests
+(flag, group_id, user_id, student_id, student_name, major, sub_type, comment, status, source,
+ ai_parse_status, ai_parse_attempts, validation_snapshot, observed_status, decision_status, revision,
+ requested_at, first_seen_at, last_seen_at, ai_parsed_at)
+VALUES (?, ?, ?, ?, ?, ?, 'add', ?, 'pending', 'event', 'succeeded', 1, ?, 'pending', 'pending', 1,
+ ?, ?, ?, ?)`,
+		"join-flag-policy-update-cutoff", 10001, 20001, "20260001", "Applicant", "Computer Science", "verification",
+		`{"valid":true,"validation_errors":[]}`, requestAt, requestAt, requestAt, requestAt,
+	); err != nil {
+		t.Fatalf("seed automatic candidate: %v", err)
+	}
+	candidates, err := store.ListAutoCandidates(t.Context(), 10)
+	if err != nil || len(candidates) != 1 || candidates[0].Request.ID != "join-flag-policy-update-cutoff" {
+		t.Fatalf("automatic candidates before active update=%+v error=%v", candidates, err)
+	}
+
+	policy, err = store.UpdatePolicy(t.Context(), joinrequests.PolicyMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_policy"), Request: request, OccurredAt: now.Add(30 * time.Second),
+		},
+		GroupID: "10001", ExpectedRevision: policy.Version,
+		Patch: joinrequests.PolicyPatch{AutoReject: auth.Field[bool]{Set: true, Value: true}},
+	})
+	if err != nil || !policy.Enabled || !policy.AutoReject {
+		t.Fatalf("enable automatic rejection on active policy: policy=%+v error=%v", policy, err)
+	}
+	var decisionStatus string
+	var revision uint64
+	if err := sqlDB.QueryRowContext(t.Context(), `SELECT decision_status, revision FROM group_join_requests WHERE flag = ?`,
+		"join-flag-policy-update-cutoff",
+	).Scan(&decisionStatus, &revision); err != nil {
+		t.Fatalf("load retired automatic candidate: %v", err)
+	}
+	if decisionStatus != string(joinrequests.DecisionUnknown) || revision != 2 {
+		t.Fatalf("retired candidate status=%q revision=%d", decisionStatus, revision)
+	}
+	candidates, err = store.ListAutoCandidates(t.Context(), 10)
+	if err != nil || len(candidates) != 0 {
+		t.Fatalf("automatic candidates after active update=%+v error=%v", candidates, err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action = 'join_request.auto_policy_cutoff'", 1)
+
+	noOp, err := store.UpdatePolicy(t.Context(), joinrequests.PolicyMutation{
+		Context: joinrequests.MutationContext{
+			Actor: managerIntegrationAuditActor("usr_policy"), Request: request, OccurredAt: now.Add(40 * time.Second),
+		},
+		GroupID: "10001", ExpectedRevision: policy.Version,
+		Patch: joinrequests.PolicyPatch{
+			Enabled:    auth.Field[bool]{Set: true, Value: true},
+			AutoReject: auth.Field[bool]{Set: true, Value: true},
+		},
+	})
+	if err != nil || noOp.Version != policy.Version || noOp.UpdatedAt != policy.UpdatedAt {
+		t.Fatalf("no-op policy update=%+v prior=%+v error=%v", noOp, policy, err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action = 'join_request.auto_policy_cutoff'", 1)
 }
 
 func managerIntegrationJobID(t *testing.T, value string) uint64 {

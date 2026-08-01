@@ -30,6 +30,7 @@ func TestClassifyJoinDecisionErrorPreservesUnknownOutcomes(t *testing.T) {
 		{name: "confirmed", outcome: joinrequests.ExternalConfirmed},
 		{name: "unavailable", err: ErrUnavailable, outcome: joinrequests.ExternalUnavailable, code: "dependency_unavailable"},
 		{name: "rejected", err: operationFailure("set_group_add_request", FailureUpstreamRejected), outcome: joinrequests.ExternalFailed, code: "upstream_rejected"},
+		{name: "request not found", err: operationFailure("set_group_add_request", FailureRequestNotFound), outcome: joinrequests.ExternalUnknown, code: "request_not_found"},
 		{name: "timeout", err: operationFailure("set_group_add_request", FailureTimeout), outcome: joinrequests.ExternalUnknown, code: "upstream_timeout"},
 		{name: "disconnected", err: operationFailure("set_group_add_request", FailureDisconnected), outcome: joinrequests.ExternalUnknown, code: "upstream_disconnected"},
 		{name: "invalid response", err: operationFailure("set_group_add_request", FailureInvalidResponse), outcome: joinrequests.ExternalUnknown, code: "invalid_response"},
@@ -41,6 +42,66 @@ func TestClassifyJoinDecisionErrorPreservesUnknownOutcomes(t *testing.T) {
 				t.Fatalf("result=%+v", result)
 			}
 		})
+	}
+}
+
+func TestSafeOperationErrorClassifiesMissingGroupAddRequestAsTerminal(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		apiError  *napcatsdk.APIError
+		wantCode  FailureCode
+	}{
+		{
+			name: "onebot no such request message", operation: "set_group_add_request",
+			apiError: &napcatsdk.APIError{RetCode: 100, Message: "No such request"}, wantCode: FailureRequestNotFound,
+		},
+		{
+			name: "expired request wording", operation: "set_group_add_request",
+			apiError: &napcatsdk.APIError{RetCode: 100, Wording: "The group request has expired"}, wantCode: FailureRequestNotFound,
+		},
+		{
+			name: "chinese expired request wording", operation: "set_group_add_request",
+			apiError: &napcatsdk.APIError{RetCode: 100, Wording: "该入群申请已失效"}, wantCode: FailureRequestNotFound,
+		},
+		{
+			name: "other operation remains rejected", operation: "get_group_list",
+			apiError: &napcatsdk.APIError{RetCode: 100, Message: "No such request"}, wantCode: FailureUpstreamRejected,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := safeOperationError(test.operation, test.apiError)
+			var operationErr *OperationError
+			if !errors.As(err, &operationErr) || operationErr.Code != test.wantCode {
+				t.Fatalf("safeOperationError() = %T %v, want code %q", err, err, test.wantCode)
+			}
+			if test.apiError.Message != "" && strings.Contains(err.Error(), test.apiError.Message) ||
+				test.apiError.Wording != "" && strings.Contains(err.Error(), test.apiError.Wording) {
+				t.Fatalf("safeOperationError leaked upstream detail: %q", err)
+			}
+		})
+	}
+}
+
+func TestGatewayDecideJoinRequestMapsMissingRequestToTerminalUnknown(t *testing.T) {
+	caller := &fakeGatewayCaller{
+		handler: func(action string, _, _ any) error {
+			if api.Action(action) != api.ActionSetGroupAddRequest {
+				return fmt.Errorf("unexpected action %q", action)
+			}
+			return &napcatsdk.APIError{Action: action, RetCode: 100, Message: "No such request"}
+		},
+	}
+	gateway := NewGateway()
+	gateway.Attach(api.NewClient(caller), time.Unix(10, 0))
+
+	result := gateway.DecideJoinRequest(context.Background(), "expired-flag", true, "")
+	if result.Outcome != joinrequests.ExternalUnknown || result.ErrorCode != "request_not_found" {
+		t.Fatalf("DecideJoinRequest() = %+v, want terminal request_not_found", result)
+	}
+	if caller.callCount() != 1 {
+		t.Fatalf("group request decision calls = %d, want 1", caller.callCount())
 	}
 }
 

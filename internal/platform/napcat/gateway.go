@@ -33,8 +33,11 @@ const (
 	FailureDisconnected     FailureCode = "disconnected"
 	FailureTransport        FailureCode = "transport_error"
 	FailureUpstreamRejected FailureCode = "upstream_rejected"
-	FailureInvalidResponse  FailureCode = "invalid_response"
-	FailureUnknown          FailureCode = "upstream_error"
+	// FailureRequestNotFound means NapCat definitively no longer has the
+	// group-add request. Retrying the same decision cannot succeed.
+	FailureRequestNotFound FailureCode = "request_not_found"
+	FailureInvalidResponse FailureCode = "invalid_response"
+	FailureUnknown         FailureCode = "upstream_error"
 )
 
 type OperationError struct {
@@ -220,7 +223,11 @@ func safeOperationError(operation string, err error) error {
 		var transportErr *napcatsdk.TransportError
 		switch {
 		case errors.As(err, &apiErr):
-			result.Code = FailureUpstreamRejected
+			if operation == "set_group_add_request" && isMissingOrExpiredGroupAddRequest(apiErr) {
+				result.Code = FailureRequestNotFound
+			} else {
+				result.Code = FailureUpstreamRejected
+			}
 		case errors.As(err, &protocolErr):
 			result.Code = FailureInvalidResponse
 		case errors.As(err, &transportErr):
@@ -228,6 +235,29 @@ func safeOperationError(operation string, err error) error {
 		}
 	}
 	return result
+}
+
+// isMissingOrExpiredGroupAddRequest recognizes NapCat descriptions for a
+// request that cannot be decided any more. It is used only
+// for set_group_add_request so an unrelated API response cannot change join
+// request state. Do not retain or expose the upstream message itself.
+func isMissingOrExpiredGroupAddRequest(apiErr *napcatsdk.APIError) bool {
+	if apiErr == nil {
+		return false
+	}
+	for _, detail := range [...]string{apiErr.Message, apiErr.Wording} {
+		normalized := strings.ToLower(strings.Join(strings.Fields(detail), " "))
+		for _, marker := range [...]string{
+			"no such request", "request not found", "request does not exist", "request no longer exists",
+			"request expired", "request has expired", "request is expired",
+			"请求不存在", "申请不存在", "请求已过期", "申请已过期", "请求已失效", "申请已失效",
+		} {
+			if strings.Contains(normalized, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func operationFailure(operation string, code FailureCode) error {
@@ -341,6 +371,11 @@ func classifyJoinDecisionError(err error) joinrequests.ExternalResult {
 	switch operationError.Code {
 	case FailureUpstreamRejected:
 		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalFailed, ErrorCode: "upstream_rejected"}
+	case FailureRequestNotFound:
+		// The OneBot reply proves only that this request cannot be retried. It
+		// does not prove whether it was decided elsewhere or expired, so retain
+		// it as the non-retryable unknown terminal state.
+		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "request_not_found"}
 	case FailureTimeout:
 		return joinrequests.ExternalResult{Outcome: joinrequests.ExternalUnknown, ErrorCode: "upstream_timeout"}
 	case FailureDisconnected:

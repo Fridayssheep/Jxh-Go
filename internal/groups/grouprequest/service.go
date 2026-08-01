@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
+	"github.com/zjutjh/jxh-go/internal/management/events"
 	"github.com/zjutjh/jxh-go/internal/platform/safego"
 )
 
@@ -84,11 +85,16 @@ type ExtractedFields struct {
 
 type ExtractApplicantFunc func(context.Context, string) (ExtractedFields, error)
 
+type EventPublisher interface {
+	Publish(draft events.Draft) (events.Event, error)
+}
+
 type Options struct {
 	ExportDir        string
 	Now              func() time.Time
 	Location         *time.Location
 	ExtractApplicant ExtractApplicantFunc
+	Events           EventPublisher
 }
 
 type Service struct {
@@ -97,6 +103,7 @@ type Service struct {
 	now              func() time.Time
 	location         *time.Location
 	extractApplicant ExtractApplicantFunc
+	events           EventPublisher
 }
 
 type ExportResult struct {
@@ -126,7 +133,15 @@ func NewService(store Store, opts Options) *Service {
 	}
 	return &Service{
 		store: store, exportDir: exportDir, now: now, location: location,
-		extractApplicant: opts.ExtractApplicant,
+		extractApplicant: opts.ExtractApplicant, events: opts.Events,
+	}
+}
+
+// SetEventPublisher attaches the optional management event sink before runtime
+// workers start, while keeping this service usable without the management API.
+func (s *Service) SetEventPublisher(publisher EventPublisher) {
+	if s != nil {
+		s.events = publisher
 	}
 }
 
@@ -144,7 +159,11 @@ func (s *Service) Record(ctx context.Context, record Record) error {
 		return fmt.Errorf("群申请群号或申请人 QQ 无效")
 	}
 	record = normalizeRecord(record, s.now(), s.extractApplicant != nil)
-	return s.store.UpsertGroupJoinRequest(ctx, record)
+	if err := s.store.UpsertGroupJoinRequest(ctx, record); err != nil {
+		return err
+	}
+	s.publish(events.EventJoinRequestCreated, record.Flag, "join_request_recorded")
+	return nil
 }
 
 func (s *Service) Reconcile(ctx context.Context, records []Record) error {
@@ -168,7 +187,9 @@ func (s *Service) Reconcile(ctx context.Context, records []Record) error {
 		record = normalizeRecord(record, s.now(), s.extractApplicant != nil)
 		if err := s.store.UpsertGroupJoinRequest(ctx, record); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("同步第 %d 条群申请: %w", index+1, err))
+			continue
 		}
+		s.publish(events.EventJoinRequestUpdated, record.Flag, "join_request_reconciled")
 	}
 	return errors.Join(reconcileErrors...)
 }
@@ -209,6 +230,8 @@ func (s *Service) processPendingAI(ctx context.Context) {
 			log.Printf("parse group request with AI failed: id=%d: %v", record.ID, err)
 			if markErr := s.store.FailGroupJoinRequestAI(ctx, record.ID, maxAIParseAttempts); markErr != nil {
 				log.Printf("mark group request AI parse failed: id=%d: %v", record.ID, markErr)
+			} else {
+				s.publish(events.EventJoinRequestUpdated, record.Flag, "join_request_ai_failed")
 			}
 			continue
 		}
@@ -216,8 +239,20 @@ func (s *Service) processPendingAI(ctx context.Context) {
 			if ctx.Err() == nil {
 				log.Printf("save group request AI fields failed: id=%d: %v", record.ID, err)
 			}
+			continue
 		}
+		s.publish(events.EventJoinRequestUpdated, record.Flag, "join_request_ai_parsed")
 	}
+}
+
+func (s *Service) publish(eventType events.EventType, requestID, reason string) {
+	if s == nil || s.events == nil || requestID == "" {
+		return
+	}
+	_, _ = s.events.Publish(events.Draft{
+		Type: eventType, OccurredAt: s.now().UTC(),
+		Resource: &events.Resource{Type: events.ResourceJoinRequest, ID: requestID}, Reason: reason,
+	})
 }
 
 func (s *Service) Export(ctx context.Context, limit int) (ExportResult, error) {

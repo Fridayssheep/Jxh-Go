@@ -165,6 +165,17 @@ func TestKnowledgeTriggerMetricOnlyCountsSuccessfulEvents(t *testing.T) {
 			t.Fatalf("successful event omitted from knowledge triggers: %+v", event)
 		}
 	}
+	for _, event := range []telemetryEventManagerRow{
+		{EventType: string(telemetry.EventAutomaticApproval), Outcome: &failed},
+	} {
+		if eventHasMetric(event, analytics.MetricAutomaticApprovalCount) {
+			t.Fatalf("failed automatic approval counted as successful approval: %+v", event)
+		}
+	}
+	event := telemetryEventManagerRow{EventType: string(telemetry.EventAutomaticApproval), Outcome: &success}
+	if !eventHasMetric(event, analytics.MetricAutomaticApprovalCount) {
+		t.Fatalf("successful automatic approval omitted from metric: %+v", event)
+	}
 }
 
 type analyticsKnowledgeResolverFake map[string][2]string

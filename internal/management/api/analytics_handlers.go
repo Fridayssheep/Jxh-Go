@@ -314,7 +314,7 @@ func validAnalyticsQueryKeys(values url.Values, extraSingletons, extraRepeated m
 
 func validAnalyticsMetric(value analytics.MetricKey) bool {
 	switch value {
-	case analytics.MetricKeywordReplyCount, analytics.MetricAIRequestCount, analytics.MetricAISuccessRate,
+	case analytics.MetricKeywordReplyCount, analytics.MetricKnowledgeTriggerCount, analytics.MetricAIRequestCount, analytics.MetricAISuccessRate,
 		analytics.MetricAIDurationMS, analytics.MetricJoinRequestCount, analytics.MetricManualApprovalCount,
 		analytics.MetricAutomaticApprovalCount, analytics.MetricScheduledJobRunCount, analytics.MetricGroupMessageCount,
 		analytics.MetricCommandRunCount, analytics.MetricActiveUserCount, analytics.MetricLinkCleanCount,

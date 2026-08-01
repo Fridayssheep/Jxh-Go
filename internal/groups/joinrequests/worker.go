@@ -3,6 +3,7 @@ package joinrequests
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -55,6 +56,7 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 		fields := cloneApplicantFields(*request.AIParse.Fields)
 		ruleVersion := AutoApprovalRuleVersion
 		key := automaticDecisionKey(request.ID, request.Version, ruleVersion, action)
+		policyRevision := candidate.Policy.Version
 		startedAt := s.now().UTC()
 		actorName := "automatic_join_approval"
 		if action == ActionReject {
@@ -67,7 +69,7 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 			},
 			GroupID: request.Group.ID, Items: []VersionedRequest{{ID: request.ID, Version: request.Version}},
 			Action: action, Source: SourceAutomatic, Reason: &reason, IdempotencyKey: key,
-			ProcessingExpiresAt: startedAt.Add(s.processingLease), RuleVersion: &ruleVersion,
+			ProcessingExpiresAt: startedAt.Add(s.processingLease), PolicyRevision: &policyRevision, RuleVersion: &ruleVersion,
 			FieldSnapshots: map[string]ApplicantFields{request.ID: fields},
 		})
 		if err != nil {
@@ -146,5 +148,5 @@ func (s *Service) automaticDecision(request Request, policy Policy) (Action, str
 
 func automaticDecisionKey(requestID string, requestVersion, ruleVersion uint64, action Action) string {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%d\x00%s", requestID, requestVersion, ruleVersion, action)))
-	return fmt.Sprintf("auto-%x", digest[:])
+	return "auto-" + base64.RawURLEncoding.EncodeToString(digest[:])
 }

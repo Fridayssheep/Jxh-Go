@@ -331,6 +331,7 @@ func TestAutomaticApprovalUsesDeterministicValidatedRule(t *testing.T) {
 		t.Fatalf("begin calls=%d gateway flags=%v approvals=%v", store.beginCalls, approver.flags, approver.approvals)
 	}
 	if store.beginMutation.Source != SourceAutomatic || store.beginMutation.Action != ActionApprove ||
+		store.beginMutation.PolicyRevision == nil || *store.beginMutation.PolicyRevision != policy.Version ||
 		store.beginMutation.RuleVersion == nil || *store.beginMutation.RuleVersion != AutoApprovalRuleVersion ||
 		store.beginMutation.FieldSnapshots[validRequest.ID].Valid == false {
 		t.Fatalf("automatic mutation=%+v", store.beginMutation)
@@ -338,6 +339,46 @@ func TestAutomaticApprovalUsesDeterministicValidatedRule(t *testing.T) {
 	if len(recorder.observations) != 1 || recorder.observations[0].Kind != telemetry.EventAutomaticApproval ||
 		recorder.observations[0].Result != telemetry.ResultSuccess {
 		t.Fatalf("automatic decision telemetry=%+v", recorder.observations)
+	}
+}
+
+func TestAutomaticFailureBecomesTerminalUnknownAndIsNotCounted(t *testing.T) {
+	request := joinRequestFixture("flag_auto_failed", DecisionPending, 3)
+	policy := joinPolicyFixture()
+	policy.Enabled = true
+	store := &joinStoreFake{autoCandidates: []AutoCandidate{{Request: request, Policy: policy}}}
+	store.begin = func(mutation BeginMutation) (Reservation, error) {
+		processing := cloneRequest(request)
+		processing.DecisionStatus = DecisionProcessing
+		processing.DecisionSource = decisionSourcePointer(SourceAutomatic)
+		processing.Version++
+		decision := decisionFixture(request.ID, "dec_auto_failed", ActionApprove, AttemptStarted)
+		decision.Source = SourceAutomatic
+		decision.RuleVersion = uint64Pointer(AutoApprovalRuleVersion)
+		return Reservation{Items: []ReservedItem{{Request: processing, Decision: decision}}}, nil
+	}
+	store.complete = func(mutation CompletionMutation) (DecisionResult, error) {
+		processing := cloneRequest(request)
+		processing.DecisionStatus = DecisionProcessing
+		processing.DecisionSource = decisionSourcePointer(SourceAutomatic)
+		processing.Version++
+		decision := decisionFixture(request.ID, "dec_auto_failed", ActionApprove, AttemptStarted)
+		decision.Source = SourceAutomatic
+		decision.RuleVersion = uint64Pointer(AutoApprovalRuleVersion)
+		return completedDecisionResult(processing, decision, mutation), nil
+	}
+	approver := &joinApproverFake{available: true, results: []ExternalResult{{Outcome: ExternalFailed, ErrorCode: "upstream_rejected"}}}
+	recorder := &joinTelemetryRecorderFake{}
+	service := newJoinServiceWithTelemetry(t, store, approver, recorder)
+	if err := service.ProcessAutoApprovals(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.completions) != 1 || store.completions[0].AttemptStatus != AttemptUnknown ||
+		store.completions[0].DecisionStatus != DecisionUnknown {
+		t.Fatalf("automatic failure completion=%+v", store.completions)
+	}
+	if len(recorder.observations) != 0 {
+		t.Fatalf("failed automatic approval emitted telemetry=%+v", recorder.observations)
 	}
 }
 
@@ -694,6 +735,10 @@ func (s *joinStoreFake) CompleteDecision(_ context.Context, mutation CompletionM
 
 func (s *joinStoreFake) ListAutoCandidates(context.Context, int) ([]AutoCandidate, error) {
 	return s.autoCandidates, nil
+}
+
+func (*joinStoreFake) RetireStaleAutomaticRequests(context.Context, MutationContext) error {
+	return nil
 }
 
 func (s *joinStoreFake) RecoverExpiredDecisions(_ context.Context, cutoff time.Time, _ int) ([]Request, error) {

@@ -258,6 +258,7 @@ func buildApplication(
 	if managementBackend != nil {
 		customCommands = managementBackend.CustomCommands
 		telemetryRecorder = managementBackend.Telemetry
+		groupRequests.SetEventPublisher(managementBackend.Events)
 	}
 	quoteClient := quote.NewClient(
 		cfg.Quote.BaseURL,

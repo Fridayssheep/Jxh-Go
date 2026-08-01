@@ -242,6 +242,7 @@ type BeginMutation struct {
 	Reason              *string
 	IdempotencyKey      string
 	ProcessingExpiresAt time.Time
+	PolicyRevision      *uint64
 	RuleVersion         *uint64
 	FieldSnapshots      map[string]ApplicantFields
 }

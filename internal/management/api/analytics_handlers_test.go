@@ -95,6 +95,28 @@ func TestAnalyticsTimeseriesAndRankingsHTTPParseLimits(t *testing.T) {
 	}
 }
 
+func TestAnalyticsRankingsHTTPAcceptsKnowledgeTriggerMetric(t *testing.T) {
+	service := &analyticsOperationsFake{rankings: analytics.Rankings{
+		Window:      analytics.Window{From: analyticsHTTPTime(1), To: analyticsHTTPTime(3), Timezone: "UTC"},
+		Dimension:   analytics.DimensionKnowledgeEntry,
+		Metric:      analytics.MetricKnowledgeTriggerCount,
+		Unit:        analytics.UnitCount,
+		Items:       []analytics.RankingItem{{Key: "entry_1", DisplayName: "Knowledge A", Value: 9, Rank: 1}},
+		DataFreshAt: analyticsHTTPTime(3),
+	}}
+	router := newAnalyticsHTTPFixture(t, service)
+	request := scheduledReadRequest(http.MethodGet,
+		"/api/admin/v1/analytics/rankings?dimension=knowledge_entry&metric=knowledge_trigger_count&limit=10")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || service.rankCalls != 1 || service.rankingsQuery.Limit != 10 ||
+		service.rankingsQuery.Dimension != analytics.DimensionKnowledgeEntry || service.rankingsQuery.Metric != analytics.MetricKnowledgeTriggerCount ||
+		!strings.Contains(response.Body.String(), `"metric":"knowledge_trigger_count"`) {
+		t.Fatalf("status=%d calls=%d query=%+v body=%s", response.Code, service.rankCalls, service.rankingsQuery, response.Body.String())
+	}
+}
+
 func TestAnalyticsHTTPRejectsInvalidQueriesBeforeService(t *testing.T) {
 	service := &analyticsOperationsFake{}
 	router := newAnalyticsHTTPFixture(t, service)

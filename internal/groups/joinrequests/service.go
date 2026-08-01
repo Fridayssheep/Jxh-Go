@@ -40,6 +40,7 @@ type Store interface {
 	BeginDecisions(ctx context.Context, mutation BeginMutation) (Reservation, error)
 	// CompleteDecision atomically finalizes the attempt and request state.
 	CompleteDecision(ctx context.Context, mutation CompletionMutation) (DecisionResult, error)
+	RetireStaleAutomaticRequests(ctx context.Context, mutation MutationContext) error
 	ListAutoCandidates(ctx context.Context, limit int) ([]AutoCandidate, error)
 	// RecoverExpiredDecisions marks expired processing leases unknown. It must
 	// never restore pending because the external call may already have run.
@@ -148,6 +149,23 @@ func (s *Service) ReloadStudentIDRule(ctx context.Context) error {
 	}
 	value = cloneStudentIDRule(value)
 	s.studentIDRule.Store(&value)
+	return nil
+}
+
+// RetireStaleAutomaticRequests moves applications that predate an already
+// enabled automatic policy out of the pending queue before workers start.
+func (s *Service) RetireStaleAutomaticRequests(ctx context.Context) error {
+	if s == nil || s.store == nil {
+		return ErrInvalidInput
+	}
+	mutation := MutationContext{
+		Actor:      audit.Actor{Type: audit.ActorSystem, DisplayName: "automatic_policy_startup"},
+		Request:    auth.MutationContext{RequestID: "auto-policy-startup"},
+		OccurredAt: s.now().UTC(),
+	}
+	if err := s.store.RetireStaleAutomaticRequests(ctx, mutation); err != nil {
+		return fmt.Errorf("retire stale automatic join requests: %w", err)
+	}
 	return nil
 }
 
@@ -413,6 +431,14 @@ func (s *Service) execute(ctx context.Context, item ReservedItem, reason string)
 		external = ExternalResult{Outcome: ExternalUnknown, ErrorCode: "invalid_gateway_result"}
 	}
 	attemptStatus, decisionStatus := outcomeStatuses(external.Outcome, item.Decision.Action)
+	// Automatic decisions are one-shot side effects. A gateway failure must not
+	// put the request back in pending, otherwise the five-second worker loop
+	// creates a new revision/idempotency key and retries forever. Unknown is
+	// the terminal state that preserves the untrusted upstream outcome.
+	if item.Decision.Source == SourceAutomatic && external.Outcome != ExternalConfirmed {
+		attemptStatus = AttemptUnknown
+		decisionStatus = DecisionUnknown
+	}
 	completion := CompletionMutation{
 		DecisionID: item.Decision.ID, RequestID: item.Request.ID, AttemptStatus: attemptStatus,
 		DecisionStatus: decisionStatus, ErrorCode: optionalErrorCode(external.ErrorCode), CompletedAt: s.now().UTC(),
@@ -523,7 +549,7 @@ func (s *Service) recordDecision(result DecisionResult) {
 	}
 	kind := telemetry.EventManualApproval
 	if result.Decision.Source == SourceAutomatic {
-		if result.Decision.Action != ActionApprove {
+		if result.Decision.Action != ActionApprove || result.Decision.Status != AttemptConfirmed {
 			return
 		}
 		kind = telemetry.EventAutomaticApproval

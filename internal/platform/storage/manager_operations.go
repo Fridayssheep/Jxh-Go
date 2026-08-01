@@ -614,18 +614,29 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 		if before.Revision != mutation.ExpectedRevision {
 			return joinrequests.ErrConflict
 		}
+		nextEnabled := before.Enabled
+		nextAutoReject := before.AutoReject
+		if mutation.Patch.Enabled.Set {
+			nextEnabled = mutation.Patch.Enabled.Value
+		}
+		if mutation.Patch.AutoReject.Set {
+			nextAutoReject = mutation.Patch.AutoReject.Value
+		}
+		if nextEnabled == before.Enabled && nextAutoReject == before.AutoReject {
+			converted, err := policyFromManagerRow(before)
+			if err != nil {
+				return err
+			}
+			result = converted
+			return nil
+		}
 		actor := auditActorUpdatedBy(mutation.Context.Actor)
 		updates := map[string]any{
 			"revision":        gorm.Expr("revision + 1"),
 			"updated_by_type": actor.Type, "updated_by_user_id": actor.UserID,
 			"updated_by_qq_user_id": actor.QQUserID, "updated_by_display_name": actor.DisplayName,
 			"updated_by_role": actor.Role, "updated_at": mutation.Context.OccurredAt.UTC(),
-		}
-		if mutation.Patch.Enabled.Set {
-			updates["enabled"] = mutation.Patch.Enabled.Value
-		}
-		if mutation.Patch.AutoReject.Set {
-			updates["auto_reject"] = mutation.Patch.AutoReject.Value
+			"enabled": nextEnabled, "auto_reject": nextAutoReject,
 		}
 		updated := tx.Model(&joinPolicyManagerRow{}).
 			Where("group_id = ? AND revision = ?", mutation.GroupID, mutation.ExpectedRevision).Updates(updates)
@@ -644,6 +655,15 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 			return err
 		}
 		result = converted
+		// updated_at is the automatic-policy cutoff used by candidate selection.
+		// Any effective change to an active policy must retire requests before that
+		// cutoff in this same transaction; otherwise they remain pending forever
+		// while ListAutoCandidates excludes them.
+		if after.Enabled || after.AutoReject {
+			if err := retirePendingRequestsBeforePolicyCutoff(tx, after, mutation.Context); err != nil {
+				return err
+			}
+		}
 		return writeManagerAudit(tx, managerAuditWrite{
 			Actor: domainDecisionActor(mutation.Context.Actor), OccurredAt: mutation.Context.OccurredAt,
 			Request: mutation.Context.Request, Source: sourceForManagerActor(mutation.Context.Actor.Type),
@@ -655,6 +675,71 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 		})
 	})
 	return result, err
+}
+
+func (s *Store) RetireStaleAutomaticRequests(ctx context.Context, mutation joinrequests.MutationContext) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var policies []joinPolicyManagerRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("enabled = ? OR auto_reject = ?", true, true).
+			Order("group_id ASC").Find(&policies).Error; err != nil {
+			return err
+		}
+		for _, policy := range policies {
+			if err := retirePendingRequestsBeforePolicyCutoff(tx, policy, mutation); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// retirePendingRequestsBeforePolicyCutoff prevents an automatic policy from
+// acting on applications that predate its current effective configuration.
+// The request history and prior decision attempts remain intact; the audit
+// rows document why each old pending item now needs explicit human review.
+func retirePendingRequestsBeforePolicyCutoff(tx *gorm.DB, policy joinPolicyManagerRow, context joinrequests.MutationContext) error {
+	var requests []struct {
+		ID       uint64 `gorm:"column:id"`
+		Flag     string `gorm:"column:flag"`
+		Revision uint64 `gorm:"column:revision"`
+	}
+	cutoff := policy.UpdatedAt.UTC()
+	if err := tx.Table("group_join_requests").Clauses(clause.Locking{Strength: "UPDATE"}).
+		Select("id, flag, revision").
+		Where("group_id = ? AND status = ? AND observed_status = ? AND decision_status = ? AND (COALESCE(first_seen_at, requested_at) < ? OR (first_seen_at IS NULL AND requested_at IS NULL))",
+			policy.GroupID, grouprequest.StatusPending, joinrequests.ObservedPending, joinrequests.DecisionPending, cutoff).
+		Order("id ASC").Scan(&requests).Error; err != nil {
+		return err
+	}
+	for _, request := range requests {
+		updated := tx.Model(&GroupJoinRequest{}).
+			Where("id = ? AND revision = ? AND decision_status = ?", request.ID, request.Revision, joinrequests.DecisionPending).
+			Updates(map[string]any{
+				"decision_status":       joinrequests.DecisionUnknown,
+				"revision":              gorm.Expr("revision + 1"),
+				"processing_expires_at": nil,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return joinrequests.ErrConflict
+		}
+		if err := writeManagerAudit(tx, managerAuditWrite{
+			Actor: domainDecisionActor(context.Actor), OccurredAt: context.OccurredAt,
+			Request: context.Request, Source: sourceForManagerActor(context.Actor.Type),
+			Action: "join_request.auto_policy_cutoff", TargetType: "group_join_request", TargetID: request.Flag,
+			Before: map[string]any{"decision_status": joinrequests.DecisionPending, "revision": request.Revision},
+			After:  map[string]any{"decision_status": joinrequests.DecisionUnknown, "revision": request.Revision + 1},
+			Metadata: map[string]any{
+				"reason": "predates_automatic_policy_cutoff", "policy_revision": policy.Revision,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sourceForManagerActor(actorType audit.ActorType) audit.Source {
@@ -818,6 +903,11 @@ func (s *Store) BeginDecisions(ctx context.Context, mutation joinrequests.BeginM
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		items := append([]joinrequests.VersionedRequest(nil), mutation.Items...)
 		sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+		if mutation.Source == joinrequests.SourceAutomatic {
+			if err := lockAutomaticDecisionPolicy(tx, mutation); err != nil {
+				return err
+			}
+		}
 		locked := make(map[string]joinRequestManagerRow, len(items))
 		for _, item := range items {
 			var row joinRequestManagerRow
@@ -928,6 +1018,27 @@ func (s *Store) BeginDecisions(ctx context.Context, mutation joinrequests.BeginM
 		return nil
 	})
 	return reservation, err
+}
+
+func lockAutomaticDecisionPolicy(tx *gorm.DB, mutation joinrequests.BeginMutation) error {
+	if mutation.GroupID == "" || mutation.PolicyRevision == nil ||
+		(mutation.Action != joinrequests.ActionApprove && mutation.Action != joinrequests.ActionReject) {
+		return joinrequests.ErrInvalidInput
+	}
+	var policy joinPolicyManagerRow
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("group_id = ?", mutation.GroupID).Take(&policy).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return joinrequests.ErrConflict
+	}
+	if err != nil {
+		return err
+	}
+	if policy.Revision != *mutation.PolicyRevision ||
+		mutation.Action == joinrequests.ActionApprove && !policy.Enabled ||
+		mutation.Action == joinrequests.ActionReject && !policy.AutoReject {
+		return joinrequests.ErrConflict
+	}
+	return nil
 }
 
 func replayJoinDecisionReservation(tx *gorm.DB, mutation joinrequests.BeginMutation, locked map[string]joinRequestManagerRow) (joinrequests.Reservation, bool, error) {
@@ -1121,6 +1232,9 @@ policy.updated_by_role AS policy_updated_role`).
 		Joins("LEFT JOIN managed_groups AS managed ON managed.group_id = request.group_id").
 		Where("request.status = ? AND request.observed_status = ? AND request.decision_status = ? AND request.sub_type = ? AND request.ai_parse_status = ?",
 			grouprequest.StatusPending, joinrequests.ObservedPending, joinrequests.DecisionPending, joinrequests.SubTypeAdd, joinrequests.AIParseSucceeded).
+		Where("COALESCE(request.first_seen_at, request.requested_at) >= policy.updated_at").
+		Where("NOT EXISTS (SELECT 1 FROM group_join_decisions AS prior_decision WHERE prior_decision.request_id = request.id AND prior_decision.source = ? AND prior_decision.status = ?)",
+			joinrequests.SourceAutomatic, joinrequests.AttemptFailed).
 		Order("request.requested_at ASC").Order("request.id ASC").Limit(limit)
 	if err := db.Scan(&rows).Error; err != nil {
 		return nil, err
@@ -2398,6 +2512,9 @@ func telemetryMetricForEvent(row telemetryEventManagerRow) []analytics.MetricKey
 	case telemetry.EventManualApproval:
 		return []analytics.MetricKey{analytics.MetricManualApprovalCount}
 	case telemetry.EventAutomaticApproval:
+		if row.Outcome == nil || *row.Outcome != string(analytics.ResultSuccess) {
+			return nil
+		}
 		return []analytics.MetricKey{analytics.MetricAutomaticApprovalCount}
 	case telemetry.EventScheduledJobRun:
 		return []analytics.MetricKey{analytics.MetricScheduledJobRunCount}

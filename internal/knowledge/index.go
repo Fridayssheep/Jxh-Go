@@ -11,6 +11,7 @@ type Index struct {
 	entries []Entry
 	exact   map[string]int
 	source  map[string]int
+	catalog map[string]Entry
 	parsed  ParseResult
 }
 
@@ -31,7 +32,16 @@ func NewIndexFromParseResult(result ParseResult) *Index {
 		entries: cloneEntries(result.ActiveEntries),
 		exact:   make(map[string]int),
 		source:  make(map[string]int),
+		catalog: make(map[string]Entry, len(result.Entries)*2),
 		parsed:  result,
+	}
+	for _, entry := range idx.parsed.Entries {
+		if _, exists := idx.catalog[entry.SourceKey]; !exists {
+			idx.catalog[entry.SourceKey] = cloneEntry(entry)
+		}
+		if _, exists := idx.catalog[entry.ID]; !exists {
+			idx.catalog[entry.ID] = cloneEntry(entry)
+		}
 	}
 	for entryIndex, entry := range idx.entries {
 		if _, exists := idx.source[entry.SourceKey]; !exists {
@@ -68,6 +78,14 @@ func (i *Index) Keyword(sourceKey string) string {
 		return ""
 	}
 	return i.entries[entryIndex].Keyword
+}
+
+func (i *Index) ResolveKey(value string) (Entry, bool) {
+	if i == nil {
+		return Entry{}, false
+	}
+	entry, ok := i.catalog[value]
+	return cloneEntry(entry), ok
 }
 
 func (i *Index) Entries() []Entry {
@@ -121,6 +139,17 @@ func (r *IndexRef) Keyword(sourceKey string) string {
 		return ""
 	}
 	return index.Keyword(sourceKey)
+}
+
+func (r *IndexRef) ResolveKey(value string) (Entry, bool) {
+	if r == nil {
+		return Entry{}, false
+	}
+	index := r.value.Load()
+	if index == nil {
+		return Entry{}, false
+	}
+	return index.ResolveKey(value)
 }
 
 func (r *IndexRef) Entries() []Entry {

@@ -26,6 +26,17 @@ type RuntimeStoreOptions struct {
 	Now              func() time.Time
 }
 
+func (s *RuntimeStore) ResolveKnowledgeKey(value string) (string, string, bool) {
+	if s == nil || s.index == nil {
+		return "", "", false
+	}
+	entry, ok := s.index.ResolveKey(value)
+	if !ok {
+		return "", "", false
+	}
+	return entry.SourceKey, entry.Keyword, true
+}
+
 // RuntimeStore exposes the atomically swapped WPS index to the management
 // service. It contains no credentials and does not persist management state.
 type RuntimeStore struct {

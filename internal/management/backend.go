@@ -252,7 +252,10 @@ func NewBackend(options Options) (*Backend, error) {
 	if err != nil {
 		return fail(fmt.Errorf("create knowledge service: %w", err))
 	}
-	analyticsService, err := analytics.NewService(analytics.Options{Store: options.Store, Now: options.Now})
+	knowledgeResolver, _ := options.KnowledgeStore.(analytics.KnowledgeKeyResolver)
+	analyticsService, err := analytics.NewService(analytics.Options{
+		Store: options.Store, KnowledgeResolver: knowledgeResolver, Now: options.Now,
+	})
 	if err != nil {
 		return fail(fmt.Errorf("create analytics service: %w", err))
 	}

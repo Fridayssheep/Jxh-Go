@@ -144,6 +144,14 @@ func TestAnalyticsRankingsApplyDefaultLimitAndStableRanks(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("limit error=%v", err)
 	}
+	to := analyticsTestTime(12)
+	from := to.AddDate(0, 0, -31)
+	if _, err := service.Rankings(t.Context(), analyticsObserver(), RankingsQuery{
+		Query:     Query{From: &from, To: &to, Timezone: "UTC"},
+		Dimension: DimensionKnowledgeEntry, Metric: MetricKnowledgeTriggerCount,
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("knowledge retention range error=%v", err)
+	}
 	store.rankings = RankingsData{
 		Items: []RankingValue{{Key: "b", Value: 1}, {Key: "a", Value: 2}}, DataFreshAt: analyticsTestTime(11),
 	}

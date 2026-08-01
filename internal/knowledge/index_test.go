@@ -15,3 +15,17 @@ func TestIndexUsesImmutableSourceKeyLookup(t *testing.T) {
 		t.Fatalf("snapshot mutated index: %q", got)
 	}
 }
+
+func TestIndexResolvesSourceAndRuntimeKeys(t *testing.T) {
+	index := NewIndex([]Entry{{SourceKey: "%400", Keyword: "Campus calendar", Enabled: false}})
+	entries := index.Entries()
+	if len(entries) != 1 || entries[0].ID == "" {
+		t.Fatalf("entries = %+v", entries)
+	}
+	for _, key := range []string{"%400", entries[0].ID} {
+		entry, ok := index.ResolveKey(key)
+		if !ok || entry.SourceKey != "%400" || entry.Keyword != "Campus calendar" {
+			t.Fatalf("ResolveKey(%q) = %+v, %t", key, entry, ok)
+		}
+	}
+}

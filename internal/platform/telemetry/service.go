@@ -26,16 +26,17 @@ var (
 type EventKind string
 
 const (
-	EventGroupMessage      EventKind = "group_message"
-	EventKeywordReply      EventKind = "keyword_reply"
-	EventAIRequest         EventKind = "ai_request"
-	EventJoinRequest       EventKind = "join_request"
-	EventManualApproval    EventKind = "manual_approval"
-	EventAutomaticApproval EventKind = "automatic_approval"
-	EventScheduledJobRun   EventKind = "scheduled_job_run"
-	EventCommandRun        EventKind = "command_run"
-	EventLinkClean         EventKind = "link_clean"
-	EventQuote             EventKind = "quote"
+	EventGroupMessage       EventKind = "group_message"
+	EventKeywordReply       EventKind = "keyword_reply"
+	EventKnowledgeRetrieval EventKind = "knowledge_retrieval"
+	EventAIRequest          EventKind = "ai_request"
+	EventJoinRequest        EventKind = "join_request"
+	EventManualApproval     EventKind = "manual_approval"
+	EventAutomaticApproval  EventKind = "automatic_approval"
+	EventScheduledJobRun    EventKind = "scheduled_job_run"
+	EventCommandRun         EventKind = "command_run"
+	EventLinkClean          EventKind = "link_clean"
+	EventQuote              EventKind = "quote"
 )
 
 type Result string
@@ -211,7 +212,7 @@ func (s *Service) eventFromObservation(value Observation) (Event, bool) {
 	if !validKind(value.Kind) || !validResult(value.Result) || value.GroupID <= 0 || value.UserID < 0 ||
 		value.Duration < 0 || value.Duration > time.Hour || value.Count < 0 || value.Count > 1_000_000_000 ||
 		!validFeatureKey(value.FeatureKey) || !validSafeKey(value.CommandID, 256) || !validSafeKey(value.JobID, 256) ||
-		!validSafeKey(value.KnowledgeKey, 256) || !validObservationShape(value) {
+		!validKnowledgeKey(value.KnowledgeKey) || !validObservationShape(value) {
 		return Event{}, false
 	}
 	if value.OccurredAt.IsZero() {
@@ -315,6 +316,18 @@ func validFeatureKey(value string) bool {
 	}
 }
 
+func validKnowledgeKey(value string) bool {
+	if !utf8.ValidString(value) || value != strings.TrimSpace(value) || utf8.RuneCountInString(value) > 256 {
+		return false
+	}
+	for _, character := range value {
+		if character < ' ' || character == '\u007f' {
+			return false
+		}
+	}
+	return true
+}
+
 func validObservationShape(value Observation) bool {
 	if value.CommandID != "" && value.Kind != EventCommandRun {
 		return false
@@ -322,7 +335,10 @@ func validObservationShape(value Observation) bool {
 	if value.JobID != "" && value.Kind != EventScheduledJobRun {
 		return false
 	}
-	if value.KnowledgeKey != "" && value.Kind != EventKeywordReply && value.Kind != EventAIRequest {
+	if value.KnowledgeKey != "" && value.Kind != EventKeywordReply && value.Kind != EventKnowledgeRetrieval && value.Kind != EventAIRequest {
+		return false
+	}
+	if value.Kind == EventKnowledgeRetrieval && value.KnowledgeKey == "" {
 		return false
 	}
 	return true
@@ -330,7 +346,7 @@ func validObservationShape(value Observation) bool {
 
 func validKind(value EventKind) bool {
 	switch value {
-	case EventGroupMessage, EventKeywordReply, EventAIRequest, EventJoinRequest, EventManualApproval,
+	case EventGroupMessage, EventKeywordReply, EventKnowledgeRetrieval, EventAIRequest, EventJoinRequest, EventManualApproval,
 		EventAutomaticApproval, EventScheduledJobRun, EventCommandRun, EventLinkClean, EventQuote:
 		return true
 	default:

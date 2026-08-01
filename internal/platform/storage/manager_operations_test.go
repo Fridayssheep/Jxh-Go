@@ -121,6 +121,8 @@ func TestAnalyticsMetricNumbersUseCountsAndDistinctActors(t *testing.T) {
 	events := []telemetryEventManagerRow{
 		{EventType: string(telemetry.EventAIRequest), Outcome: &success, DurationMS: &duration100, Metadata: counted},
 		{EventType: string(telemetry.EventAIRequest), Outcome: &failed, DurationMS: &duration400},
+		{EventType: string(telemetry.EventKeywordReply), Outcome: &success},
+		{EventType: string(telemetry.EventKnowledgeRetrieval), Outcome: &success, Metadata: counted},
 		{EventType: string(telemetry.EventGroupMessage), ActorHash: &actorA},
 		{EventType: string(telemetry.EventGroupMessage), ActorHash: &actorA},
 		{EventType: string(telemetry.EventGroupMessage), ActorHash: &actorB},
@@ -136,6 +138,56 @@ func TestAnalyticsMetricNumbersUseCountsAndDistinctActors(t *testing.T) {
 	}
 	if value, available := analyticsMetricNumber(events, analytics.MetricActiveUserCount); !available || value != 2 {
 		t.Fatalf("active users = %v, %v", value, available)
+	}
+	if value, available := analyticsMetricNumber(events, analytics.MetricKeywordReplyCount); !available || value != 1 {
+		t.Fatalf("keyword reply count = %v, %v", value, available)
+	}
+	if value, available := analyticsMetricNumber(events, analytics.MetricKnowledgeTriggerCount); !available || value != 4 {
+		t.Fatalf("knowledge trigger count = %v, %v", value, available)
+	}
+}
+
+func TestKnowledgeTriggerMetricOnlyCountsSuccessfulEvents(t *testing.T) {
+	success, failed := string(analytics.ResultSuccess), string(analytics.ResultFailed)
+	for _, event := range []telemetryEventManagerRow{
+		{EventType: string(telemetry.EventKeywordReply), Outcome: &failed},
+		{EventType: string(telemetry.EventKnowledgeRetrieval), Outcome: &failed},
+	} {
+		if eventHasMetric(event, analytics.MetricKnowledgeTriggerCount) {
+			t.Fatalf("failed event counted as knowledge trigger: %+v", event)
+		}
+	}
+	for _, event := range []telemetryEventManagerRow{
+		{EventType: string(telemetry.EventKeywordReply), Outcome: &success},
+		{EventType: string(telemetry.EventKnowledgeRetrieval), Outcome: &success},
+	} {
+		if !eventHasMetric(event, analytics.MetricKnowledgeTriggerCount) {
+			t.Fatalf("successful event omitted from knowledge triggers: %+v", event)
+		}
+	}
+}
+
+type analyticsKnowledgeResolverFake map[string][2]string
+
+func (f analyticsKnowledgeResolverFake) ResolveKnowledgeKey(value string) (string, string, bool) {
+	resolved, ok := f[value]
+	return resolved[0], resolved[1], ok
+}
+
+func TestAnalyticsKnowledgeIdentityNormalizesRuntimeKeys(t *testing.T) {
+	resolver := analyticsKnowledgeResolverFake{
+		"ke_runtime": {"%400", "Campus calendar"},
+		"%400":       {"%400", "Campus calendar"},
+	}
+	for _, value := range []string{"ke_runtime", "%400"} {
+		key, displayName := analyticsKnowledgeIdentity(value, resolver)
+		if key != "%400" || displayName != "Campus calendar" {
+			t.Fatalf("analyticsKnowledgeIdentity(%q) = %q, %q", value, key, displayName)
+		}
+	}
+	key, displayName := analyticsKnowledgeIdentity("deleted", resolver)
+	if key != "deleted" || displayName != "deleted" {
+		t.Fatalf("deleted identity = %q, %q", key, displayName)
 	}
 }
 

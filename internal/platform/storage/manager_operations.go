@@ -2369,7 +2369,16 @@ type dailyAccumulator struct {
 func telemetryMetricForEvent(row telemetryEventManagerRow) []analytics.MetricKey {
 	switch telemetry.EventKind(row.EventType) {
 	case telemetry.EventKeywordReply:
-		return []analytics.MetricKey{analytics.MetricKeywordReplyCount}
+		metrics := []analytics.MetricKey{analytics.MetricKeywordReplyCount}
+		if row.Outcome != nil && *row.Outcome == string(analytics.ResultSuccess) {
+			metrics = append(metrics, analytics.MetricKnowledgeTriggerCount)
+		}
+		return metrics
+	case telemetry.EventKnowledgeRetrieval:
+		if row.Outcome != nil && *row.Outcome == string(analytics.ResultSuccess) {
+			return []analytics.MetricKey{analytics.MetricKnowledgeTriggerCount}
+		}
+		return nil
 	case telemetry.EventAIRequest:
 		return []analytics.MetricKey{analytics.MetricAIRequestCount, analytics.MetricAISuccessRate, analytics.MetricAIDurationMS}
 	case telemetry.EventJoinRequest:
@@ -2813,7 +2822,7 @@ func (s *Store) LoadSummary(ctx context.Context, filter analytics.Filter) (analy
 		return analytics.SummaryData{}, err
 	}
 	previous = excludeRolledUpEvents(previous, previousFilter.Timezone, previousDates)
-	values := make(map[analytics.MetricKey]analytics.MetricValue, 15)
+	values := make(map[analytics.MetricKey]analytics.MetricValue, len(metrics))
 	for _, metric := range metrics {
 		currentValue, available := analyticsMetricNumberCombined(current, currentDaily, metric)
 		if !available {
@@ -2836,7 +2845,8 @@ func (s *Store) LoadSummary(ctx context.Context, filter analytics.Filter) (analy
 
 func allAnalyticsMetrics() []analytics.MetricKey {
 	return []analytics.MetricKey{
-		analytics.MetricKeywordReplyCount, analytics.MetricAIRequestCount, analytics.MetricAISuccessRate,
+		analytics.MetricKeywordReplyCount, analytics.MetricKnowledgeTriggerCount,
+		analytics.MetricAIRequestCount, analytics.MetricAISuccessRate,
 		analytics.MetricAIDurationMS, analytics.MetricJoinRequestCount, analytics.MetricManualApprovalCount,
 		analytics.MetricAutomaticApprovalCount, analytics.MetricScheduledJobRunCount, analytics.MetricGroupMessageCount,
 		analytics.MetricCommandRunCount, analytics.MetricActiveUserCount, analytics.MetricLinkCleanCount,
@@ -2929,6 +2939,20 @@ func analyticsDimensionValue(event telemetryEventManagerRow, dimension analytics
 	}
 }
 
+func analyticsKnowledgeIdentity(value string, resolver analytics.KnowledgeKeyResolver) (string, string) {
+	if resolver == nil {
+		return value, value
+	}
+	sourceKey, displayName, ok := resolver.ResolveKnowledgeKey(value)
+	if !ok || sourceKey == "" {
+		return value, value
+	}
+	if displayName == "" {
+		displayName = sourceKey
+	}
+	return sourceKey, displayName
+}
+
 func (s *Store) LoadRankings(ctx context.Context, query analytics.StoreRankingsQuery) (analytics.RankingsData, error) {
 	events, err := s.loadAnalyticsEvents(ctx, query.Filter)
 	if err != nil {
@@ -2944,12 +2968,18 @@ func (s *Store) LoadRankings(ctx context.Context, query analytics.StoreRankingsQ
 		events = excludeRolledUpEvents(events, query.Timezone, dates)
 	}
 	groups := make(map[string][]telemetryEventManagerRow)
+	knowledgeNames := make(map[string]string)
 	for _, event := range events {
 		if !eventHasMetric(event, query.Metric) {
 			continue
 		}
 		key, ok := analyticsDimensionValue(event, query.Dimension)
 		if ok {
+			if query.Dimension == analytics.DimensionKnowledgeEntry {
+				var displayName string
+				key, displayName = analyticsKnowledgeIdentity(key, query.KnowledgeResolver)
+				knowledgeNames[key] = displayName
+			}
 			groups[key] = append(groups[key], event)
 		}
 	}
@@ -2963,7 +2993,11 @@ func (s *Store) LoadRankings(ctx context.Context, query analytics.StoreRankingsQ
 	for key, groupEvents := range groups {
 		value, available := analyticsMetricNumberCombined(groupEvents, dailyGroups[key], query.Metric)
 		if available {
-			items = append(items, analytics.RankingValue{Key: key, DisplayName: key, Value: value})
+			displayName := key
+			if knowledgeNames[key] != "" {
+				displayName = knowledgeNames[key]
+			}
+			items = append(items, analytics.RankingValue{Key: key, DisplayName: displayName, Value: value})
 			seen[key] = struct{}{}
 		}
 	}

@@ -188,14 +188,14 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 				p.recordTelemetry(telemetry.Observation{
 					Kind: telemetry.EventKeywordReply, GroupID: msg.GroupID, UserID: msg.UserID,
 					FeatureKey: string(settings.FeatureKeywordReply), Result: telemetry.ResultFailed,
-					Duration: time.Since(startedAt), KnowledgeKey: entry.ID,
+					Duration: time.Since(startedAt), KnowledgeKey: entry.SourceKey,
 				})
 				return err
 			}
 			p.recordTelemetry(telemetry.Observation{
 				Kind: telemetry.EventKeywordReply, GroupID: msg.GroupID, UserID: msg.UserID,
 				FeatureKey: string(settings.FeatureKeywordReply), Result: telemetry.ResultSuccess,
-				Duration: time.Since(startedAt), KnowledgeKey: entry.ID,
+				Duration: time.Since(startedAt), KnowledgeKey: entry.SourceKey,
 			})
 			if p.stats != nil {
 				if err := p.stats.RecordKeywordReply(ctx, entry.SourceKey, msg.GroupID); err != nil {

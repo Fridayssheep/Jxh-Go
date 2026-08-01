@@ -82,7 +82,7 @@ func TestFlushFailureRetainsBatchWithoutBlockingProducer(t *testing.T) {
 }
 
 func TestRecordRejectsInvalidOrFreeFormLikeFields(t *testing.T) {
-	service := newTestService(t, &storeFake{}, 1, 1)
+	service := newTestService(t, &storeFake{}, 2, 2)
 	if service.Record(Observation{Kind: "arbitrary", GroupID: 1, Result: ResultSuccess}) {
 		t.Fatal("Record() accepted unknown kind")
 	}
@@ -97,6 +97,18 @@ func TestRecordRejectsInvalidOrFreeFormLikeFields(t *testing.T) {
 	}
 	if service.Record(Observation{Kind: EventGroupMessage, GroupID: 1, Result: ResultSuccess, KnowledgeKey: "entry_1"}) {
 		t.Fatal("Record() accepted incompatible knowledge key")
+	}
+	if service.Record(Observation{Kind: EventKeywordReply, GroupID: 1, Result: ResultSuccess, KnowledgeKey: "bad\nkey"}) {
+		t.Fatal("Record() accepted control characters in knowledge key")
+	}
+	if !service.Record(Observation{Kind: EventKeywordReply, GroupID: 1, Result: ResultSuccess, KnowledgeKey: "新生菜单"}) {
+		t.Fatal("Record() rejected a bounded source key")
+	}
+	if service.Record(Observation{Kind: EventKnowledgeRetrieval, GroupID: 1, Result: ResultSuccess}) {
+		t.Fatal("Record() accepted a retrieval without a source key")
+	}
+	if !service.Record(Observation{Kind: EventKnowledgeRetrieval, GroupID: 1, Result: ResultSuccess, KnowledgeKey: "校历"}) {
+		t.Fatal("Record() rejected a knowledge retrieval source key")
 	}
 }
 

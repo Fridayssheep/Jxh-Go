@@ -256,10 +256,29 @@ func (r *GroupCommandRouter) handleAI(ctx context.Context, msg GroupMessage, sen
 			log.Printf("record ai retrieval trigger failed: %v", err)
 		}
 	}
+	r.recordKnowledgeRetrievals(msg, sourceKeys)
 	if len(sourceKeys) == 0 {
 		return telemetry.ResultNoKnowledge, nil
 	}
 	return telemetry.ResultSuccess, nil
+}
+
+func (r *GroupCommandRouter) recordKnowledgeRetrievals(msg GroupMessage, sourceKeys []string) {
+	seen := make(map[string]struct{}, len(sourceKeys))
+	for _, sourceKey := range sourceKeys {
+		sourceKey = strings.TrimSpace(sourceKey)
+		if sourceKey == "" {
+			continue
+		}
+		if _, exists := seen[sourceKey]; exists {
+			continue
+		}
+		seen[sourceKey] = struct{}{}
+		r.recordTelemetry(telemetry.Observation{
+			Kind: telemetry.EventKnowledgeRetrieval, GroupID: msg.GroupID, UserID: msg.UserID,
+			FeatureKey: string(settings.FeatureAIQA), Result: telemetry.ResultSuccess, KnowledgeKey: sourceKey,
+		})
+	}
 }
 
 func (r *GroupCommandRouter) recordAI(msg GroupMessage, result telemetry.Result, duration time.Duration) {

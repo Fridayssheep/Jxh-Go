@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	defaultRangeDays = 7
-	maximumRangeDays = 366
-	maximumHourDays  = 31
-	defaultRankLimit = 20
-	maximumRankLimit = 100
+	defaultRangeDays            = 7
+	maximumRangeDays            = 366
+	maximumHourDays             = 31
+	maximumKnowledgeRankingDays = 30
+	defaultRankLimit            = 20
+	maximumRankLimit            = 100
 )
 
 type metricDefinition struct {
@@ -28,6 +29,7 @@ type metricDefinition struct {
 
 var metricDefinitions = []metricDefinition{
 	{MetricKeywordReplyCount, "Keyword replies", UnitCount},
+	{MetricKnowledgeTriggerCount, "Knowledge triggers", UnitCount},
 	{MetricAIRequestCount, "AI requests", UnitCount},
 	{MetricAISuccessRate, "AI success rate", UnitPercent},
 	{MetricAIDurationMS, "AI duration", UnitMilliseconds},
@@ -53,20 +55,22 @@ var metricCatalog = func() map[MetricKey]metricDefinition {
 }()
 
 type Options struct {
-	Store Store
-	Now   func() time.Time
+	Store             Store
+	KnowledgeResolver KnowledgeKeyResolver
+	Now               func() time.Time
 }
 
 type Service struct {
-	store Store
-	now   func() time.Time
+	store             Store
+	knowledgeResolver KnowledgeKeyResolver
+	now               func() time.Time
 }
 
 func NewService(options Options) (*Service, error) {
 	if options.Store == nil || options.Now == nil {
 		return nil, ErrInvalidInput
 	}
-	return &Service{store: options.Store, now: options.Now}, nil
+	return &Service{store: options.Store, knowledgeResolver: options.KnowledgeResolver, now: options.Now}, nil
 }
 
 func (s *Service) Summary(ctx context.Context, principal auth.Principal, query Query) (Summary, error) {
@@ -140,14 +144,15 @@ func (s *Service) Rankings(ctx context.Context, principal auth.Principal, query 
 	if !principal.Has(auth.PermissionAnalyticsRead) {
 		return Rankings{}, ErrForbidden
 	}
-	filter, _, err := s.normalizeFilter(query.Query)
+	filter, location, err := s.normalizeFilter(query.Query)
 	if err != nil {
 		return Rankings{}, err
 	}
 	if query.Limit == 0 {
 		query.Limit = defaultRankLimit
 	}
-	if !validDimension(query.Dimension) || !validMetric(query.Metric) || query.Limit < 1 || query.Limit > maximumRankLimit {
+	if !validDimension(query.Dimension) || !validMetric(query.Metric) || query.Limit < 1 || query.Limit > maximumRankLimit ||
+		(query.Dimension == DimensionKnowledgeEntry && exceedsLocalDays(filter, location, maximumKnowledgeRankingDays)) {
 		return Rankings{}, ErrInvalidInput
 	}
 	return s.rankings(ctx, filter, query.Dimension, query.Metric, query.Limit)
@@ -156,6 +161,7 @@ func (s *Service) Rankings(ctx context.Context, principal auth.Principal, query 
 func (s *Service) rankings(ctx context.Context, filter Filter, dimension Dimension, metric MetricKey, limit int) (Rankings, error) {
 	data, err := s.store.LoadRankings(ctx, StoreRankingsQuery{
 		Filter: cloneFilter(filter), Dimension: dimension, Metric: metric, Limit: limit,
+		KnowledgeResolver: s.knowledgeResolver,
 	})
 	if err != nil {
 		return Rankings{}, wrapStoreError("load analytics rankings", err)

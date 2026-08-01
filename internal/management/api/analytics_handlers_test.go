@@ -222,7 +222,7 @@ func TestAnalyticsXLSXExportHTTPUsesOpenAPIContentType(t *testing.T) {
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-		response.Header().Get("X-Export-Row-Count") != "15" {
+		response.Header().Get("X-Export-Row-Count") != "16" {
 		t.Fatalf("status=%d headers=%v body_length=%d", response.Code, response.Header(), response.Body.Len())
 	}
 	workbook, err := excelize.OpenReader(bytes.NewReader(response.Body.Bytes()))
@@ -234,7 +234,7 @@ func TestAnalyticsXLSXExportHTTPUsesOpenAPIContentType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 16 || rows[0][0] != "metric" {
+	if len(rows) != 17 || rows[0][0] != "metric" {
 		t.Fatalf("rows=%d first=%v", len(rows), rows[0])
 	}
 }

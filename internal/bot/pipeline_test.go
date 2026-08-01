@@ -86,7 +86,7 @@ func TestGroupCommandRouterRecordsAIOutcomes(t *testing.T) {
 		err     error
 		want    telemetry.Result
 	}{
-		{name: "success", answer: "answer", sources: []string{"entry_1"}, want: telemetry.ResultSuccess},
+		{name: "success", answer: "answer", sources: []string{"entry_1", "entry_1"}, want: telemetry.ResultSuccess},
 		{name: "no knowledge", answer: "fallback", want: telemetry.ResultNoKnowledge},
 		{name: "timeout", err: context.DeadlineExceeded, want: telemetry.ResultTimeout},
 	} {
@@ -99,6 +99,12 @@ func TestGroupCommandRouterRecordsAIOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			observation := waitTelemetry(t, recorder.events)
+			if len(test.sources) > 0 {
+				if observation.Kind != telemetry.EventKnowledgeRetrieval || observation.KnowledgeKey != test.sources[0] {
+					t.Fatalf("retrieval observation=%+v", observation)
+				}
+				observation = waitTelemetry(t, recorder.events)
+			}
 			if observation.Kind != telemetry.EventAIRequest || observation.Result != test.want ||
 				observation.FeatureKey != string(settings.FeatureAIQA) || observation.GroupID != 123 || observation.UserID != 456 {
 				t.Fatalf("observation=%+v", observation)
@@ -132,10 +138,19 @@ func TestGroupCommandRouterRecordsBusyAIWithoutStartingThirdRequest(t *testing.T
 		t.Fatalf("busy observation=%+v", observation)
 	}
 	close(answerer.release)
-	for range 2 {
-		if observation := waitTelemetry(t, recorder.events); observation.Result != telemetry.ResultSuccess {
+	completed := 0
+	for completed < 2 {
+		observation := waitTelemetry(t, recorder.events)
+		if observation.Kind == telemetry.EventKnowledgeRetrieval {
+			if observation.KnowledgeKey != "entry_1" {
+				t.Fatalf("retrieval observation=%+v", observation)
+			}
+			continue
+		}
+		if observation.Kind != telemetry.EventAIRequest || observation.Result != telemetry.ResultSuccess {
 			t.Fatalf("completed observation=%+v", observation)
 		}
+		completed++
 	}
 }
 
@@ -287,6 +302,26 @@ func TestPipelineStopsAfterCustomCommandResolverFailure(t *testing.T) {
 	}
 	if executor.executeCalls != 0 {
 		t.Fatal("command executed after resolver failure")
+	}
+}
+
+func TestPipelineRecordsKeywordSourceKeyForAnalytics(t *testing.T) {
+	recorder := &telemetryRecorderFake{}
+	pipeline := NewPipeline(Options{
+		Sender: &botSenderFake{}, Telemetry: recorder,
+		Knowledge: knowledge.NewIndexRef([]knowledge.Entry{{
+			SourceKey: "新生菜单", Keyword: "菜单", Answer: "内容", Enabled: true, ExactReply: true,
+		}}),
+	})
+	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{GroupID: 123, UserID: 456, Text: "菜单"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.observations) != 2 {
+		t.Fatalf("observations=%+v", recorder.observations)
+	}
+	observation := recorder.observations[1]
+	if observation.Kind != telemetry.EventKeywordReply || observation.KnowledgeKey != "新生菜单" {
+		t.Fatalf("keyword observation=%+v", observation)
 	}
 }
 

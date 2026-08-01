@@ -25,6 +25,7 @@ type MetricKey string
 
 const (
 	MetricKeywordReplyCount      MetricKey = "keyword_reply_count"
+	MetricKnowledgeTriggerCount  MetricKey = "knowledge_trigger_count"
 	MetricAIRequestCount         MetricKey = "ai_request_count"
 	MetricAISuccessRate          MetricKey = "ai_success_rate"
 	MetricAIDurationMS           MetricKey = "ai_duration_ms"
@@ -200,9 +201,14 @@ type RankingsQuery struct {
 
 type StoreRankingsQuery struct {
 	Filter
-	Dimension Dimension
-	Metric    MetricKey
-	Limit     int
+	Dimension         Dimension
+	Metric            MetricKey
+	Limit             int
+	KnowledgeResolver KnowledgeKeyResolver
+}
+
+type KnowledgeKeyResolver interface {
+	ResolveKnowledgeKey(value string) (sourceKey string, displayName string, ok bool)
 }
 
 type RankingValue struct {

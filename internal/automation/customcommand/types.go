@@ -25,7 +25,6 @@ const (
 	StatusDraft    Status = "draft"
 	StatusActive   Status = "active"
 	StatusDisabled Status = "disabled"
-	StatusArchived Status = "archived"
 )
 
 type ScopeType string
@@ -290,21 +289,21 @@ type UpdateMutation struct {
 	Patch            Patch
 }
 
-type ArchiveMutation struct {
+type DeleteMutation struct {
 	Context          MutationContext
 	CommandID        string
 	ExpectedRevision uint64
 }
 
 // Store implementations must enforce active-name uniqueness and revision
-// checks atomically inside create, update, and archive transactions.
+// checks atomically inside create, update, and delete transactions.
 type Store interface {
 	CommandNameExists(context.Context, string, string) (bool, error)
 	CreateCommand(context.Context, CreateMutation) (Command, error)
 	GetCommand(context.Context, string) (Command, bool, error)
 	ListCommands(context.Context, ListQuery) (Page[Command], error)
 	UpdateCommand(context.Context, UpdateMutation) (Command, error)
-	ArchiveCommand(context.Context, ArchiveMutation) error
+	DeleteCommand(context.Context, DeleteMutation) error
 	ListCommandRuns(context.Context, RunListQuery) (Page[Run], error)
 	RecordCommandRun(context.Context, Run) (Run, error)
 }

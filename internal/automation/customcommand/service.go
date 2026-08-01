@@ -258,7 +258,7 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 	if !found {
 		return Command{}, ErrNotFound
 	}
-	if current.Status == StatusArchived || current.Version != revision {
+	if current.Version != revision {
 		return Command{}, ErrConflict
 	}
 	candidate := applyPatch(current, patch)
@@ -293,20 +293,20 @@ func (s *Service) Update(ctx context.Context, principal auth.Principal, id strin
 	return cloneCommand(command), nil
 }
 
-func (s *Service) Archive(ctx context.Context, principal auth.Principal, id string, revision uint64, request auth.MutationContext) error {
+func (s *Service) Delete(ctx context.Context, principal auth.Principal, id string, revision uint64, request auth.MutationContext) error {
 	if !principal.Has(auth.PermissionCommandsWrite) {
 		return ErrForbidden
 	}
 	if !validIdentifier(id) || revision == 0 || !validRequestContext(request) {
 		return ErrInvalidInput
 	}
-	if err := s.store.ArchiveCommand(ctx, ArchiveMutation{
+	if err := s.store.DeleteCommand(ctx, DeleteMutation{
 		Context: mutationContext(principal, request, s.now()), CommandID: id, ExpectedRevision: revision,
 	}); err != nil {
-		return fmt.Errorf("archive custom command: %w", err)
+		return fmt.Errorf("delete custom command: %w", err)
 	}
 	s.registry.Remove(id)
-	s.publishCommandUpdated(Command{ID: id, Version: revision}, "archived")
+	s.publishCommandUpdated(Command{ID: id, Version: revision}, "deleted")
 	return nil
 }
 
@@ -451,7 +451,7 @@ func validRunListQuery(query RunListQuery) bool {
 }
 
 func validStatus(value Status) bool {
-	return value == StatusDraft || value == StatusActive || value == StatusDisabled || value == StatusArchived
+	return value == StatusDraft || value == StatusActive || value == StatusDisabled
 }
 
 func validActionType(value ActionType) bool {

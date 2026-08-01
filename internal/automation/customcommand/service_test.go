@@ -141,6 +141,25 @@ func TestBuiltinConflictAndPermissionHappenBeforeStoreMutation(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesCommandFromRegistry(t *testing.T) {
+	store := &fakeStore{}
+	service := newServiceFixture(t, store, nil)
+	if err := service.Registry().Upsert(storedCommand()); err != nil {
+		t.Fatal(err)
+	}
+
+	err := service.Delete(t.Context(), writerPrincipal(), "cmd_1", 7, validMutationRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.deleted.CommandID != "cmd_1" || store.deleted.ExpectedRevision != 7 {
+		t.Fatalf("delete mutation=%+v", store.deleted)
+	}
+	if _, matched := service.Probe("/welcome 7788 words 60", "123"); matched {
+		t.Fatal("deleted command remains in registry")
+	}
+}
+
 func TestRegistryUsesExactNameAndFixedScope(t *testing.T) {
 	registry, err := NewRegistry(nil)
 	if err != nil {
@@ -323,6 +342,7 @@ func hasIssue(issues []ValidationIssue, code string) bool {
 type fakeStore struct {
 	calls       int
 	recorded    Run
+	deleted     DeleteMutation
 	listPages   []Page[Command]
 	listQueries []ListQuery
 	listIndex   int
@@ -379,8 +399,9 @@ func (s *fakeStore) UpdateCommand(context.Context, UpdateMutation) (Command, err
 	return storedCommand(), nil
 }
 
-func (s *fakeStore) ArchiveCommand(context.Context, ArchiveMutation) error {
+func (s *fakeStore) DeleteCommand(_ context.Context, mutation DeleteMutation) error {
 	s.calls++
+	s.deleted = mutation
 	return nil
 }
 

@@ -20,7 +20,7 @@ type ScheduledJobOperations interface {
 	Get(context.Context, auth.Principal, string) (scheduledjobs.Job, error)
 	List(context.Context, auth.Principal, scheduledjobs.ListQuery) (scheduledjobs.Page[scheduledjobs.Job], error)
 	Update(context.Context, auth.Principal, string, uint64, scheduledjobs.Patch, auth.MutationContext) (scheduledjobs.Job, error)
-	Archive(context.Context, auth.Principal, string, uint64, auth.MutationContext) error
+	Delete(context.Context, auth.Principal, string, uint64, auth.MutationContext) error
 	TestSend(context.Context, auth.Principal, string, uint64, string, auth.MutationContext) (scheduledjobs.Run, error)
 	ListRuns(context.Context, auth.Principal, scheduledjobs.RunListQuery) (scheduledjobs.Page[scheduledjobs.Run], error)
 }
@@ -50,7 +50,7 @@ func (h *ScheduledJobHandlers) Register(router *Router) error {
 		{http.MethodPost, "/api/admin/v1/scheduled-jobs", mutationRoute(auth.PermissionScheduledJobsWrite), h.create},
 		{http.MethodGet, "/api/admin/v1/scheduled-jobs/{job_id}", RouteOptions{Permission: auth.PermissionScheduledJobsRead}, h.get},
 		{http.MethodPatch, "/api/admin/v1/scheduled-jobs/{job_id}", mutationRoute(auth.PermissionScheduledJobsWrite), h.update},
-		{http.MethodDelete, "/api/admin/v1/scheduled-jobs/{job_id}", mutationRoute(auth.PermissionScheduledJobsWrite), h.archive},
+		{http.MethodDelete, "/api/admin/v1/scheduled-jobs/{job_id}", mutationRoute(auth.PermissionScheduledJobsWrite), h.delete},
 		{http.MethodPost, "/api/admin/v1/scheduled-jobs/{job_id}/test-send", mutationRoute(auth.PermissionScheduledJobsWrite), h.testSend},
 		{http.MethodGet, "/api/admin/v1/scheduled-jobs/{job_id}/runs", RouteOptions{Permission: auth.PermissionScheduledJobsRead}, h.listRuns},
 	}
@@ -182,7 +182,7 @@ func (h *ScheduledJobHandlers) update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mapScheduledJob(job))
 }
 
-func (h *ScheduledJobHandlers) archive(w http.ResponseWriter, r *http.Request) {
+func (h *ScheduledJobHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathIdentifier(w, r, "job_id")
 	if !ok {
 		return
@@ -192,7 +192,7 @@ func (h *ScheduledJobHandlers) archive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, _ := AuthFromContext(r.Context())
-	if err := h.service.Archive(r.Context(), principalFromAuth(identity), id, revision, mutationContextFromRequest(r)); err != nil {
+	if err := h.service.Delete(r.Context(), principalFromAuth(identity), id, revision, mutationContextFromRequest(r)); err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
@@ -343,7 +343,7 @@ func parseScheduledJobListQuery(values url.Values) (scheduledjobs.ListQuery, err
 		return scheduledjobs.ListQuery{}, scheduledjobs.ErrInvalidInput
 	}
 	if query.Status != "" && query.Status != scheduledjobs.StatusActive && query.Status != scheduledjobs.StatusPaused &&
-		query.Status != scheduledjobs.StatusCompleted && query.Status != scheduledjobs.StatusArchived {
+		query.Status != scheduledjobs.StatusCompleted {
 		return scheduledjobs.ListQuery{}, scheduledjobs.ErrInvalidInput
 	}
 	if query.RunResult != "" && !validScheduledRunResult(query.RunResult) {

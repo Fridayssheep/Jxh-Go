@@ -1341,6 +1341,9 @@ func (s *Store) GetScheduledJob(ctx context.Context, id string) (scheduledjobs.J
 	if err != nil {
 		return scheduledjobs.Job{}, false, err
 	}
+	if row.ArchivedAt != nil {
+		return scheduledjobs.Job{}, false, nil
+	}
 	value, err := scheduledJobFromManagerRow(row)
 	return value, err == nil, err
 }
@@ -1359,6 +1362,8 @@ func (s *Store) ListScheduledJobs(ctx context.Context, query scheduledjobs.ListQ
 	}
 	if query.Status != "" {
 		db = db.Where("job.status = ?", query.Status)
+	} else {
+		db = db.Where("job.archived_at IS NULL")
 	}
 	if query.RunResult != "" {
 		db = db.Where("job.last_run_result = ?", query.RunResult)
@@ -1471,7 +1476,7 @@ func (s *Store) UpdateScheduledJob(ctx context.Context, mutation scheduledjobs.U
 	return result, err
 }
 
-func (s *Store) ArchiveScheduledJob(ctx context.Context, mutation scheduledjobs.ArchiveMutation) error {
+func (s *Store) DeleteScheduledJob(ctx context.Context, mutation scheduledjobs.DeleteMutation) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		before, err := loadScheduledJobManagerRow(tx.Clauses(clause.Locking{Strength: "UPDATE"}), mutation.JobID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1480,29 +1485,35 @@ func (s *Store) ArchiveScheduledJob(ctx context.Context, mutation scheduledjobs.
 		if err != nil {
 			return err
 		}
-		if before.Revision != mutation.ExpectedRevision || before.ArchivedAt != nil {
+		if before.Revision != mutation.ExpectedRevision {
 			return scheduledjobs.ErrConflict
 		}
-		actor := principalUpdatedBy(mutation.Context.Actor)
-		at := mutation.Context.OccurredAt.UTC()
-		updated := tx.Model(&scheduledJobManagerRow{}).Where("id = ? AND revision = ? AND archived_at IS NULL", mutation.JobID, mutation.ExpectedRevision).
-			Updates(map[string]any{
-				"enabled": false, "status": scheduledjobs.StatusArchived, "run_at": nil, "archived_at": at,
-				"revision": gorm.Expr("revision + 1"), "updated_at": at, "updated_by_type": actor.Type,
-				"updated_by_user_id": actor.UserID, "updated_by_qq_user_id": actor.QQUserID,
-				"updated_by_display_name": actor.DisplayName, "updated_by_role": actor.Role,
-			})
-		if updated.Error != nil {
-			return updated.Error
+		var runningCount int64
+		if err := tx.Model(&scheduledRunManagerRow{}).
+			Where("job_id = ? AND completed_at IS NULL", mutation.JobID).
+			Count(&runningCount).Error; err != nil {
+			return err
 		}
-		if updated.RowsAffected != 1 {
+		if runningCount != 0 {
+			return scheduledjobs.ErrConflict
+		}
+		at := mutation.Context.OccurredAt.UTC()
+		deletedRuns := tx.Where("job_id = ?", mutation.JobID).Delete(&scheduledRunManagerRow{})
+		if deletedRuns.Error != nil {
+			return deletedRuns.Error
+		}
+		deleted := tx.Where("id = ? AND revision = ?", mutation.JobID, mutation.ExpectedRevision).Delete(&scheduledJobManagerRow{})
+		if deleted.Error != nil {
+			return deleted.Error
+		}
+		if deleted.RowsAffected != 1 {
 			return scheduledjobs.ErrConflict
 		}
 		return writeManagerAudit(tx, managerAuditWrite{
 			Actor: scheduledAuditActor(mutation.Context.Actor), OccurredAt: at, Request: mutation.Context.Request,
-			Action: "scheduled_job.archive", TargetType: "scheduled_job", TargetID: mutation.JobID, TargetName: before.Name,
+			Action: "scheduled_job.delete", TargetType: "scheduled_job", TargetID: mutation.JobID, TargetName: before.Name,
 			Before: map[string]any{"status": before.Status, "revision": before.Revision},
-			After:  map[string]any{"status": scheduledjobs.StatusArchived, "revision": before.Revision + 1}, Metadata: map[string]any{},
+			After:  map[string]any{"deleted": true}, Metadata: map[string]any{"deleted_run_count": deletedRuns.RowsAffected},
 		})
 	})
 }
@@ -2028,6 +2039,9 @@ func (s *Store) GetCommand(ctx context.Context, id string) (customcommand.Comman
 	if err != nil {
 		return customcommand.Command{}, false, err
 	}
+	if row.ArchivedAt != nil {
+		return customcommand.Command{}, false, nil
+	}
 	value, err := customCommandFromManagerRow(row)
 	return value, err == nil, err
 }
@@ -2043,6 +2057,8 @@ func (s *Store) ListCommands(ctx context.Context, query customcommand.ListQuery)
 	}
 	if query.Status != "" {
 		db = db.Where("status = ?", query.Status)
+	} else {
+		db = db.Where("archived_at IS NULL")
 	}
 	if query.ScopeType != "" {
 		db = db.Where("scope_type = ?", query.ScopeType)
@@ -2176,7 +2192,7 @@ func (s *Store) UpdateCommand(ctx context.Context, mutation customcommand.Update
 	return result, err
 }
 
-func (s *Store) ArchiveCommand(ctx context.Context, mutation customcommand.ArchiveMutation) error {
+func (s *Store) DeleteCommand(ctx context.Context, mutation customcommand.DeleteMutation) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var before customCommandManagerRow
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("command_id = ?", mutation.CommandID).Take(&before).Error
@@ -2186,30 +2202,26 @@ func (s *Store) ArchiveCommand(ctx context.Context, mutation customcommand.Archi
 		if err != nil {
 			return err
 		}
-		if before.Revision != mutation.ExpectedRevision || before.ArchivedAt != nil {
+		if before.Revision != mutation.ExpectedRevision {
 			return customcommand.ErrConflict
 		}
-		actor := principalUpdatedBy(mutation.Context.Actor)
 		at := mutation.Context.OccurredAt.UTC()
-		updated := tx.Model(&customCommandManagerRow{}).Where("command_id = ? AND revision = ? AND archived_at IS NULL", mutation.CommandID, mutation.ExpectedRevision).
-			Updates(map[string]any{
-				"enabled": false, "status": customcommand.StatusArchived, "archived_at": at,
-				"revision": gorm.Expr("revision + 1"), "updated_at": at, "updated_by_type": actor.Type,
-				"updated_by_user_id": actor.UserID, "updated_by_qq_user_id": actor.QQUserID,
-				"updated_by_display_name": actor.DisplayName, "updated_by_role": actor.Role,
-			})
-		if updated.Error != nil {
-			return updated.Error
+		deletedRuns := tx.Where("command_id = ?", mutation.CommandID).Delete(&customRunManagerRow{})
+		if deletedRuns.Error != nil {
+			return deletedRuns.Error
 		}
-		if updated.RowsAffected != 1 {
+		deleted := tx.Where("command_id = ? AND revision = ?", mutation.CommandID, mutation.ExpectedRevision).Delete(&customCommandManagerRow{})
+		if deleted.Error != nil {
+			return deleted.Error
+		}
+		if deleted.RowsAffected != 1 {
 			return customcommand.ErrConflict
 		}
-		after := before
-		after.Enabled, after.Status, after.Revision, after.ArchivedAt = false, string(customcommand.StatusArchived), before.Revision+1, &at
 		return writeManagerAudit(tx, managerAuditWrite{
 			Actor: scheduledAuditActor(mutation.Context.Actor), OccurredAt: at, Request: mutation.Context.Request,
-			Action: "custom_command.archive", TargetType: "custom_command", TargetID: mutation.CommandID,
-			TargetName: before.DisplayName, Before: commandAuditSnapshot(before), After: commandAuditSnapshot(after), Metadata: map[string]any{},
+			Action: "custom_command.delete", TargetType: "custom_command", TargetID: mutation.CommandID,
+			TargetName: before.DisplayName, Before: commandAuditSnapshot(before), After: map[string]any{"deleted": true},
+			Metadata: map[string]any{"deleted_run_count": deletedRuns.RowsAffected},
 		})
 	})
 }

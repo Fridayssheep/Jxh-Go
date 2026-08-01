@@ -19,7 +19,7 @@ type CommandOperations interface {
 	Get(context.Context, auth.Principal, string) (customcommand.Command, error)
 	List(context.Context, auth.Principal, customcommand.ListQuery) (customcommand.Page[customcommand.Command], error)
 	Update(context.Context, auth.Principal, string, uint64, customcommand.Patch, auth.MutationContext) (customcommand.Command, error)
-	Archive(context.Context, auth.Principal, string, uint64, auth.MutationContext) error
+	Delete(context.Context, auth.Principal, string, uint64, auth.MutationContext) error
 	ValidateDraft(context.Context, auth.Principal, customcommand.Definition, customcommand.ValidationSample) (customcommand.ValidationResult, error)
 	ValidateStored(context.Context, auth.Principal, string, customcommand.ValidationSample) (customcommand.ValidationResult, error)
 	ListRuns(context.Context, auth.Principal, customcommand.RunListQuery) (customcommand.Page[customcommand.Run], error)
@@ -51,7 +51,7 @@ func (h *CommandHandlers) Register(router *Router) error {
 		{http.MethodPost, "/api/admin/v1/commands/validate", mutationRoute(auth.PermissionCommandsWrite), h.validateDraft},
 		{http.MethodGet, "/api/admin/v1/commands/{command_id}", RouteOptions{Permission: auth.PermissionCommandsRead}, h.get},
 		{http.MethodPatch, "/api/admin/v1/commands/{command_id}", mutationRoute(auth.PermissionCommandsWrite), h.update},
-		{http.MethodDelete, "/api/admin/v1/commands/{command_id}", mutationRoute(auth.PermissionCommandsWrite), h.archive},
+		{http.MethodDelete, "/api/admin/v1/commands/{command_id}", mutationRoute(auth.PermissionCommandsWrite), h.delete},
 		{http.MethodPost, "/api/admin/v1/commands/{command_id}/validate", mutationRoute(auth.PermissionCommandsWrite), h.validateStored},
 		{http.MethodGet, "/api/admin/v1/commands/{command_id}/runs", RouteOptions{Permission: auth.PermissionCommandsRead}, h.listRuns},
 	}
@@ -169,7 +169,7 @@ func (h *CommandHandlers) update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mapCommand(command))
 }
 
-func (h *CommandHandlers) archive(w http.ResponseWriter, r *http.Request) {
+func (h *CommandHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathIdentifier(w, r, "command_id")
 	if !ok {
 		return
@@ -179,7 +179,7 @@ func (h *CommandHandlers) archive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	identity, _ := AuthFromContext(r.Context())
-	if err := h.service.Archive(r.Context(), principalFromAuth(identity), id, revision, mutationContextFromRequest(r)); err != nil {
+	if err := h.service.Delete(r.Context(), principalFromAuth(identity), id, revision, mutationContextFromRequest(r)); err != nil {
 		h.writeServiceError(w, r, err)
 		return
 	}
@@ -612,7 +612,7 @@ func parseCommandListQuery(values url.Values) (customcommand.ListQuery, error) {
 		query.Enabled = &enabled
 	}
 	if query.Status != "" && query.Status != customcommand.StatusDraft && query.Status != customcommand.StatusActive &&
-		query.Status != customcommand.StatusDisabled && query.Status != customcommand.StatusArchived {
+		query.Status != customcommand.StatusDisabled {
 		return customcommand.ListQuery{}, customcommand.ErrInvalidInput
 	}
 	if query.ScopeType != "" && query.ScopeType != customcommand.ScopeGlobal && query.ScopeType != customcommand.ScopeGroups {

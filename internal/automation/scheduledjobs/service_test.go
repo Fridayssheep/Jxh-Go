@@ -69,6 +69,16 @@ func TestUpdateRejectsStaleRevisionBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestDeletePassesLoadedRevisionToStore(t *testing.T) {
+	service, store, _ := newFixture(t)
+	if err := service.Delete(t.Context(), writer(), "job_1", 2, auth.MutationContext{RequestID: "req_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if store.deleted.JobID != "job_1" || store.deleted.ExpectedRevision != 2 {
+		t.Fatalf("delete mutation=%+v", store.deleted)
+	}
+}
+
 func TestRecoverInterruptedRunsDelegatesSafeStartupTransition(t *testing.T) {
 	service, store, _ := newFixture(t)
 	store.recovered = 3
@@ -209,6 +219,7 @@ type fakeStore struct {
 	completed   Run
 	create      CreateMutation
 	update      UpdateMutation
+	deleted     DeleteMutation
 	completion  TestSendCompletion
 	recovered   int
 	recoveredAt time.Time
@@ -256,8 +267,9 @@ func (s *fakeStore) UpdateScheduledJob(_ context.Context, mutation UpdateMutatio
 	return s.job, nil
 }
 
-func (s *fakeStore) ArchiveScheduledJob(context.Context, ArchiveMutation) error {
+func (s *fakeStore) DeleteScheduledJob(_ context.Context, mutation DeleteMutation) error {
 	s.calls++
+	s.deleted = mutation
 	return nil
 }
 

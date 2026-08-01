@@ -146,7 +146,7 @@ func TestScheduledJobTestSendMapsOutcomeAndDependencyErrors(t *testing.T) {
 	}
 }
 
-func TestScheduledJobArchiveAndRunHistoryContract(t *testing.T) {
+func TestScheduledJobDeleteAndRunHistoryRoutes(t *testing.T) {
 	completedAt := time.Date(2026, 7, 28, 1, 0, 1, 0, time.UTC)
 	service := &fakeScheduledJobOperations{runs: scheduledjobs.Page[scheduledjobs.Run]{
 		Items: []scheduledjobs.Run{{
@@ -166,8 +166,8 @@ func TestScheduledJobArchiveAndRunHistoryContract(t *testing.T) {
 	request.Header.Set("If-Match", `"3"`)
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || response.Body.Len() != 0 || service.archiveID != "job_1" {
-		t.Fatalf("status=%d archive=%q body=%s", response.Code, service.archiveID, response.Body.String())
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 || service.deleteID != "job_1" {
+		t.Fatalf("status=%d delete=%q body=%s", response.Code, service.deleteID, response.Body.String())
 	}
 }
 
@@ -239,7 +239,7 @@ type fakeScheduledJobOperations struct {
 	runQuery       scheduledjobs.RunListQuery
 	revision       uint64
 	idempotencyKey string
-	archiveID      string
+	deleteID       string
 }
 
 func (s *fakeScheduledJobOperations) Create(_ context.Context, _ auth.Principal, input scheduledjobs.CreateInput, _ auth.MutationContext) (scheduledjobs.Job, error) {
@@ -265,9 +265,9 @@ func (s *fakeScheduledJobOperations) Update(_ context.Context, _ auth.Principal,
 	return s.job, s.err
 }
 
-func (s *fakeScheduledJobOperations) Archive(_ context.Context, _ auth.Principal, id string, revision uint64, _ auth.MutationContext) error {
+func (s *fakeScheduledJobOperations) Delete(_ context.Context, _ auth.Principal, id string, revision uint64, _ auth.MutationContext) error {
 	s.calls++
-	s.archiveID, s.revision = id, revision
+	s.deleteID, s.revision = id, revision
 	return s.err
 }
 

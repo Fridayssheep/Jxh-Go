@@ -38,7 +38,6 @@ const (
 	StatusActive    Status = "active"
 	StatusPaused    Status = "paused"
 	StatusCompleted Status = "completed"
-	StatusArchived  Status = "archived"
 )
 
 type RunResult string
@@ -162,7 +161,7 @@ type UpdateMutation struct {
 	NextRunAt        auth.Field[*time.Time]
 }
 
-type ArchiveMutation struct {
+type DeleteMutation struct {
 	Context          MutationContext
 	JobID            string
 	ExpectedRevision uint64
@@ -198,7 +197,7 @@ type Store interface {
 	GetScheduledJob(ctx context.Context, id string) (Job, bool, error)
 	ListScheduledJobs(ctx context.Context, query ListQuery) (Page[Job], error)
 	UpdateScheduledJob(ctx context.Context, mutation UpdateMutation) (Job, error)
-	ArchiveScheduledJob(ctx context.Context, mutation ArchiveMutation) error
+	DeleteScheduledJob(ctx context.Context, mutation DeleteMutation) error
 	ListScheduledJobRuns(ctx context.Context, query RunListQuery) (Page[Run], error)
 	// BeginTestSend atomically checks revision, reserves idempotency and writes a
 	// started test run. Fresh=false returns the prior terminal run for replay.
@@ -376,19 +375,19 @@ func (s *Service) nextRunForPatch(ctx context.Context, id string, revision uint6
 	return auth.Field[*time.Time]{Set: true, Value: next}, nil
 }
 
-func (s *Service) Archive(ctx context.Context, principal auth.Principal, id string, revision uint64, request auth.MutationContext) error {
+func (s *Service) Delete(ctx context.Context, principal auth.Principal, id string, revision uint64, request auth.MutationContext) error {
 	if !principal.Has(auth.PermissionScheduledJobsWrite) {
 		return ErrForbidden
 	}
 	if !validID(id) || revision == 0 || !validRequest(request) {
 		return ErrInvalidInput
 	}
-	if err := s.store.ArchiveScheduledJob(ctx, ArchiveMutation{
+	if err := s.store.DeleteScheduledJob(ctx, DeleteMutation{
 		Context: mutationContext(principal, request, s.now()), JobID: id, ExpectedRevision: revision,
 	}); err != nil {
-		return fmt.Errorf("archive scheduled job: %w", err)
+		return fmt.Errorf("delete scheduled job: %w", err)
 	}
-	s.publish(Job{ID: id}, "archived")
+	s.publish(Job{ID: id}, "deleted")
 	return nil
 }
 
@@ -636,7 +635,7 @@ func validRunListQuery(query RunListQuery) bool {
 }
 
 func validStatus(value Status) bool {
-	return value == StatusActive || value == StatusPaused || value == StatusCompleted || value == StatusArchived
+	return value == StatusActive || value == StatusPaused || value == StatusCompleted
 }
 
 func validRunResult(value RunResult) bool {

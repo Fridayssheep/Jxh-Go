@@ -392,6 +392,24 @@ FROM group_join_requests WHERE flag = ?`, "join-flag-1").Scan(
 	assertManagerAuthCount(t, sqlDB, `SELECT
 (SELECT COUNT(*) FROM scheduled_jobs WHERE updated_by_type = 'admin_user' AND updated_by_role = 'super_admin') +
 (SELECT COUNT(*) FROM custom_commands WHERE updated_by_type = 'admin_user' AND updated_by_role = 'super_admin')`, 2)
+
+	if err := store.DeleteCommand(t.Context(), customcommand.DeleteMutation{
+		Context:   customcommand.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(7 * time.Minute)},
+		CommandID: command.ID, ExpectedRevision: command.Version,
+	}); err != nil {
+		t.Fatalf("delete custom command: %v", err)
+	}
+	if err := store.DeleteScheduledJob(t.Context(), scheduledjobs.DeleteMutation{
+		Context: scheduledjobs.MutationContext{Actor: principal, Request: request, OccurredAt: now.Add(8 * time.Minute)},
+		JobID:   job.ID, ExpectedRevision: job.Version,
+	}); err != nil {
+		t.Fatalf("delete scheduled job: %v", err)
+	}
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM custom_commands WHERE command_id = '"+command.ID+"'", 0)
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM custom_command_runs WHERE command_id = '"+command.ID+"'", 0)
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM scheduled_jobs WHERE id = "+job.ID, 0)
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM scheduled_job_runs WHERE job_id = "+job.ID, 0)
+	assertManagerAuthCount(t, sqlDB, "SELECT COUNT(*) FROM admin_audit_logs WHERE action IN ('scheduled_job.delete', 'custom_command.delete')", 2)
 }
 
 func TestManagerAuditWritersSanitizePayloadsBeforeMySQLPersistence(t *testing.T) {

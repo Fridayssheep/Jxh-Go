@@ -59,8 +59,8 @@ func TestCommandHandlersExerciseAllEightRoutes(t *testing.T) {
 	request.Header.Set("If-Match", `"4"`)
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || response.Body.Len() != 0 || service.archivedID != "cmd_1" {
-		t.Fatalf("archive status=%d id=%q body=%s", response.Code, service.archivedID, response.Body.String())
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 || service.deletedID != "cmd_1" {
+		t.Fatalf("delete status=%d id=%q body=%s", response.Code, service.deletedID, response.Body.String())
 	}
 
 	request = commandMutationRequest(t, http.MethodPost, "/api/admin/v1/commands/validate", `{"definition":`+validCommandDefinitionJSON+`,"sample":{"group_id":"123","sender_qq":"9988","sender_role":"member","message":"/hello hi"}}`)
@@ -267,7 +267,7 @@ type fakeCommandOperations struct {
 	runQuery    customcommand.RunListQuery
 	draftSample customcommand.ValidationSample
 	revision    uint64
-	archivedID  string
+	deletedID   string
 	validatedID string
 }
 
@@ -294,9 +294,9 @@ func (s *fakeCommandOperations) Update(_ context.Context, _ auth.Principal, _ st
 	return s.command, s.err
 }
 
-func (s *fakeCommandOperations) Archive(_ context.Context, _ auth.Principal, id string, revision uint64, _ auth.MutationContext) error {
+func (s *fakeCommandOperations) Delete(_ context.Context, _ auth.Principal, id string, revision uint64, _ auth.MutationContext) error {
 	s.calls++
-	s.archivedID, s.revision = id, revision
+	s.deletedID, s.revision = id, revision
 	return s.err
 }
 

@@ -86,11 +86,11 @@ func TestAnalyticsTimeseriesAndRankingsHTTPParseLimits(t *testing.T) {
 	}
 
 	request = scheduledReadRequest(http.MethodGet,
-		"/api/admin/v1/analytics/rankings?dimension=group&metric=group_message_count&limit=25")
+		"/api/admin/v1/analytics/rankings?dimension=group&metric=group_message_count&page=3&limit=25")
 	response = httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || service.rankingsQuery.Limit != 25 || service.rankingsQuery.Dimension != analytics.DimensionGroup ||
-		!strings.Contains(response.Body.String(), `"rank":1`) {
+	if response.Code != http.StatusOK || service.rankingsQuery.Page != 3 || service.rankingsQuery.Limit != 25 || service.rankingsQuery.Dimension != analytics.DimensionGroup ||
+		!strings.Contains(response.Body.String(), `"rank":1`) || !strings.Contains(response.Body.String(), `"total_count":`) {
 		t.Fatalf("status=%d query=%+v body=%s", response.Code, service.rankingsQuery, response.Body.String())
 	}
 }
@@ -132,6 +132,7 @@ func TestAnalyticsHTTPRejectsInvalidQueriesBeforeService(t *testing.T) {
 		"/api/admin/v1/analytics/timeseries?granularity=hour&metric=ai_request_count&metric=ai_request_count",
 		"/api/admin/v1/analytics/rankings?dimension=user&metric=active_user_count",
 		"/api/admin/v1/analytics/rankings?dimension=group&metric=group_message_count&limit=101",
+		"/api/admin/v1/analytics/rankings?dimension=group&metric=group_message_count&page=0",
 		"/api/admin/v1/analytics/export?dataset=timeseries&format=csv&metric=group_message_count",
 		"/api/admin/v1/analytics/export?dataset=summary&format=csv&metric=group_message_count",
 		"/api/admin/v1/analytics/export?dataset=summary&format=pdf",

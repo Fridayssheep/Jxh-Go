@@ -27,15 +27,19 @@ func TestRuntimeStoreListsFiltersAndPaginatesImmutableIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Items) != 1 || !first.HasMore || first.NextCursor == "" || !first.Items[0].HasConflict {
+	if len(first.Items) != 1 || first.TotalCount != 2 || !first.HasMore || first.NextCursor == "" || !first.Items[0].HasConflict {
 		t.Fatalf("first page=%+v", first)
 	}
 	second, err := store.ListEntries(t.Context(), EntryQuery{Category: "guide", Enabled: &flag, Cursor: first.NextCursor, Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.Items) != 1 || second.HasMore || second.Items[0].ID == first.Items[0].ID {
+	if len(second.Items) != 1 || second.TotalCount != 2 || second.HasMore || second.Items[0].ID == first.Items[0].ID {
 		t.Fatalf("second page=%+v", second)
+	}
+	directSecond, err := store.ListEntries(t.Context(), EntryQuery{Category: "guide", Enabled: &flag, Page: 2, Limit: 1})
+	if err != nil || directSecond.TotalCount != 2 || len(directSecond.Items) != 1 || directSecond.Items[0].ID != second.Items[0].ID {
+		t.Fatalf("direct second page=%+v error=%v", directSecond, err)
 	}
 	if _, err := store.ListEntries(t.Context(), EntryQuery{Category: "life", Cursor: first.NextCursor, Limit: 1}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("reused cursor error=%v", err)
@@ -67,7 +71,7 @@ func TestRuntimeStoreExposesConflictsAndSafeStatus(t *testing.T) {
 		t.Fatalf("status=%+v error=%v", status, err)
 	}
 	page, err := store.ListConflicts(t.Context(), ConflictQuery{Type: ConflictAlias, Limit: 50})
-	if err != nil || len(page.Items) != 1 || len(page.Items[0].EntryIDs) != 2 || page.Items[0].Key != "same" {
+	if err != nil || page.TotalCount != 1 || len(page.Items) != 1 || len(page.Items[0].EntryIDs) != 2 || page.Items[0].Key != "same" {
 		t.Fatalf("conflicts=%+v error=%v", page, err)
 	}
 }

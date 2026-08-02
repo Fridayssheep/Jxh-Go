@@ -140,15 +140,28 @@ func (s *RuntimeStore) ListEntries(_ context.Context, query EntryQuery) (EntryPa
 		}
 	}
 	sort.Slice(items, func(left, right int) bool { return items[left].ID < items[right].ID })
-	offset, err := decodeCursor(query.Cursor, entryQueryFingerprint(query))
-	if err != nil || offset > len(items) {
+	pageNumber := query.Page
+	if pageNumber < 1 {
+		pageNumber = 1
+	}
+	offset := (pageNumber - 1) * query.Limit
+	var err error
+	if query.Cursor != "" {
+		offset, err = decodeCursor(query.Cursor, entryQueryFingerprint(query))
+	}
+	if err != nil {
 		return EntryPage{}, ErrInvalidInput
+	}
+	if offset > len(items) {
+		offset = len(items)
 	}
 	end := offset + query.Limit
 	if end > len(items) {
 		end = len(items)
 	}
-	page := EntryPage{Items: append([]EntrySummary(nil), items[offset:end]...), HasMore: end < len(items)}
+	page := EntryPage{
+		Items: append([]EntrySummary(nil), items[offset:end]...), HasMore: end < len(items), TotalCount: len(items),
+	}
 	if page.HasMore {
 		page.NextCursor = encodeCursor(end, entryQueryFingerprint(query))
 	}
@@ -180,15 +193,29 @@ func (s *RuntimeStore) ListConflicts(_ context.Context, query ConflictQuery) (Co
 		filtered = append(filtered, conflict)
 	}
 	sort.Slice(filtered, func(left, right int) bool { return filtered[left].ID < filtered[right].ID })
-	offset, err := decodeCursor(query.Cursor, conflictQueryFingerprint(query))
-	if err != nil || offset > len(filtered) {
+	pageNumber := query.Page
+	if pageNumber < 1 {
+		pageNumber = 1
+	}
+	offset := (pageNumber - 1) * query.Limit
+	var err error
+	if query.Cursor != "" {
+		offset, err = decodeCursor(query.Cursor, conflictQueryFingerprint(query))
+	}
+	if err != nil {
 		return ConflictPage{}, ErrInvalidInput
+	}
+	if offset > len(filtered) {
+		offset = len(filtered)
 	}
 	end := offset + query.Limit
 	if end > len(filtered) {
 		end = len(filtered)
 	}
-	page := ConflictPage{Items: cloneConflictPage(ConflictPage{Items: filtered[offset:end]}).Items, HasMore: end < len(filtered)}
+	page := ConflictPage{
+		Items:   cloneConflictPage(ConflictPage{Items: filtered[offset:end]}).Items,
+		HasMore: end < len(filtered), TotalCount: len(filtered),
+	}
 	if page.HasMore {
 		page.NextCursor = encodeCursor(end, conflictQueryFingerprint(query))
 	}

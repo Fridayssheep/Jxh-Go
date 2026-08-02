@@ -108,6 +108,7 @@ type EntryQuery struct {
 	AIEnabled   *bool
 	HasConflict *bool
 	Cursor      string
+	Page        int
 	Limit       int
 }
 
@@ -115,6 +116,7 @@ type EntryPage struct {
 	Items      []EntrySummary
 	NextCursor string
 	HasMore    bool
+	TotalCount int
 }
 
 type ConflictType string
@@ -137,6 +139,7 @@ type ConflictQuery struct {
 	Query  string
 	Type   ConflictType
 	Cursor string
+	Page   int
 	Limit  int
 }
 
@@ -144,6 +147,7 @@ type ConflictPage struct {
 	Items      []Conflict
 	NextCursor string
 	HasMore    bool
+	TotalCount int
 }
 
 type Store interface {

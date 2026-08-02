@@ -455,11 +455,11 @@ func TestApplicantValidationUsesSafeIntersectionAndOriginalMessage(t *testing.T)
 func TestListComputesOverdueAndPolicyUpdateUsesRevision(t *testing.T) {
 	request := joinRequestFixture("flag_1", DecisionPending, 1)
 	request.RequestedAt = joinTestTime.Add(-25 * time.Hour)
-	store := &joinStoreFake{requestPage: Page[Request]{Items: []Request{request}}, policy: joinPolicyFixture(), policyFound: true}
+	store := &joinStoreFake{requestPage: Page[Request]{Items: []Request{request}, TotalCount: 11}, policy: joinPolicyFixture(), policyFound: true}
 	service := newJoinService(t, store, &joinApproverFake{available: true})
 	overdue := true
-	page, err := service.List(t.Context(), joinMaintainer(), ListQuery{Overdue: &overdue})
-	if err != nil || !page.Items[0].Overdue || store.listQuery.OverdueBefore == nil {
+	page, err := service.List(t.Context(), joinMaintainer(), ListQuery{Overdue: &overdue, Page: 2})
+	if err != nil || !page.Items[0].Overdue || page.TotalCount != 11 || store.listQuery.OverdueBefore == nil || store.listQuery.Page != 2 {
 		t.Fatalf("page=%+v query=%+v error=%v", page, store.listQuery, err)
 	}
 

@@ -97,7 +97,7 @@ func (h *KnowledgeHandlers) listEntries(w http.ResponseWriter, r *http.Request) 
 		items[index] = mapKnowledgeEntrySummary(page.Items[index])
 	}
 	writeJSON(w, http.StatusOK, knowledgeEntryListDTO{
-		Items: items, NextCursor: nullableString(page.NextCursor), HasMore: page.HasMore,
+		Items: items, NextCursor: nullableString(page.NextCursor), HasMore: page.HasMore, TotalCount: page.TotalCount,
 	})
 }
 
@@ -133,7 +133,7 @@ func (h *KnowledgeHandlers) listConflicts(w http.ResponseWriter, r *http.Request
 		items[index] = mapKnowledgeConflict(page.Items[index])
 	}
 	writeJSON(w, http.StatusOK, knowledgeConflictListDTO{
-		Items: items, NextCursor: nullableString(page.NextCursor), HasMore: page.HasMore,
+		Items: items, NextCursor: nullableString(page.NextCursor), HasMore: page.HasMore, TotalCount: page.TotalCount,
 	})
 }
 
@@ -158,7 +158,7 @@ func (h *KnowledgeHandlers) writeServiceError(w http.ResponseWriter, r *http.Req
 }
 
 func parseKnowledgeEntryQuery(values url.Values) (knowledgeadmin.EntryQuery, error) {
-	if !validSingleQueryKeys(values, "query", "category", "entry_type", "enabled", "exact_reply", "ai_enabled", "has_conflict", "cursor", "limit") {
+	if !validSingleQueryKeys(values, "query", "category", "entry_type", "enabled", "exact_reply", "ai_enabled", "has_conflict", "page", "cursor", "limit") {
 		return knowledgeadmin.EntryQuery{}, knowledgeadmin.ErrInvalidInput
 	}
 	if !validQueryText(values.Get("query"), 200) || !validQueryText(values.Get("category"), 100) || !validQueryText(values.Get("cursor"), 2048) {
@@ -171,6 +171,13 @@ func parseKnowledgeEntryQuery(values url.Values) (knowledgeadmin.EntryQuery, err
 	limit, err := parseKnowledgeLimit(values)
 	if err != nil {
 		return knowledgeadmin.EntryQuery{}, err
+	}
+	page, err := ParsePage(values.Get("page"))
+	if err != nil {
+		return knowledgeadmin.EntryQuery{}, err
+	}
+	if page > 1 && values.Get("cursor") != "" {
+		return knowledgeadmin.EntryQuery{}, knowledgeadmin.ErrInvalidInput
 	}
 	enabled, err := parseOptionalKnowledgeBool(values, "enabled")
 	if err != nil {
@@ -191,12 +198,12 @@ func parseKnowledgeEntryQuery(values url.Values) (knowledgeadmin.EntryQuery, err
 	return knowledgeadmin.EntryQuery{
 		Query: values.Get("query"), Category: values.Get("category"), Type: entryType,
 		Enabled: enabled, ExactReply: exactReply, AIEnabled: aiEnabled, HasConflict: hasConflict,
-		Cursor: values.Get("cursor"), Limit: limit,
+		Cursor: values.Get("cursor"), Page: page, Limit: limit,
 	}, nil
 }
 
 func parseKnowledgeConflictQuery(values url.Values) (knowledgeadmin.ConflictQuery, error) {
-	if !validSingleQueryKeys(values, "query", "conflict_type", "cursor", "limit") ||
+	if !validSingleQueryKeys(values, "query", "conflict_type", "page", "cursor", "limit") ||
 		!validQueryText(values.Get("query"), 200) || !validQueryText(values.Get("cursor"), 2048) {
 		return knowledgeadmin.ConflictQuery{}, knowledgeadmin.ErrInvalidInput
 	}
@@ -208,8 +215,15 @@ func parseKnowledgeConflictQuery(values url.Values) (knowledgeadmin.ConflictQuer
 	if err != nil {
 		return knowledgeadmin.ConflictQuery{}, err
 	}
+	page, err := ParsePage(values.Get("page"))
+	if err != nil {
+		return knowledgeadmin.ConflictQuery{}, err
+	}
+	if page > 1 && values.Get("cursor") != "" {
+		return knowledgeadmin.ConflictQuery{}, knowledgeadmin.ErrInvalidInput
+	}
 	return knowledgeadmin.ConflictQuery{
-		Query: values.Get("query"), Type: conflictType, Cursor: values.Get("cursor"), Limit: limit,
+		Query: values.Get("query"), Type: conflictType, Cursor: values.Get("cursor"), Page: page, Limit: limit,
 	}, nil
 }
 
@@ -301,6 +315,7 @@ type knowledgeEntryListDTO struct {
 	Items      []knowledgeEntrySummaryDTO `json:"items"`
 	NextCursor *string                    `json:"next_cursor"`
 	HasMore    bool                       `json:"has_more"`
+	TotalCount int                        `json:"total_count"`
 }
 
 type knowledgeConflictDTO struct {
@@ -315,6 +330,7 @@ type knowledgeConflictListDTO struct {
 	Items      []knowledgeConflictDTO `json:"items"`
 	NextCursor *string                `json:"next_cursor"`
 	HasMore    bool                   `json:"has_more"`
+	TotalCount int                    `json:"total_count"`
 }
 
 func mapKnowledgeOperation(value knowledgeadmin.ReloadOperation) knowledgeReloadOperationDTO {

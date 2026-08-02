@@ -127,16 +127,17 @@ func TestAnalyticsTimeseriesValidatesGranularityMetricsAndRange(t *testing.T) {
 func TestAnalyticsRankingsApplyDefaultLimitAndStableRanks(t *testing.T) {
 	store := &analyticsStoreFake{rankings: RankingsData{
 		Items:       []RankingValue{{Key: "00123", DisplayName: "Group A", Value: 9}, {Key: "00456", DisplayName: "Group B", Value: 7}},
+		TotalCount:  42,
 		DataFreshAt: analyticsTestTime(11),
 	}}
 	service := newAnalyticsService(t, store)
 	value, err := service.Rankings(t.Context(), analyticsObserver(), RankingsQuery{
-		Dimension: DimensionGroup, Metric: MetricGroupMessageCount,
+		Dimension: DimensionGroup, Metric: MetricGroupMessageCount, Page: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.rankingsQuery.Limit != 20 || len(value.Items) != 2 || value.Items[0].Rank != 1 || value.Items[1].Rank != 2 || value.Unit != UnitCount {
+	if store.rankingsQuery.Limit != 20 || store.rankingsQuery.Page != 2 || value.TotalCount != 42 || len(value.Items) != 2 || value.Items[0].Rank != 21 || value.Items[1].Rank != 22 || value.Unit != UnitCount {
 		t.Fatalf("value=%+v query=%+v", value, store.rankingsQuery)
 	}
 	if _, err := service.Rankings(t.Context(), analyticsObserver(), RankingsQuery{
@@ -153,7 +154,7 @@ func TestAnalyticsRankingsApplyDefaultLimitAndStableRanks(t *testing.T) {
 		t.Fatalf("knowledge retention range error=%v", err)
 	}
 	store.rankings = RankingsData{
-		Items: []RankingValue{{Key: "b", Value: 1}, {Key: "a", Value: 2}}, DataFreshAt: analyticsTestTime(11),
+		Items: []RankingValue{{Key: "b", Value: 1}, {Key: "a", Value: 2}}, TotalCount: 2, DataFreshAt: analyticsTestTime(11),
 	}
 	if _, err := service.Rankings(t.Context(), analyticsObserver(), RankingsQuery{
 		Dimension: DimensionGroup, Metric: MetricGroupMessageCount,
@@ -214,6 +215,7 @@ func TestAnalyticsCSVExportStreamsSafeJoinRequestFieldsAndTimezone(t *testing.T)
 func TestAnalyticsXLSXExportUsesStreamingWriterAndEscapesFormulaCells(t *testing.T) {
 	store := &analyticsStoreFake{rankings: RankingsData{
 		Items:       []RankingValue{{Key: "command_1", DisplayName: "=HYPERLINK(\"bad\")", Value: 3}},
+		TotalCount:  1,
 		DataFreshAt: analyticsTestTime(11),
 	}}
 	service := newAnalyticsService(t, store)

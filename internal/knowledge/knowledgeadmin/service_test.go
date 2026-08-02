@@ -265,14 +265,14 @@ func TestKnowledgeReadQueriesValidateAndReturnIndependentPages(t *testing.T) {
 		entryPage: EntryPage{Items: []EntrySummary{{
 			ID: "entry_1", Title: "Title", Category: "FAQ", Type: EntryTypeHybrid,
 			Keywords: []string{"one"}, Aliases: []string{"alias"}, SourceUpdatedAt: &updated, IndexedAt: updated,
-		}}, NextCursor: "cursor_2", HasMore: true},
+		}}, NextCursor: "cursor_2", HasMore: true, TotalCount: 2},
 		entry: Entry{
 			ID: "entry_1", SourceKey: "source-1", Title: "Title", Category: "FAQ", Type: EntryTypeHybrid,
 			Keywords: []string{"one"}, Aliases: []string{"alias"}, Question: "Q", Answer: "A", IndexedAt: updated,
 		},
 		conflictPage: ConflictPage{Items: []Conflict{{
 			ID: "conflict_1", Type: ConflictKeyword, Key: "one", EntryIDs: []string{"entry_1", "entry_2"}, DetectedAt: updated,
-		}}},
+		}}, TotalCount: 1},
 	}
 	service := newKnowledgeService(t, store, nil)
 	principal := knowledgeObserver()

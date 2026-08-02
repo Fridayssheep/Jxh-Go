@@ -45,6 +45,20 @@ func TestParseLimitUsesContractBounds(t *testing.T) {
 	}
 }
 
+func TestParsePageUsesContractBounds(t *testing.T) {
+	for raw, want := range map[string]int{"": 1, "1": 1, "100000": 100_000} {
+		got, err := ParsePage(raw)
+		if err != nil || got != want {
+			t.Fatalf("ParsePage(%q) = %d, %v; want %d", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"0", "100001", "-1", "1.5", " 2"} {
+		if _, err := ParsePage(raw); !errors.Is(err, ErrInvalidPage) {
+			t.Fatalf("ParsePage(%q) error = %v, want ErrInvalidPage", raw, err)
+		}
+	}
+}
+
 func TestParseIdempotencyKeyMatchesOpenAPIPattern(t *testing.T) {
 	key, err := ParseIdempotencyKey("retry-key_1:attempt.2")
 	if err != nil || key != "retry-key_1:attempt.2" {

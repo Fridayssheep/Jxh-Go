@@ -136,7 +136,9 @@ func (h *JoinRequestHandlers) list(w http.ResponseWriter, r *http.Request) {
 	for index := range page.Items {
 		items[index] = mapJoinRequestSummary(page.Items[index])
 	}
-	writeJSON(w, http.StatusOK, joinRequestListDTO{Items: items, NextCursor: nullableString(page.NextCursor), HasMore: page.HasMore})
+	writeJSON(w, http.StatusOK, joinRequestListDTO{
+		Items: items, NextCursor: nullableString(page.NextCursor), HasMore: page.HasMore, TotalCount: page.TotalCount,
+	})
 }
 
 func (h *JoinRequestHandlers) get(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +282,7 @@ func parseJoinRequestListQuery(values url.Values) (joinrequests.ListQuery, error
 	allowed := map[string]bool{
 		"group_id": true, "decision_status": true, "observed_status": true, "ai_parse_status": true,
 		"sub_type": true, "source": true, "decision_source": true, "requested_from": true, "requested_to": true,
-		"overdue": true, "query": true, "sort": true, "cursor": true, "limit": true,
+		"overdue": true, "query": true, "sort": true, "page": true, "cursor": true, "limit": true,
 	}
 	for key, entries := range values {
 		if !allowed[key] || len(entries) == 0 || key != "decision_status" && len(entries) != 1 {
@@ -291,11 +293,18 @@ func parseJoinRequestListQuery(values url.Values) (joinrequests.ListQuery, error
 	if err != nil {
 		return joinrequests.ListQuery{}, err
 	}
+	page, err := ParsePage(values.Get("page"))
+	if err != nil {
+		return joinrequests.ListQuery{}, err
+	}
+	if page > 1 && values.Get("cursor") != "" {
+		return joinrequests.ListQuery{}, joinrequests.ErrInvalidInput
+	}
 	query := joinrequests.ListQuery{
 		GroupID: values.Get("group_id"), ObservedStatus: joinrequests.ObservedStatus(values.Get("observed_status")),
 		AIParseStatus: joinrequests.AIParseStatus(values.Get("ai_parse_status")), SubType: joinrequests.SubType(values.Get("sub_type")),
 		Source: joinrequests.RequestSource(values.Get("source")), DecisionSource: joinrequests.DecisionSource(values.Get("decision_source")),
-		Query: values.Get("query"), Sort: joinrequests.Sort(values.Get("sort")), Cursor: values.Get("cursor"), Limit: limit,
+		Query: values.Get("query"), Sort: joinrequests.Sort(values.Get("sort")), Cursor: values.Get("cursor"), Page: page, Limit: limit,
 	}
 	if query.Sort == "" {
 		query.Sort = joinrequests.SortRequestedDesc
@@ -457,6 +466,7 @@ type joinRequestListDTO struct {
 	Items      []joinRequestSummaryDTO `json:"items"`
 	NextCursor *string                 `json:"next_cursor"`
 	HasMore    bool                    `json:"has_more"`
+	TotalCount int                     `json:"total_count"`
 }
 
 type joinDecisionDTO struct {

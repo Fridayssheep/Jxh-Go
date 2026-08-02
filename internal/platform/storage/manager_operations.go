@@ -797,6 +797,10 @@ func (s *Store) ListRequests(ctx context.Context, query joinrequests.ListQuery) 
 		db = db.Where(`request.flag LIKE ? ESCAPE '\\' OR CAST(request.user_id AS CHAR) LIKE ? ESCAPE '\\'
 OR COALESCE(request.applicant_nickname, '') LIKE ? ESCAPE '\\'`, pattern, pattern, pattern)
 	}
+	var totalCount int64
+	if err := db.Distinct("request.id").Count(&totalCount).Error; err != nil {
+		return joinrequests.Page[joinrequests.Request]{}, err
+	}
 	direction, comparator := "DESC", "<"
 	if query.Sort == joinrequests.SortRequestedAsc {
 		direction, comparator = "ASC", ">"
@@ -812,6 +816,8 @@ OR COALESCE(request.applicant_nickname, '') LIKE ? ESCAPE '\\'`, pattern, patter
 		}
 		at := time.UnixMilli(cursor.Millis).UTC()
 		db = db.Where(fmt.Sprintf("(request.requested_at %s ? OR (request.requested_at = ? AND request.id %s ?))", comparator, comparator), at, at, internalID)
+	} else if query.Page > 1 {
+		db = db.Offset((query.Page - 1) * query.Limit)
 	}
 	var rows []joinRequestManagerRow
 	if err := db.Order("request.requested_at " + direction).Order("request.id " + direction).Limit(query.Limit + 1).Scan(&rows).Error; err != nil {
@@ -836,7 +842,9 @@ OR COALESCE(request.applicant_nickname, '') LIKE ? ESCAPE '\\'`, pattern, patter
 	if hasMore && len(rows) > 0 && rows[len(rows)-1].RequestedAt != nil {
 		next = encodeManagerCursor(*rows[len(rows)-1].RequestedAt, strconv.FormatUint(rows[len(rows)-1].InternalID, 10))
 	}
-	return joinrequests.Page[joinrequests.Request]{Items: items, NextCursor: next, HasMore: hasMore}, nil
+	return joinrequests.Page[joinrequests.Request]{
+		Items: items, NextCursor: next, HasMore: hasMore, TotalCount: int(totalCount),
+	}, nil
 }
 
 func (s *Store) GetRequest(ctx context.Context, requestID string) (joinrequests.Request, bool, error) {
@@ -3154,10 +3162,22 @@ func (s *Store) LoadRankings(ctx context.Context, query analytics.StoreRankingsQ
 		}
 		return items[i].Key < items[j].Key
 	})
-	if len(items) > query.Limit {
-		items = items[:query.Limit]
+	totalCount := len(items)
+	pageNumber := query.Page
+	if pageNumber < 1 {
+		pageNumber = 1
 	}
-	return analytics.RankingsData{Items: items, DataFreshAt: analyticsCombinedFreshAt(events, daily)}, nil
+	start := (pageNumber - 1) * query.Limit
+	if start > len(items) {
+		start = len(items)
+	}
+	end := start + query.Limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return analytics.RankingsData{
+		Items: items[start:end], TotalCount: totalCount, DataFreshAt: analyticsCombinedFreshAt(events, daily),
+	}, nil
 }
 
 func (s *Store) loadAnalyticsDailyGroupRankings(ctx context.Context, query analytics.StoreRankingsQuery) ([]telemetryDailyManagerRow, map[string]struct{}, error) {

@@ -422,9 +422,9 @@ FROM group_join_requests WHERE flag = ?`, "join-flag-1").Scan(
 		t.Fatalf("load analytics summary: summary=%+v error=%v", summary, err)
 	}
 	rankings, err := store.LoadRankings(t.Context(), analytics.StoreRankingsQuery{
-		Filter: filter, Dimension: analytics.DimensionGroup, Metric: analytics.MetricGroupMessageCount, Limit: 10,
+		Filter: filter, Dimension: analytics.DimensionGroup, Metric: analytics.MetricGroupMessageCount, Page: 1, Limit: 10,
 	})
-	if err != nil || len(rankings.Items) != 1 || rankings.Items[0].Key != "10001" || rankings.Items[0].Value != 1 {
+	if err != nil || rankings.TotalCount != 1 || len(rankings.Items) != 1 || rankings.Items[0].Key != "10001" || rankings.Items[0].Value != 1 {
 		t.Fatalf("load analytics rankings: rankings=%+v error=%v", rankings, err)
 	}
 	timeseries, err := store.LoadTimeseries(t.Context(), analytics.StoreTimeseriesQuery{

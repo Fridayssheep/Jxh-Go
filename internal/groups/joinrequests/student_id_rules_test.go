@@ -19,7 +19,7 @@ func TestServiceReloadsRuleAndAssessesListAndDetail(t *testing.T) {
 	request.AIParse.Fields.Major = &major
 	store := &joinStoreFake{
 		studentIDRule: rule, studentIDRuleFound: true,
-		requestPage: Page[Request]{Items: []Request{request}}, request: request, requestFound: true,
+		requestPage: Page[Request]{Items: []Request{request}, TotalCount: 1}, request: request, requestFound: true,
 	}
 	service := newJoinService(t, store, &joinApproverFake{available: true})
 	if err := service.ReloadStudentIDRule(t.Context()); err != nil {

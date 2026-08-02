@@ -212,6 +212,7 @@ type ListQuery struct {
 	Query            string
 	Sort             Sort
 	Cursor           string
+	Page             int
 	Limit            int
 }
 
@@ -225,6 +226,7 @@ type Page[T any] struct {
 	Items      []T
 	NextCursor string
 	HasMore    bool
+	TotalCount int
 }
 
 type MutationContext struct {

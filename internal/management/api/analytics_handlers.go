@@ -175,7 +175,7 @@ func parseAnalyticsTimeseriesQuery(values url.Values) (analytics.TimeseriesQuery
 }
 
 func parseAnalyticsRankingsQuery(values url.Values) (analytics.RankingsQuery, error) {
-	if !validAnalyticsQueryKeys(values, map[string]bool{"dimension": true, "metric": true, "limit": true}, nil) {
+	if !validAnalyticsQueryKeys(values, map[string]bool{"dimension": true, "metric": true, "page": true, "limit": true}, nil) {
 		return analytics.RankingsQuery{}, analytics.ErrInvalidInput
 	}
 	base, err := parseAnalyticsBaseQuery(values)
@@ -195,7 +195,11 @@ func parseAnalyticsRankingsQuery(values url.Values) (analytics.RankingsQuery, er
 		}
 		limit = parsed
 	}
-	return analytics.RankingsQuery{Query: base, Dimension: dimension, Metric: metric, Limit: limit}, nil
+	page, err := ParsePage(values.Get("page"))
+	if err != nil {
+		return analytics.RankingsQuery{}, analytics.ErrInvalidInput
+	}
+	return analytics.RankingsQuery{Query: base, Dimension: dimension, Metric: metric, Page: page, Limit: limit}, nil
 }
 
 func parseAnalyticsExportQuery(values url.Values) (analytics.ExportQuery, error) {
@@ -432,6 +436,7 @@ type analyticsRankingsDTO struct {
 	Metric      analytics.MetricKey       `json:"metric"`
 	Unit        analytics.Unit            `json:"unit"`
 	Items       []analyticsRankingItemDTO `json:"items"`
+	TotalCount  int                       `json:"total_count"`
 	DataFreshAt time.Time                 `json:"data_fresh_at"`
 }
 
@@ -471,6 +476,6 @@ func mapAnalyticsRankings(value analytics.Rankings) analyticsRankingsDTO {
 	}
 	return analyticsRankingsDTO{
 		Window: mapAnalyticsWindow(value.Window), Dimension: value.Dimension, Metric: value.Metric, Unit: value.Unit,
-		Items: items, DataFreshAt: value.DataFreshAt.UTC(),
+		Items: items, TotalCount: value.TotalCount, DataFreshAt: value.DataFreshAt.UTC(),
 	}
 }

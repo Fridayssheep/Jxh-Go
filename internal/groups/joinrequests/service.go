@@ -262,6 +262,9 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, query List
 	if query.Limit == 0 {
 		query.Limit = 50
 	}
+	if query.Page == 0 {
+		query.Page = 1
+	}
 	if query.Overdue != nil {
 		cutoff := s.now().UTC().Add(-s.overdueAfter)
 		query.OverdueBefore = &cutoff
@@ -272,6 +275,9 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, query List
 	page, err := s.store.ListRequests(ctx, cloneListQuery(query))
 	if err != nil {
 		return Page[Request]{}, fmt.Errorf("list join requests: %w", err)
+	}
+	if page.TotalCount < len(page.Items) {
+		return Page[Request]{}, ErrInvalidData
 	}
 	rule := s.studentIDRuleSnapshot()
 	items := make([]Request, len(page.Items))
@@ -284,7 +290,7 @@ func (s *Service) List(ctx context.Context, principal auth.Principal, query List
 	if page.NextCursor != "" && !validIdentifier(page.NextCursor, 256) {
 		return Page[Request]{}, ErrInvalidData
 	}
-	return Page[Request]{Items: items, NextCursor: page.NextCursor, HasMore: page.HasMore}, nil
+	return Page[Request]{Items: items, NextCursor: page.NextCursor, HasMore: page.HasMore, TotalCount: page.TotalCount}, nil
 }
 
 func (s *Service) Get(ctx context.Context, principal auth.Principal, requestID string) (Request, error) {

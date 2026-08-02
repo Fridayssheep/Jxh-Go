@@ -151,16 +151,20 @@ func (s *Service) Rankings(ctx context.Context, principal auth.Principal, query 
 	if query.Limit == 0 {
 		query.Limit = defaultRankLimit
 	}
-	if !validDimension(query.Dimension) || !validMetric(query.Metric) || query.Limit < 1 || query.Limit > maximumRankLimit ||
+	if query.Page == 0 {
+		query.Page = 1
+	}
+	if !validDimension(query.Dimension) || !validMetric(query.Metric) || query.Page < 1 || query.Page > 100_000 ||
+		query.Limit < 1 || query.Limit > maximumRankLimit ||
 		(query.Dimension == DimensionKnowledgeEntry && exceedsLocalDays(filter, location, maximumKnowledgeRankingDays)) {
 		return Rankings{}, ErrInvalidInput
 	}
-	return s.rankings(ctx, filter, query.Dimension, query.Metric, query.Limit)
+	return s.rankings(ctx, filter, query.Dimension, query.Metric, query.Page, query.Limit)
 }
 
-func (s *Service) rankings(ctx context.Context, filter Filter, dimension Dimension, metric MetricKey, limit int) (Rankings, error) {
+func (s *Service) rankings(ctx context.Context, filter Filter, dimension Dimension, metric MetricKey, page, limit int) (Rankings, error) {
 	data, err := s.store.LoadRankings(ctx, StoreRankingsQuery{
-		Filter: cloneFilter(filter), Dimension: dimension, Metric: metric, Limit: limit,
+		Filter: cloneFilter(filter), Dimension: dimension, Metric: metric, Page: page, Limit: limit,
 		KnowledgeResolver: s.knowledgeResolver,
 	})
 	if err != nil {
@@ -171,11 +175,13 @@ func (s *Service) rankings(ctx context.Context, filter Filter, dimension Dimensi
 	}
 	items := make([]RankingItem, len(data.Items))
 	for index, item := range data.Items {
-		items[index] = RankingItem{Key: item.Key, DisplayName: item.DisplayName, Value: item.Value, Rank: index + 1}
+		items[index] = RankingItem{
+			Key: item.Key, DisplayName: item.DisplayName, Value: item.Value, Rank: (page-1)*limit + index + 1,
+		}
 	}
 	return Rankings{
 		Window: windowFromFilter(filter), Dimension: dimension, Metric: metric, Unit: metricCatalog[metric].unit,
-		Items: items, DataFreshAt: data.DataFreshAt.UTC(),
+		Items: items, TotalCount: data.TotalCount, DataFreshAt: data.DataFreshAt.UTC(),
 	}, nil
 }
 
@@ -207,7 +213,7 @@ func (s *Service) PrepareExport(ctx context.Context, principal auth.Principal, q
 		}
 		source = timeseriesExportSource(value)
 	case DatasetRankings:
-		value, loadErr := s.rankings(ctx, filter, query.Dimension, query.Metric, MaxExportRows)
+		value, loadErr := s.rankings(ctx, filter, query.Dimension, query.Metric, 1, MaxExportRows)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -338,7 +344,7 @@ func validateTimeseriesData(data TimeseriesData, filter Filter, requested []Metr
 }
 
 func validateRankingsData(data RankingsData, limit int) error {
-	if !validDataTime(data.DataFreshAt) || len(data.Items) > limit {
+	if !validDataTime(data.DataFreshAt) || data.TotalCount < len(data.Items) || len(data.Items) > limit {
 		return ErrInvalidData
 	}
 	seen := make(map[string]struct{}, len(data.Items))

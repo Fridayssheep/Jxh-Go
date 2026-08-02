@@ -139,7 +139,8 @@ func validListQuery(value ListQuery) bool {
 		value.AIParseStatus != "" && !validAIParseStatus(value.AIParseStatus) ||
 		value.SubType != "" && !validSubType(value.SubType) || value.Source != "" && !validRequestSource(value.Source) ||
 		value.DecisionSource != "" && !validDecisionSource(value.DecisionSource) ||
-		value.Sort != SortRequestedDesc && value.Sort != SortRequestedAsc || value.Limit < 1 || value.Limit > 100 ||
+		value.Sort != SortRequestedDesc && value.Sort != SortRequestedAsc || value.Page < 1 || value.Page > 100_000 ||
+		value.Cursor != "" && value.Page > 1 || value.Limit < 1 || value.Limit > 100 ||
 		!validText(value.Query, 100, true) || !validIdentifier(value.Cursor, 256, true) ||
 		!validOptionalUTCTime(value.RequestedFrom) || !validOptionalUTCTime(value.RequestedTo) {
 		return false

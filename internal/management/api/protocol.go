@@ -12,6 +12,7 @@ import (
 var (
 	ErrInvalidIfMatch        = errors.New("invalid If-Match version")
 	ErrInvalidLimit          = errors.New("invalid pagination limit")
+	ErrInvalidPage           = errors.New("invalid pagination page")
 	ErrInvalidIdempotencyKey = errors.New("invalid idempotency key")
 	ErrInvalidTimestamp      = errors.New("invalid UTC timestamp")
 	ErrInvalidIdentifier     = errors.New("invalid opaque identifier")
@@ -55,6 +56,17 @@ func ParseLimit(value string) (int, error) {
 		return 0, ErrInvalidLimit
 	}
 	return limit, nil
+}
+
+func ParsePage(value string) (int, error) {
+	if value == "" {
+		return 1, nil
+	}
+	page, err := strconv.Atoi(value)
+	if err != nil || page < 1 || page > 100_000 {
+		return 0, ErrInvalidPage
+	}
+	return page, nil
 }
 
 func ParseIdempotencyKey(value string) (string, error) {

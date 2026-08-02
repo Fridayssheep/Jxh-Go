@@ -196,6 +196,7 @@ type RankingsQuery struct {
 	Query
 	Dimension Dimension
 	Metric    MetricKey
+	Page      int
 	Limit     int
 }
 
@@ -203,6 +204,7 @@ type StoreRankingsQuery struct {
 	Filter
 	Dimension         Dimension
 	Metric            MetricKey
+	Page              int
 	Limit             int
 	KnowledgeResolver KnowledgeKeyResolver
 }
@@ -219,6 +221,7 @@ type RankingValue struct {
 
 type RankingsData struct {
 	Items       []RankingValue
+	TotalCount  int
 	DataFreshAt time.Time
 }
 
@@ -235,6 +238,7 @@ type Rankings struct {
 	Metric      MetricKey
 	Unit        Unit
 	Items       []RankingItem
+	TotalCount  int
 	DataFreshAt time.Time
 }
 

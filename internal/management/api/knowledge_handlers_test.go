@@ -55,7 +55,7 @@ func TestKnowledgeEntriesHTTPParsesFiltersAndMapsSummary(t *testing.T) {
 			ID: "entry_1", Title: "How to apply", Category: "guide", Type: knowledgeadmin.EntryTypeHybrid,
 			Keywords: []string{"apply"}, Enabled: true, ExactReply: true, AIEnabled: true, HasConflict: true,
 			IndexedAt: indexedAt,
-		}}, NextCursor: "cursor_2", HasMore: true,
+		}}, NextCursor: "cursor_2", HasMore: true, TotalCount: 2,
 	}}
 	router := newKnowledgeHTTPFixture(t, service)
 	request := scheduledReadRequest(http.MethodGet,
@@ -75,7 +75,7 @@ func TestKnowledgeEntriesHTTPParsesFiltersAndMapsSummary(t *testing.T) {
 	body := response.Body.String()
 	for _, expected := range []string{
 		`"entry_id":"entry_1"`, `"entry_type":"hybrid"`, `"aliases":[]`, `"source_updated_at":null`,
-		`"next_cursor":"cursor_2"`, `"has_more":true`,
+		`"next_cursor":"cursor_2"`, `"has_more":true`, `"total_count":2`,
 	} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("body missing %s: %s", expected, body)
@@ -127,6 +127,7 @@ func TestKnowledgeHTTPRejectsInvalidQueriesBeforeService(t *testing.T) {
 		"/api/admin/v1/knowledge/entries?query=" + strings.Repeat("x", 201),
 		"/api/admin/v1/knowledge/conflicts?conflict_type=invalid",
 		"/api/admin/v1/knowledge/conflicts?cursor=" + strings.Repeat("x", 2049),
+		"/api/admin/v1/knowledge/entries?page=2&cursor=cursor_2",
 	}
 	for _, target := range targets {
 		request := scheduledReadRequest(http.MethodGet, target)

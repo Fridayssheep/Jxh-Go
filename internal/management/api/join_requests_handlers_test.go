@@ -132,18 +132,18 @@ func TestStudentIDRuleVersionConflictUsesVersionConflictCode(t *testing.T) {
 }
 
 func TestJoinRequestListParsesRepeatedStatusesAndReturnsSummary(t *testing.T) {
-	service := &joinRequestOperationsFake{requestPage: joinrequests.Page[joinrequests.Request]{Items: []joinrequests.Request{joinRequestHTTPFixture()}}}
+	service := &joinRequestOperationsFake{requestPage: joinrequests.Page[joinrequests.Request]{Items: []joinrequests.Request{joinRequestHTTPFixture()}, TotalCount: 11}}
 	router := newJoinRequestHTTPFixture(t, service)
-	target := "/api/admin/v1/join-requests?group_id=123&decision_status=pending&decision_status=unknown&observed_status=pending&ai_parse_status=succeeded&sub_type=add&source=event&decision_source=manual&overdue=true&sort=requested_at_asc&limit=25"
+	target := "/api/admin/v1/join-requests?group_id=123&decision_status=pending&decision_status=unknown&observed_status=pending&ai_parse_status=succeeded&sub_type=add&source=event&decision_source=manual&overdue=true&sort=requested_at_asc&page=2&limit=25"
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, joinRequestReadRequest(http.MethodGet, target))
-	if response.Code != http.StatusOK || service.listQuery.Limit != 25 || len(service.listQuery.DecisionStatuses) != 2 ||
+	if response.Code != http.StatusOK || service.listQuery.Page != 2 || service.listQuery.Limit != 25 || len(service.listQuery.DecisionStatuses) != 2 ||
 		service.listQuery.Overdue == nil || !*service.listQuery.Overdue {
 		t.Fatalf("status=%d query=%+v body=%s", response.Code, service.listQuery, response.Body.String())
 	}
 	body := response.Body.String()
 	if !strings.Contains(body, `"verification_message":"学号123456 姓名张三 专业计算机"`) ||
-		!strings.Contains(body, `"student_id_assessment":{"status":"warning","rule_version":3`) ||
+		!strings.Contains(body, `"student_id_assessment":{"status":"warning","rule_version":3`) || !strings.Contains(body, `"total_count":11`) ||
 		strings.Contains(body, `"comment"`) || strings.Contains(body, "raw_json") {
 		t.Fatalf("body=%s", body)
 	}
@@ -227,6 +227,7 @@ func TestJoinRequestHandlersRejectInvalidInputBeforeService(t *testing.T) {
 	}{
 		{method: http.MethodGet, target: "/api/admin/v1/join-requests?decision_status=invalid"},
 		{method: http.MethodGet, target: "/api/admin/v1/join-requests?limit=101"},
+		{method: http.MethodGet, target: "/api/admin/v1/join-requests?page=2&cursor=cursor_2"},
 		{method: http.MethodGet, target: "/api/admin/v1/join-requests?overdue=yes"},
 		{method: http.MethodPatch, target: "/api/admin/v1/groups/123/join-request-policy", body: `{}`, headers: map[string]string{"If-Match": `"1"`}},
 		{method: http.MethodPatch, target: "/api/admin/v1/join-request-rules/student-id", body: `{}`, headers: map[string]string{"If-Match": `"1"`}},

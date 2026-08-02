@@ -371,6 +371,9 @@ func (s *Service) ListConflicts(ctx context.Context, principal auth.Principal, q
 	if query.Limit == 0 {
 		query.Limit = defaultLimit
 	}
+	if query.Page == 0 {
+		query.Page = 1
+	}
 	if !validConflictQuery(query) {
 		return ConflictPage{}, ErrInvalidInput
 	}
@@ -442,15 +445,20 @@ func normalizeEntryQuery(query *EntryQuery) {
 	if query.Limit == 0 {
 		query.Limit = defaultLimit
 	}
+	if query.Page == 0 {
+		query.Page = 1
+	}
 }
 
 func validEntryQuery(query EntryQuery) bool {
 	return validText(query.Query, 200) && validText(query.Category, 100) && validOptionalEntryType(query.Type) &&
-		validCursor(query.Cursor) && query.Limit >= 1 && query.Limit <= 100
+		validCursor(query.Cursor) && query.Page >= 1 && query.Page <= 100_000 &&
+		(query.Cursor == "" || query.Page == 1) && query.Limit >= 1 && query.Limit <= 100
 }
 
 func validConflictQuery(query ConflictQuery) bool {
 	return validText(query.Query, 200) && validOptionalConflictType(query.Type) && validCursor(query.Cursor) &&
+		query.Page >= 1 && query.Page <= 100_000 && (query.Cursor == "" || query.Page == 1) &&
 		query.Limit >= 1 && query.Limit <= 100
 }
 
@@ -487,7 +495,7 @@ func validateReloadResult(result ReloadResult) error {
 }
 
 func validateEntryPage(page EntryPage) error {
-	if len(page.Items) > 100 || !validCursor(page.NextCursor) || (page.HasMore && page.NextCursor == "") {
+	if len(page.Items) > 100 || page.TotalCount < len(page.Items) || !validCursor(page.NextCursor) || (page.HasMore && page.NextCursor == "") {
 		return ErrInvalidData
 	}
 	for _, entry := range page.Items {
@@ -518,7 +526,7 @@ func validateEntry(entry Entry) error {
 }
 
 func validateConflictPage(page ConflictPage) error {
-	if len(page.Items) > 100 || !validCursor(page.NextCursor) || (page.HasMore && page.NextCursor == "") {
+	if len(page.Items) > 100 || page.TotalCount < len(page.Items) || !validCursor(page.NextCursor) || (page.HasMore && page.NextCursor == "") {
 		return ErrInvalidData
 	}
 	for _, conflict := range page.Items {

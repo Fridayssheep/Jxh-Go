@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -274,6 +275,7 @@ func (h *JoinRequestHandlers) writeServiceError(w http.ResponseWriter, r *http.R
 	case errors.Is(err, joinrequests.ErrExternalFailure):
 		writeAPIError(w, r, http.StatusBadGateway, "upstream_failure", "NapCat rejected the join request decision", nil, true)
 	default:
+		log.Printf("join request operation failed: request_id=%s: %v", RequestIDFromContext(r.Context()), err)
 		writeAPIError(w, r, http.StatusInternalServerError, CodeInternal, "internal server error", nil, false)
 	}
 }

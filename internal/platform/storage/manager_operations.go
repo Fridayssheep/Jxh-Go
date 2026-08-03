@@ -798,7 +798,8 @@ func (s *Store) ListRequests(ctx context.Context, query joinrequests.ListQuery) 
 OR COALESCE(request.applicant_nickname, '') LIKE ? ESCAPE '\\'`, pattern, pattern, pattern)
 	}
 	var totalCount int64
-	if err := db.Distinct("request.id").Count(&totalCount).Error; err != nil {
+	// Count mutates GORM's DISTINCT/SELECT clauses; keep those changes off the row query.
+	if err := db.Session(&gorm.Session{}).Distinct("request.id").Count(&totalCount).Error; err != nil {
 		return joinrequests.Page[joinrequests.Request]{}, err
 	}
 	direction, comparator := "DESC", "<"

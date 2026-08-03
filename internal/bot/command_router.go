@@ -176,7 +176,10 @@ func (r *GroupCommandRouter) handleQuote(ctx context.Context, msg GroupMessage, 
 		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
 		return sender.SendGroupText(ctx, msg.GroupID, "引用图生成失败，请稍后再试")
 	}
-	if err := sender.SendGroupMessage(ctx, msg.GroupID, message.ChainOf(message.Image("base64://"+image))); err != nil {
+	if err := sender.SendGroupMessage(ctx, msg.GroupID, message.ChainOf(
+		message.Reply(msg.MessageID),
+		message.Image("base64://"+image),
+	)); err != nil {
 		r.recordQuote(msg, telemetry.ResultFailed, time.Since(startedAt))
 		return err
 	}

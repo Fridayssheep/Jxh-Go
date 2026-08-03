@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zjutjh/jxh-go/internal/bot"
 	"github.com/zjutjh/jxh-go/internal/groups/joinrequests"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
@@ -421,7 +422,7 @@ func TestGatewayCapabilitiesHideSDKErrorDetails(t *testing.T) {
 			return err
 		}},
 		{name: "quote history", call: func() error {
-			_, err := gateway.GetQuoteMessages(context.Background(), 123, 456, 1)
+			_, err := gateway.GetQuoteMessages(context.Background(), 123, bot.ReplyRef{ID: 456}, 1)
 			return err
 		}},
 		{name: "image resolution", call: func() error {

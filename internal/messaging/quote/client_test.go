@@ -2,11 +2,32 @@ package quote
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/zjutjh/napcat-sdk/message"
 )
+
+func TestBuildPayloadExpandsNestedReplyObject(t *testing.T) {
+	input := MessageInput{
+		UserID: 2, Nickname: "当前用户", Message: message.ChainOf(message.Reply(101), message.Text("514")),
+		Reply: &MessageInput{
+			UserID: 1, Nickname: "更早用户", Message: message.ChainOf(message.Text("114")),
+		},
+	}
+	payload := BuildPayload(t.Context(), []MessageInput{input}, nil)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"user_id":2,"user_nickname":"当前用户","message":[{"type":"text","text":"514"}],"reply":{"user_nickname":"更早用户","message":[{"type":"text","text":"114"}]}}]`
+	if string(encoded) != want {
+		t.Fatalf("payload=%s want=%s", encoded, want)
+	}
+}
 
 func TestClientObservesPNGFallbackWithoutRawFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -169,17 +169,14 @@ func TestGroupCommandRouterRecordsQuotePNGFallback(t *testing.T) {
 	}}}
 	pipeline := NewPipeline(Options{Sender: sender, Quote: quote.NewClient(server.URL, server.Client()), Telemetry: recorder})
 	if err := pipeline.HandleGroupMessage(t.Context(), GroupMessage{
-		GroupID: 123, UserID: 456, MessageID: 77, Text: "/q", ReplyMessageID: 99,
+		GroupID: 123, UserID: 456, MessageID: 77, Text: "/q", Reply: ReplyRef{ID: 99},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(sender.messages) != 1 || len(sender.messages[0]) != 2 {
+	if len(sender.messages) != 1 || len(sender.messages[0]) != 1 {
 		t.Fatalf("quote messages=%+v", sender.messages)
 	}
-	if reply := sender.messages[0][0]; reply.Type != "reply" || reply.String("id") != "77" {
-		t.Fatalf("quote reply segment=%+v", reply)
-	}
-	if image := sender.messages[0][1]; image.Type != "image" || image.String("file") != "base64://png-image" {
+	if image := sender.messages[0][0]; image.Type != "image" || image.String("file") != "base64://png-image" {
 		t.Fatalf("quote image segment=%+v", image)
 	}
 	if sender.quoteGroupID != 123 || sender.quoteMessageID != 99 || sender.quoteCount != 1 {
@@ -397,12 +394,12 @@ func (*botSenderFake) SendGroupFlashFile(context.Context, int64, string, string)
 	return nil
 }
 
-func (s *botSenderFake) GetQuoteMessages(_ context.Context, groupID, messageID int64, count int) ([]QuotedMessage, error) {
+func (s *botSenderFake) GetQuoteMessages(_ context.Context, groupID int64, ref ReplyRef, count int) ([]QuotedMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.quoteReads++
 	s.quoteGroupID = groupID
-	s.quoteMessageID = messageID
+	s.quoteMessageID = ref.ID
 	s.quoteCount = count
 	return append([]QuotedMessage(nil), s.quoteMessages...), s.quoteErr
 }

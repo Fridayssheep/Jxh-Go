@@ -85,6 +85,9 @@ func validRequest(value Request, detail bool) bool {
 		value.Version == 0 || !validOptionalID(value.LastDecisionID, 256) {
 		return false
 	}
+	if value.AutomaticReview != nil && !validAutomaticReview(*value.AutomaticReview) {
+		return false
+	}
 	if !detail {
 		return true
 	}
@@ -118,7 +121,41 @@ func validDecision(value Decision) bool {
 		!validIdentifier(value.TraceID, 256) {
 		return false
 	}
-	return value.FieldSnapshot == nil || validAIParse(AIParseResult{Status: AIParseSucceeded, Fields: value.FieldSnapshot})
+	return (value.FieldSnapshot == nil || validAIParse(AIParseResult{Status: AIParseSucceeded, Fields: value.FieldSnapshot})) &&
+		(value.ReviewSnapshot == nil || validAutomaticReview(*value.ReviewSnapshot))
+}
+
+func validAutomaticReview(value AutomaticReview) bool {
+	if value.RuleVersion != AutoApprovalRuleVersion ||
+		value.Outcome != ReviewPassed && value.Outcome != ReviewRejected && value.Outcome != ReviewDependencyPending ||
+		value.StudentID.ExpectedLength != StudentIDLength || value.StudentID.ActualLength < 0 ||
+		!validText(value.StudentID.ExpectedYear, 4, false) || !validText(value.StudentID.EnrollmentYear, 4, true) ||
+		!validText(value.StudentID.MajorCode, 3, true) || !validText(value.ReasonCode, 100, false) ||
+		!validText(value.Reason, 500, false) || !validUTCTime(value.ReviewedAt) {
+		return false
+	}
+	if value.Roster.Status != RosterNotConfigured && value.Roster.Status != RosterMatched && value.Roster.Status != RosterNotFound &&
+		value.Roster.Status != RosterMajorMismatch && value.Roster.Status != RosterUnavailable {
+		return false
+	}
+	if value.Evidence != nil {
+		if !validText(value.Evidence.EnrollmentYear, 4, false) || !validText(value.Evidence.MajorCode, 3, false) {
+			return false
+		}
+		for _, item := range value.Evidence.MajorCounts {
+			if !validText(item.Major, 128, false) || item.Count == 0 {
+				return false
+			}
+		}
+	}
+	if value.Judgement != nil {
+		if value.Judgement.Decision != MajorCodeMatch && value.Judgement.Decision != MajorCodeMismatch && value.Judgement.Decision != MajorCodeUncertain ||
+			value.Judgement.Confidence != ConfidenceHigh && value.Judgement.Confidence != ConfidenceMedium && value.Judgement.Confidence != ConfidenceLow ||
+			!validText(value.Judgement.Reason, 500, false) {
+			return false
+		}
+	}
+	return true
 }
 
 func validListQuery(value ListQuery) bool {

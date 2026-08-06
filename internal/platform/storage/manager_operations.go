@@ -98,6 +98,7 @@ type joinRequestManagerRow struct {
 	AIParseStatus      string     `gorm:"column:ai_parse_status"`
 	AIErrorCode        *string    `gorm:"column:ai_error_code"`
 	ValidationSnapshot []byte     `gorm:"column:validation_snapshot"`
+	AutomaticReview    []byte     `gorm:"column:automatic_review"`
 	AIParsedAt         *time.Time `gorm:"column:ai_parsed_at"`
 	ObservedStatus     string     `gorm:"column:observed_status"`
 	DecisionStatus     string     `gorm:"column:decision_status"`
@@ -122,6 +123,7 @@ type joinDecisionManagerRow struct {
 	OpsActorColumns
 	FieldSnapshot      []byte     `gorm:"column:field_snapshot"`
 	ValidationSnapshot []byte     `gorm:"column:validation_snapshot"`
+	ReviewSnapshot     []byte     `gorm:"column:review_snapshot"`
 	RuleVersion        *uint64    `gorm:"column:rule_version"`
 	ErrorCode          *string    `gorm:"column:error_code"`
 	TraceID            string     `gorm:"column:trace_id"`
@@ -482,7 +484,7 @@ func selectJoinRequestManager(db *gorm.DB) *gorm.DB {
 		Select(`request.id AS internal_id, request.flag, request.group_id, COALESCE(managed.name, '') AS group_name,
 request.user_id, request.applicant_nickname, request.student_id, request.student_name, request.major,
 request.sub_type, request.comment, request.source, request.ai_parse_status, request.ai_error_code,
-request.validation_snapshot, request.ai_parsed_at, request.observed_status, request.decision_status,
+request.validation_snapshot, request.automatic_review, request.ai_parsed_at, request.observed_status, request.decision_status,
 request.decision_source, request.revision, request.last_decision_id, request.processing_expires_at,
 request.requested_at, request.first_seen_at, request.last_seen_at`).
 		Joins("LEFT JOIN managed_groups AS managed ON managed.group_id = request.group_id")
@@ -535,6 +537,14 @@ func joinRequestFromManagerRow(row joinRequestManagerRow) (joinrequests.Request,
 		converted := joinrequests.DecisionSource(*row.DecisionSource)
 		decisionSource = &converted
 	}
+	var automaticReview *joinrequests.AutomaticReview
+	if len(row.AutomaticReview) > 0 {
+		var converted joinrequests.AutomaticReview
+		if err := opsUnmarshalJSON(row.AutomaticReview, &converted); err != nil {
+			return joinrequests.Request{}, err
+		}
+		automaticReview = &converted
+	}
 	return joinrequests.Request{
 		ID: row.Flag, Group: joinrequests.GroupReference{ID: groupID, Name: row.GroupName}, ApplicantQQ: applicantQQ,
 		ApplicantNickname: row.ApplicantNickname, VerificationMessage: verification,
@@ -543,7 +553,7 @@ func joinRequestFromManagerRow(row joinRequestManagerRow) (joinrequests.Request,
 		DecisionSource: decisionSource, AIParse: joinrequests.AIParseResult{
 			Status: joinrequests.AIParseStatus(row.AIParseStatus), Fields: fields, ErrorCode: row.AIErrorCode,
 			CompletedAt: utcTimePointer(row.AIParsedAt),
-		}, RequestedAt: requestedAt, Version: row.Revision, LastDecisionID: row.LastDecisionID,
+		}, AutomaticReview: automaticReview, RequestedAt: requestedAt, Version: row.Revision, LastDecisionID: row.LastDecisionID,
 		Comment: row.Comment, FirstObservedAt: firstSeenAt, LastObservedAt: lastSeenAt,
 	}, nil
 }
@@ -566,11 +576,19 @@ func decisionFromManagerRow(row joinDecisionManagerRow) (joinrequests.Decision, 
 		converted := applicantFromPayload(payload)
 		snapshot = &converted
 	}
+	var review *joinrequests.AutomaticReview
+	if len(row.ReviewSnapshot) > 0 {
+		var converted joinrequests.AutomaticReview
+		if err := opsUnmarshalJSON(row.ReviewSnapshot, &converted); err != nil {
+			return joinrequests.Decision{}, err
+		}
+		review = &converted
+	}
 	return joinrequests.Decision{
 		ID: row.DecisionID, RequestID: row.RequestFlag, Action: joinrequests.Action(row.Action),
 		Source: joinrequests.DecisionSource(row.Source), Status: joinrequests.AttemptStatus(row.Status),
 		Actor: decisionActor(row.OpsActorColumns), Reason: row.Reason, RuleVersion: row.RuleVersion,
-		FieldSnapshot: snapshot, StartedAt: row.StartedAt.UTC(), CompletedAt: utcTimePointer(row.CompletedAt),
+		FieldSnapshot: snapshot, ReviewSnapshot: review, StartedAt: row.StartedAt.UTC(), CompletedAt: utcTimePointer(row.CompletedAt),
 		ErrorCode: row.ErrorCode, TraceID: row.TraceID,
 	}, nil
 }
@@ -655,15 +673,6 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 			return err
 		}
 		result = converted
-		// updated_at is the automatic-policy cutoff used by candidate selection.
-		// Any effective change to an active policy must retire requests before that
-		// cutoff in this same transaction; otherwise they remain pending forever
-		// while ListAutoCandidates excludes them.
-		if after.Enabled || after.AutoReject {
-			if err := retirePendingRequestsBeforePolicyCutoff(tx, after, mutation.Context); err != nil {
-				return err
-			}
-		}
 		return writeManagerAudit(tx, managerAuditWrite{
 			Actor: domainDecisionActor(mutation.Context.Actor), OccurredAt: mutation.Context.OccurredAt,
 			Request: mutation.Context.Request, Source: sourceForManagerActor(mutation.Context.Actor.Type),
@@ -675,71 +684,6 @@ func (s *Store) UpdatePolicy(ctx context.Context, mutation joinrequests.PolicyMu
 		})
 	})
 	return result, err
-}
-
-func (s *Store) RetireStaleAutomaticRequests(ctx context.Context, mutation joinrequests.MutationContext) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var policies []joinPolicyManagerRow
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("enabled = ? OR auto_reject = ?", true, true).
-			Order("group_id ASC").Find(&policies).Error; err != nil {
-			return err
-		}
-		for _, policy := range policies {
-			if err := retirePendingRequestsBeforePolicyCutoff(tx, policy, mutation); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// retirePendingRequestsBeforePolicyCutoff prevents an automatic policy from
-// acting on applications that predate its current effective configuration.
-// The request history and prior decision attempts remain intact; the audit
-// rows document why each old pending item now needs explicit human review.
-func retirePendingRequestsBeforePolicyCutoff(tx *gorm.DB, policy joinPolicyManagerRow, context joinrequests.MutationContext) error {
-	var requests []struct {
-		ID       uint64 `gorm:"column:id"`
-		Flag     string `gorm:"column:flag"`
-		Revision uint64 `gorm:"column:revision"`
-	}
-	cutoff := policy.UpdatedAt.UTC()
-	if err := tx.Table("group_join_requests").Clauses(clause.Locking{Strength: "UPDATE"}).
-		Select("id, flag, revision").
-		Where("group_id = ? AND status = ? AND observed_status = ? AND decision_status = ? AND (COALESCE(first_seen_at, requested_at) < ? OR (first_seen_at IS NULL AND requested_at IS NULL))",
-			policy.GroupID, grouprequest.StatusPending, joinrequests.ObservedPending, joinrequests.DecisionPending, cutoff).
-		Order("id ASC").Scan(&requests).Error; err != nil {
-		return err
-	}
-	for _, request := range requests {
-		updated := tx.Model(&GroupJoinRequest{}).
-			Where("id = ? AND revision = ? AND decision_status = ?", request.ID, request.Revision, joinrequests.DecisionPending).
-			Updates(map[string]any{
-				"decision_status":       joinrequests.DecisionUnknown,
-				"revision":              gorm.Expr("revision + 1"),
-				"processing_expires_at": nil,
-			})
-		if updated.Error != nil {
-			return updated.Error
-		}
-		if updated.RowsAffected != 1 {
-			return joinrequests.ErrConflict
-		}
-		if err := writeManagerAudit(tx, managerAuditWrite{
-			Actor: domainDecisionActor(context.Actor), OccurredAt: context.OccurredAt,
-			Request: context.Request, Source: sourceForManagerActor(context.Actor.Type),
-			Action: "join_request.auto_policy_cutoff", TargetType: "group_join_request", TargetID: request.Flag,
-			Before: map[string]any{"decision_status": joinrequests.DecisionPending, "revision": request.Revision},
-			After:  map[string]any{"decision_status": joinrequests.DecisionUnknown, "revision": request.Revision + 1},
-			Metadata: map[string]any{
-				"reason": "predates_automatic_policy_cutoff", "policy_revision": policy.Revision,
-			},
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func sourceForManagerActor(actorType audit.ActorType) audit.Source {
@@ -958,7 +902,7 @@ func (s *Store) BeginDecisions(ctx context.Context, mutation joinrequests.BeginM
 			if err != nil {
 				return err
 			}
-			var fieldsJSON, validationJSON []byte
+			var fieldsJSON, validationJSON, reviewJSON []byte
 			if fields, ok := mutation.FieldSnapshots[item.ID]; ok {
 				payload := applicantPayload(fields)
 				fieldsJSON, err = opsMarshalJSON(applicantFieldsPayload{StudentID: payload.StudentID, Name: payload.Name, Major: payload.Major})
@@ -970,11 +914,17 @@ func (s *Store) BeginDecisions(ctx context.Context, mutation joinrequests.BeginM
 					return err
 				}
 			}
+			if review, ok := mutation.ReviewSnapshots[item.ID]; ok {
+				reviewJSON, err = opsMarshalJSON(review)
+				if err != nil {
+					return err
+				}
+			}
 			decision := joinDecisionManagerRow{
 				DecisionID: decisionID, RequestInternalID: requestRow.InternalID,
 				IdempotencyKey: mutation.IdempotencyKey, Action: string(mutation.Action), Status: string(joinrequests.AttemptStarted),
 				Source: string(mutation.Source), Reason: mutation.Reason, OpsActorColumns: actor,
-				FieldSnapshot: fieldsJSON, ValidationSnapshot: validationJSON, RuleVersion: mutation.RuleVersion,
+				FieldSnapshot: fieldsJSON, ValidationSnapshot: validationJSON, ReviewSnapshot: reviewJSON, RuleVersion: mutation.RuleVersion,
 				TraceID: traceID, StartedAt: mutation.Context.OccurredAt.UTC(),
 			}
 			if err := tx.Create(&decision).Error; err != nil {
@@ -988,6 +938,7 @@ func (s *Store) BeginDecisions(ctx context.Context, mutation joinrequests.BeginM
 					"decision_status": joinrequests.DecisionProcessing, "decision_source": mutation.Source,
 					"revision": gorm.Expr("revision + 1"), "last_decision_id": decisionID,
 					"processing_expires_at": mutation.ProcessingExpiresAt.UTC(),
+					"automatic_review":      reviewJSON,
 				})
 			if update.Error != nil {
 				return update.Error
@@ -1082,6 +1033,9 @@ func replayJoinDecisionReservation(tx *gorm.DB, mutation joinrequests.BeginMutat
 		if err := validateReplayFieldSnapshot(decisionRow, mutation.FieldSnapshots, item.ID); err != nil {
 			return joinrequests.Reservation{}, false, err
 		}
+		if err := validateReplayReviewSnapshot(decisionRow, mutation.ReviewSnapshots, item.ID); err != nil {
+			return joinrequests.Reservation{}, false, err
+		}
 		request, err := joinRequestFromManagerRow(requestRow)
 		if err != nil {
 			return joinrequests.Reservation{}, false, err
@@ -1119,6 +1073,24 @@ func validateReplayFieldSnapshot(row joinDecisionManagerRow, snapshots map[strin
 		return err
 	}
 	if !bytes.Equal(row.FieldSnapshot, expectedFields) || !bytes.Equal(row.ValidationSnapshot, expectedValidation) {
+		return joinrequests.ErrIdempotencyConflict
+	}
+	return nil
+}
+
+func validateReplayReviewSnapshot(row joinDecisionManagerRow, snapshots map[string]joinrequests.AutomaticReview, requestID string) error {
+	review, exists := snapshots[requestID]
+	if !exists {
+		if len(row.ReviewSnapshot) != 0 {
+			return joinrequests.ErrIdempotencyConflict
+		}
+		return nil
+	}
+	expected, err := opsMarshalJSON(review)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(row.ReviewSnapshot, expected) {
 		return joinrequests.ErrIdempotencyConflict
 	}
 	return nil
@@ -1229,7 +1201,7 @@ func (s *Store) ListAutoCandidates(ctx context.Context, limit int) ([]joinreques
 	db := s.db.WithContext(ctx).Table("group_join_requests AS request").Select(`request.id AS internal_id, request.flag,
 request.group_id, COALESCE(managed.name, '') AS group_name, request.user_id, request.applicant_nickname,
 request.student_id, request.student_name, request.major, request.sub_type, request.comment, request.source,
-request.ai_parse_status, request.ai_error_code, request.validation_snapshot, request.ai_parsed_at,
+request.ai_parse_status, request.ai_error_code, request.validation_snapshot, request.automatic_review, request.ai_parsed_at,
 request.observed_status, request.decision_status, request.decision_source, request.revision,
 request.last_decision_id, request.processing_expires_at, request.requested_at, request.first_seen_at, request.last_seen_at,
 policy.group_id AS policy_group_id, policy.enabled AS policy_enabled, policy.mode AS policy_mode, policy.required_fields AS policy_required_fields,
@@ -1242,6 +1214,8 @@ policy.updated_by_role AS policy_updated_role`).
 		Where("request.status = ? AND request.observed_status = ? AND request.decision_status = ? AND request.sub_type = ? AND request.ai_parse_status = ?",
 			grouprequest.StatusPending, joinrequests.ObservedPending, joinrequests.DecisionPending, joinrequests.SubTypeAdd, joinrequests.AIParseSucceeded).
 		Where("COALESCE(request.first_seen_at, request.requested_at) >= policy.updated_at").
+		Where("COALESCE(request.first_seen_at, request.requested_at) >= (SELECT activated_at FROM join_approval_rule_state WHERE rule_version = ? AND status = ? AND activated_at IS NOT NULL)",
+			joinrequests.AutoApprovalRuleVersion, joinrequests.RuleStateReady).
 		Where("NOT EXISTS (SELECT 1 FROM group_join_decisions AS prior_decision WHERE prior_decision.request_id = request.id AND prior_decision.source = ? AND prior_decision.status = ?)",
 			joinrequests.SourceAutomatic, joinrequests.AttemptFailed).
 		Order("request.requested_at ASC").Order("request.id ASC").Limit(limit)

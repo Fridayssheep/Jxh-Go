@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -25,6 +27,13 @@ type JoinRequestOperations interface {
 	ListDecisions(context.Context, auth.Principal, joinrequests.DecisionListQuery) (joinrequests.Page[joinrequests.Decision], error)
 	Decide(context.Context, auth.Principal, string, uint64, joinrequests.DecisionInput, string, auth.MutationContext) (joinrequests.DecisionResult, error)
 	BulkDecide(context.Context, auth.Principal, joinrequests.BulkInput, string, auth.MutationContext) (joinrequests.BulkResult, error)
+	ListMajorEvidence(context.Context, auth.Principal) ([]joinrequests.EvidenceSummary, joinrequests.RuleState, error)
+	GetAutomaticRuleConfiguration(auth.Principal) (joinrequests.AutomaticRuleConfiguration, error)
+	ListMajorEvidenceSamples(context.Context, auth.Principal, joinrequests.EvidenceListQuery) (joinrequests.Page[joinrequests.EvidenceSample], error)
+	UpdateMajorEvidenceSample(context.Context, auth.Principal, uint64, uint64, joinrequests.EvidenceSamplePatch, auth.MutationContext) (joinrequests.EvidenceSample, error)
+	RebuildMajorEvidence(context.Context, auth.Principal, string, auth.MutationContext) (joinrequests.EvidenceRebuildResult, error)
+	GetAdmissionRosterStatus(context.Context, auth.Principal) (joinrequests.AdmissionRosterStatus, error)
+	ImportAdmissionRoster(context.Context, auth.Principal, string, []byte, string, auth.MutationContext) (joinrequests.AdmissionRosterStatus, error)
 }
 
 type JoinRequestHandlers struct {
@@ -50,6 +59,12 @@ func (h *JoinRequestHandlers) Register(router *Router) error {
 	}{
 		{http.MethodGet, "/api/admin/v1/join-request-rules/student-id", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.getStudentIDRule},
 		{http.MethodPatch, "/api/admin/v1/join-request-rules/student-id", mutationRoute(auth.PermissionJoinPoliciesWrite), h.updateStudentIDRule},
+		{http.MethodGet, "/api/admin/v1/join-request-evidence/major-codes", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.listMajorEvidence},
+		{http.MethodGet, "/api/admin/v1/join-request-evidence/samples", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.listMajorEvidenceSamples},
+		{http.MethodPatch, "/api/admin/v1/join-request-evidence/samples/{sample_id}", mutationRoute(auth.PermissionJoinPoliciesWrite), h.updateMajorEvidenceSample},
+		{http.MethodPost, "/api/admin/v1/join-request-evidence/rebuild", mutationRoute(auth.PermissionJoinPoliciesWrite), h.rebuildMajorEvidence},
+		{http.MethodGet, "/api/admin/v1/admission-roster/status", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.getAdmissionRosterStatus},
+		{http.MethodPost, "/api/admin/v1/admission-roster/import", mutationRoute(auth.PermissionJoinPoliciesWrite), h.importAdmissionRoster},
 		{http.MethodGet, "/api/admin/v1/groups/{group_id}/join-request-policy", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.getPolicy},
 		{http.MethodPatch, "/api/admin/v1/groups/{group_id}/join-request-policy", mutationRoute(auth.PermissionJoinPoliciesWrite), h.updatePolicy},
 		{http.MethodGet, "/api/admin/v1/join-requests", RouteOptions{Permission: auth.PermissionJoinRequestsRead}, h.list},
@@ -64,6 +79,207 @@ func (h *JoinRequestHandlers) Register(router *Router) error {
 		}
 	}
 	return nil
+}
+
+type ruleStateDTO struct {
+	RuleVersion     uint64     `json:"rule_version"`
+	Status          string     `json:"status"`
+	EvidenceVersion uint64     `json:"evidence_version"`
+	ActivatedAt     *time.Time `json:"activated_at"`
+	RebuiltAt       *time.Time `json:"rebuilt_at"`
+	Version         uint64     `json:"version"`
+}
+
+type evidenceSummaryDTO struct {
+	EnrollmentYear string                    `json:"enrollment_year"`
+	MajorCode      string                    `json:"major_code"`
+	TotalSamples   uint64                    `json:"total_samples"`
+	MajorCounts    []joinrequests.MajorCount `json:"major_counts"`
+}
+
+type automaticRuleConfigurationDTO struct {
+	StudentIDLength      int    `json:"student_id_length"`
+	EnrollmentYearOffset int    `json:"enrollment_year_offset"`
+	EnrollmentYearLength int    `json:"enrollment_year_length"`
+	MajorCodeOffset      int    `json:"major_code_offset"`
+	MajorCodeLength      int    `json:"major_code_length"`
+	CurrentYear          string `json:"current_year"`
+	MinimumSamples       int    `json:"minimum_samples"`
+}
+
+type evidenceSampleDTO struct {
+	SampleID       uint64                      `json:"sample_id"`
+	EnrollmentYear string                      `json:"enrollment_year"`
+	MajorCode      string                      `json:"major_code"`
+	Major          string                      `json:"major"`
+	ApprovalSource joinrequests.DecisionSource `json:"approval_source"`
+	SourceGroupID  string                      `json:"source_group_id"`
+	Active         bool                        `json:"active"`
+	Version        uint64                      `json:"version"`
+	UpdatedAt      time.Time                   `json:"updated_at"`
+}
+
+type admissionRosterStatusDTO struct {
+	Configured     bool       `json:"configured"`
+	DatasetVersion *string    `json:"dataset_version"`
+	FileName       *string    `json:"file_name"`
+	RowCount       uint64     `json:"row_count"`
+	ActivatedAt    *time.Time `json:"activated_at"`
+}
+
+func mapRuleState(value joinrequests.RuleState) ruleStateDTO {
+	return ruleStateDTO{RuleVersion: value.RuleVersion, Status: string(value.Status), EvidenceVersion: value.EvidenceVersion, ActivatedAt: value.ActivatedAt, RebuiltAt: value.RebuiltAt, Version: value.Version}
+}
+
+func mapEvidenceSample(value joinrequests.EvidenceSample) evidenceSampleDTO {
+	return evidenceSampleDTO{SampleID: value.ID, EnrollmentYear: value.EnrollmentYear, MajorCode: value.MajorCode, Major: value.Major, ApprovalSource: value.ApprovalSource, SourceGroupID: value.SourceGroupID, Active: value.Active, Version: value.Version, UpdatedAt: value.UpdatedAt.UTC()}
+}
+
+func mapAdmissionRosterStatus(value joinrequests.AdmissionRosterStatus) admissionRosterStatusDTO {
+	return admissionRosterStatusDTO{Configured: value.Configured, DatasetVersion: value.DatasetVersion, FileName: value.FileName, RowCount: value.RowCount, ActivatedAt: value.ActivatedAt}
+}
+
+func (h *JoinRequestHandlers) listMajorEvidence(w http.ResponseWriter, r *http.Request) {
+	identity, _ := AuthFromContext(r.Context())
+	items, state, err := h.service.ListMajorEvidence(r.Context(), principalFromAuth(identity))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	rule, err := h.service.GetAutomaticRuleConfiguration(principalFromAuth(identity))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	mapped := make([]evidenceSummaryDTO, len(items))
+	for index, item := range items {
+		mapped[index] = evidenceSummaryDTO{EnrollmentYear: item.EnrollmentYear, MajorCode: item.MajorCode, TotalSamples: item.TotalSamples, MajorCounts: item.MajorCounts}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rule_state": mapRuleState(state),
+		"rule": automaticRuleConfigurationDTO{
+			StudentIDLength: rule.StudentIDLength, EnrollmentYearOffset: rule.EnrollmentYearOffset,
+			EnrollmentYearLength: rule.EnrollmentYearLength, MajorCodeOffset: rule.MajorCodeOffset,
+			MajorCodeLength: rule.MajorCodeLength, CurrentYear: rule.CurrentYear, MinimumSamples: rule.MinimumSamples,
+		},
+		"items": mapped,
+	})
+}
+
+func (h *JoinRequestHandlers) listMajorEvidenceSamples(w http.ResponseWriter, r *http.Request) {
+	page, err := ParsePage(r.URL.Query().Get("page"))
+	if err != nil {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "evidence sample query is invalid", nil, false)
+		return
+	}
+	limit, err := ParseLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "evidence sample query is invalid", nil, false)
+		return
+	}
+	query := joinrequests.EvidenceListQuery{EnrollmentYear: r.URL.Query().Get("enrollment_year"), MajorCode: r.URL.Query().Get("major_code"), Page: page, Limit: limit}
+	if active := r.URL.Query().Get("active"); active != "" {
+		value, parseErr := strconv.ParseBool(active)
+		if parseErr != nil {
+			writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "evidence sample query is invalid", nil, false)
+			return
+		}
+		query.Active = &value
+	}
+	identity, _ := AuthFromContext(r.Context())
+	result, err := h.service.ListMajorEvidenceSamples(r.Context(), principalFromAuth(identity), query)
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	items := make([]evidenceSampleDTO, len(result.Items))
+	for index, item := range result.Items {
+		items[index] = mapEvidenceSample(item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "has_more": result.HasMore, "total_count": result.TotalCount})
+}
+
+type evidenceSamplePatchRequest struct {
+	Major  *string `json:"major"`
+	Active *bool   `json:"active"`
+}
+
+func (h *JoinRequestHandlers) updateMajorEvidenceSample(w http.ResponseWriter, r *http.Request) {
+	sampleID, err := strconv.ParseUint(r.PathValue("sample_id"), 10, 64)
+	if err != nil || sampleID == 0 {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "evidence sample identifier is invalid", nil, false)
+		return
+	}
+	revision, ok := requiredRevision(w, r)
+	if !ok {
+		return
+	}
+	var body evidenceSamplePatchRequest
+	if !decodeRequestJSON(w, r, &body) {
+		return
+	}
+	identity, _ := AuthFromContext(r.Context())
+	result, err := h.service.UpdateMajorEvidenceSample(r.Context(), principalFromAuth(identity), sampleID, revision,
+		joinrequests.EvidenceSamplePatch{Major: body.Major, Active: body.Active}, mutationContextFromRequest(r))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	setRevisionETag(w, result.Version)
+	writeJSON(w, http.StatusOK, mapEvidenceSample(result))
+}
+
+func (h *JoinRequestHandlers) rebuildMajorEvidence(w http.ResponseWriter, r *http.Request) {
+	key, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	identity, _ := AuthFromContext(r.Context())
+	result, err := h.service.RebuildMajorEvidence(r.Context(), principalFromAuth(identity), key, mutationContextFromRequest(r))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rule_state": mapRuleState(result.RuleState), "sample_count": result.SampleCount})
+}
+
+func (h *JoinRequestHandlers) getAdmissionRosterStatus(w http.ResponseWriter, r *http.Request) {
+	identity, _ := AuthFromContext(r.Context())
+	result, err := h.service.GetAdmissionRosterStatus(r.Context(), principalFromAuth(identity))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mapAdmissionRosterStatus(result))
+}
+
+func (h *JoinRequestHandlers) importAdmissionRoster(w http.ResponseWriter, r *http.Request) {
+	key, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseMultipartForm(4 << 20); err != nil {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "admission roster upload is invalid", nil, false)
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "admission roster file is required", nil, false)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "admission roster file is invalid", nil, false)
+		return
+	}
+	identity, _ := AuthFromContext(r.Context())
+	result, err := h.service.ImportAdmissionRoster(r.Context(), principalFromAuth(identity), header.Filename, data, key, mutationContextFromRequest(r))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mapAdmissionRosterStatus(result))
 }
 
 func (h *JoinRequestHandlers) getPolicy(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +474,15 @@ func (h *JoinRequestHandlers) bulkDecide(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *JoinRequestHandlers) writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
+	var rosterValidation *joinrequests.AdmissionRosterValidationError
 	switch {
+	case errors.As(err, &rosterValidation):
+		field := rosterValidation.Field
+		if field == "" {
+			field = "file"
+		}
+		writeAPIError(w, r, http.StatusBadRequest, CodeBadRequest, "录取名单文件校验失败",
+			map[string][]string{field: {rosterValidation.Error()}}, false)
 	case errors.Is(err, joinrequests.ErrForbidden):
 		writeAPIError(w, r, http.StatusForbidden, CodeForbidden, "join request operation is forbidden", nil, false)
 	case errors.Is(err, joinrequests.ErrInvalidInput):
@@ -439,22 +663,23 @@ type joinGroupReferenceDTO struct {
 }
 
 type joinRequestSummaryDTO struct {
-	RequestID           string                       `json:"request_id"`
-	Group               joinGroupReferenceDTO        `json:"group"`
-	ApplicantQQ         string                       `json:"applicant_qq"`
-	ApplicantNickname   *string                      `json:"applicant_nickname"`
-	VerificationMessage string                       `json:"verification_message"`
-	SubType             joinrequests.SubType         `json:"sub_type"`
-	Source              joinrequests.RequestSource   `json:"source"`
-	ObservedStatus      joinrequests.ObservedStatus  `json:"observed_status"`
-	DecisionStatus      joinrequests.DecisionStatus  `json:"decision_status"`
-	DecisionSource      *joinrequests.DecisionSource `json:"decision_source"`
-	AIParse             aiParseResultDTO             `json:"ai_parse"`
-	StudentIDAssessment studentIDAssessmentDTO       `json:"student_id_assessment"`
-	RequestedAt         time.Time                    `json:"requested_at"`
-	Overdue             bool                         `json:"overdue"`
-	Version             uint64                       `json:"version"`
-	LastDecisionID      *string                      `json:"last_decision_id"`
+	RequestID           string                        `json:"request_id"`
+	Group               joinGroupReferenceDTO         `json:"group"`
+	ApplicantQQ         string                        `json:"applicant_qq"`
+	ApplicantNickname   *string                       `json:"applicant_nickname"`
+	VerificationMessage string                        `json:"verification_message"`
+	SubType             joinrequests.SubType          `json:"sub_type"`
+	Source              joinrequests.RequestSource    `json:"source"`
+	ObservedStatus      joinrequests.ObservedStatus   `json:"observed_status"`
+	DecisionStatus      joinrequests.DecisionStatus   `json:"decision_status"`
+	DecisionSource      *joinrequests.DecisionSource  `json:"decision_source"`
+	AIParse             aiParseResultDTO              `json:"ai_parse"`
+	StudentIDAssessment studentIDAssessmentDTO        `json:"student_id_assessment"`
+	AutomaticReview     *joinrequests.AutomaticReview `json:"automatic_review"`
+	RequestedAt         time.Time                     `json:"requested_at"`
+	Overdue             bool                          `json:"overdue"`
+	Version             uint64                        `json:"version"`
+	LastDecisionID      *string                       `json:"last_decision_id"`
 }
 
 type joinRequestDTO struct {
@@ -472,19 +697,20 @@ type joinRequestListDTO struct {
 }
 
 type joinDecisionDTO struct {
-	DecisionID    string                      `json:"decision_id"`
-	RequestID     string                      `json:"request_id"`
-	Action        joinrequests.Action         `json:"action"`
-	Source        joinrequests.DecisionSource `json:"source"`
-	Status        joinrequests.AttemptStatus  `json:"status"`
-	Actor         *auditActorDTO              `json:"actor"`
-	Reason        *string                     `json:"reason"`
-	RuleVersion   *uint64                     `json:"rule_version"`
-	FieldSnapshot *aiApplicantFieldsDTO       `json:"field_snapshot"`
-	StartedAt     time.Time                   `json:"started_at"`
-	CompletedAt   *time.Time                  `json:"completed_at"`
-	ErrorCode     *string                     `json:"error_code"`
-	TraceID       string                      `json:"trace_id"`
+	DecisionID     string                        `json:"decision_id"`
+	RequestID      string                        `json:"request_id"`
+	Action         joinrequests.Action           `json:"action"`
+	Source         joinrequests.DecisionSource   `json:"source"`
+	Status         joinrequests.AttemptStatus    `json:"status"`
+	Actor          *auditActorDTO                `json:"actor"`
+	Reason         *string                       `json:"reason"`
+	RuleVersion    *uint64                       `json:"rule_version"`
+	FieldSnapshot  *aiApplicantFieldsDTO         `json:"field_snapshot"`
+	ReviewSnapshot *joinrequests.AutomaticReview `json:"review_snapshot"`
+	StartedAt      time.Time                     `json:"started_at"`
+	CompletedAt    *time.Time                    `json:"completed_at"`
+	ErrorCode      *string                       `json:"error_code"`
+	TraceID        string                        `json:"trace_id"`
 }
 
 type joinDecisionListDTO struct {
@@ -547,7 +773,8 @@ func mapJoinRequestSummary(value joinrequests.Request) joinRequestSummaryDTO {
 		VerificationMessage: value.VerificationMessage, SubType: value.SubType, Source: value.Source,
 		ObservedStatus: value.ObservedStatus, DecisionStatus: value.DecisionStatus, DecisionSource: value.DecisionSource,
 		AIParse: mapAIParse(value.AIParse), StudentIDAssessment: mapStudentIDAssessment(value.StudentIDAssessment),
-		RequestedAt: value.RequestedAt.UTC(), Overdue: value.Overdue,
+		AutomaticReview: value.AutomaticReview,
+		RequestedAt:     value.RequestedAt.UTC(), Overdue: value.Overdue,
 		Version: value.Version, LastDecisionID: value.LastDecisionID,
 	}
 }
@@ -564,7 +791,8 @@ func mapJoinDecision(value joinrequests.Decision) joinDecisionDTO {
 		DecisionID: value.ID, RequestID: value.RequestID, Action: value.Action, Source: value.Source, Status: value.Status,
 		Actor: mapOptionalAuditActor(value.Actor), Reason: value.Reason, RuleVersion: value.RuleVersion,
 		FieldSnapshot: mapApplicantFields(value.FieldSnapshot), StartedAt: value.StartedAt.UTC(),
-		CompletedAt: utcTimePointer(value.CompletedAt), ErrorCode: value.ErrorCode, TraceID: value.TraceID,
+		ReviewSnapshot: value.ReviewSnapshot,
+		CompletedAt:    utcTimePointer(value.CompletedAt), ErrorCode: value.ErrorCode, TraceID: value.TraceID,
 	}
 }
 

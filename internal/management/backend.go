@@ -73,6 +73,7 @@ type Options struct {
 	Now                 func() time.Time
 	Random              io.Reader
 	Logger              *log.Logger
+	MajorCodeJudge      joinrequests.MajorCodeJudge
 }
 
 type Backend struct {
@@ -233,7 +234,7 @@ func NewBackend(options Options) (*Backend, error) {
 	joinRequestService, err = joinrequests.NewService(joinrequests.Options{
 		Store: options.Store, Approver: options.Gateway, AutoRejectReasons: options.SettingsRuntime,
 		Events: hub, Telemetry: telemetryService, Now: options.Now,
-		WorkerContext: options.Context,
+		WorkerContext: options.Context, MajorCodeJudge: options.MajorCodeJudge, Location: options.Location,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create join request service: %w", err))
@@ -337,11 +338,11 @@ func loadRuntimeState(
 	if err := joinRequestService.ReloadStudentIDRule(ctx); err != nil {
 		return fmt.Errorf("load student ID rule: %w", err)
 	}
+	if err := joinRequestService.PrepareAutomaticReview(ctx); err != nil {
+		return err
+	}
 	if err := joinRequestService.RecoverInterrupted(ctx); err != nil {
 		return fmt.Errorf("recover join request decisions: %w", err)
-	}
-	if err := joinRequestService.RetireStaleAutomaticRequests(ctx); err != nil {
-		return err
 	}
 	if _, err := scheduledJobService.RecoverInterruptedRuns(ctx); err != nil {
 		return fmt.Errorf("recover scheduled job runs: %w", err)

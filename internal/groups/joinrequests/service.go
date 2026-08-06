@@ -40,11 +40,20 @@ type Store interface {
 	BeginDecisions(ctx context.Context, mutation BeginMutation) (Reservation, error)
 	// CompleteDecision atomically finalizes the attempt and request state.
 	CompleteDecision(ctx context.Context, mutation CompletionMutation) (DecisionResult, error)
-	RetireStaleAutomaticRequests(ctx context.Context, mutation MutationContext) error
 	ListAutoCandidates(ctx context.Context, limit int) ([]AutoCandidate, error)
 	// RecoverExpiredDecisions marks expired processing leases unknown. It must
 	// never restore pending because the external call may already have run.
 	RecoverExpiredDecisions(ctx context.Context, expiredBefore time.Time, limit int) ([]Request, error)
+	GetAutomaticRuleState(ctx context.Context) (RuleState, error)
+	GetMajorEvidence(ctx context.Context, enrollmentYear, majorCode string) (MajorEvidence, error)
+	ListMajorEvidence(ctx context.Context) ([]EvidenceSummary, RuleState, error)
+	ListMajorEvidenceSamples(ctx context.Context, query EvidenceListQuery) (Page[EvidenceSample], error)
+	UpdateMajorEvidenceSample(ctx context.Context, mutation EvidenceSampleMutation) (EvidenceSample, error)
+	RebuildMajorEvidence(ctx context.Context, mutation EvidenceRebuildMutation) (EvidenceRebuildResult, error)
+	IndexApprovedRequest(ctx context.Context, requestID string) error
+	AdmissionRosterReader
+	AdmissionRosterImporter
+	GetAdmissionRosterStatus(ctx context.Context) (AdmissionRosterStatus, error)
 }
 
 type PolicyMutation struct {
@@ -84,6 +93,8 @@ type Options struct {
 	PersistenceTimeout    time.Duration
 	PersistenceRetryDelay time.Duration
 	WorkerContext         context.Context
+	MajorCodeJudge        MajorCodeJudge
+	Location              *time.Location
 }
 
 type Service struct {
@@ -104,6 +115,8 @@ type Service struct {
 	closed             bool
 	wait               sync.WaitGroup
 	studentIDRule      atomic.Pointer[StudentIDRule]
+	majorCodeJudge     MajorCodeJudge
+	location           *time.Location
 }
 
 const (
@@ -133,6 +146,10 @@ func NewService(options Options) (*Service, error) {
 		events: options.Events, telemetry: options.Telemetry, now: options.Now,
 		overdueAfter: overdueAfter, decisionTimeout: decisionTimeout, processingLease: processingLease,
 		persistenceTimeout: persistenceTimeout, retryDelay: retryDelay, workerCtx: workerContext, cancel: cancel,
+		majorCodeJudge: options.MajorCodeJudge, location: options.Location,
+	}
+	if service.location == nil {
+		service.location = time.Local
 	}
 	initialRule := StudentIDRule{Version: 1, UpdatedAt: options.Now().UTC()}
 	service.studentIDRule.Store(&initialRule)
@@ -149,23 +166,6 @@ func (s *Service) ReloadStudentIDRule(ctx context.Context) error {
 	}
 	value = cloneStudentIDRule(value)
 	s.studentIDRule.Store(&value)
-	return nil
-}
-
-// RetireStaleAutomaticRequests moves applications that predate an already
-// enabled automatic policy out of the pending queue before workers start.
-func (s *Service) RetireStaleAutomaticRequests(ctx context.Context) error {
-	if s == nil || s.store == nil {
-		return ErrInvalidInput
-	}
-	mutation := MutationContext{
-		Actor:      audit.Actor{Type: audit.ActorSystem, DisplayName: "automatic_policy_startup"},
-		Request:    auth.MutationContext{RequestID: "auto-policy-startup"},
-		OccurredAt: s.now().UTC(),
-	}
-	if err := s.store.RetireStaleAutomaticRequests(ctx, mutation); err != nil {
-		return fmt.Errorf("retire stale automatic join requests: %w", err)
-	}
 	return nil
 }
 
@@ -462,6 +462,9 @@ func (s *Service) execute(ctx context.Context, item ReservedItem, reason string)
 	result.Request = s.normalizeRequest(result.Request)
 	s.publish(result.Request.ID, result.Request.Version, "join_request_decided")
 	s.recordDecision(result)
+	if result.Decision.Status == AttemptConfirmed && result.Decision.Action == ActionApprove {
+		s.scheduleEvidenceIndex(result.Request.ID)
+	}
 	switch external.Outcome {
 	case ExternalFailed:
 		return cloneDecisionResult(result), ErrExternalFailure
@@ -470,6 +473,47 @@ func (s *Service) execute(ctx context.Context, item ReservedItem, reason string)
 	default:
 		return cloneDecisionResult(result), nil
 	}
+}
+
+func (s *Service) scheduleEvidenceIndex(requestID string) {
+	s.lifecycleMu.Lock()
+	if s.closed {
+		s.lifecycleMu.Unlock()
+		return
+	}
+	s.wait.Add(1)
+	s.lifecycleMu.Unlock()
+	go func() {
+		defer s.wait.Done()
+		for {
+			ctx, cancel := context.WithTimeout(s.workerCtx, s.persistenceTimeout)
+			err := s.store.IndexApprovedRequest(ctx, requestID)
+			cancel()
+			if err == nil || s.workerCtx.Err() != nil {
+				return
+			}
+			timer := time.NewTimer(s.retryDelay)
+			select {
+			case <-s.workerCtx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
+
+func (s *Service) PrepareAutomaticReview(ctx context.Context) error {
+	mutation := MutationContext{
+		Actor:   audit.Actor{Type: audit.ActorSystem, DisplayName: "automatic_review_bootstrap"},
+		Request: auth.MutationContext{RequestID: "automatic-review-v2-bootstrap"}, OccurredAt: s.now().UTC(),
+	}
+	if _, err := s.store.RebuildMajorEvidence(ctx, EvidenceRebuildMutation{Context: mutation}); err != nil {
+		return fmt.Errorf("prepare automatic review evidence: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) completeWithoutExternal(item ReservedItem, errorCode string) BulkItemResult {
@@ -527,6 +571,9 @@ func (s *Service) scheduleCompletionRetry(completion CompletionMutation) {
 			result.Request = s.normalizeRequest(result.Request)
 			s.publish(result.Request.ID, result.Request.Version, "join_request_decided")
 			s.recordDecision(result)
+			if result.Decision.Status == AttemptConfirmed && result.Decision.Action == ActionApprove {
+				s.scheduleEvidenceIndex(result.Request.ID)
+			}
 			return
 		}
 	}()
@@ -800,6 +847,7 @@ func cloneRequest(value Request) Request {
 	value.Comment = cloneString(value.Comment)
 	value.AIParse = cloneAIParse(value.AIParse)
 	value.StudentIDAssessment = cloneStudentIDAssessment(value.StudentIDAssessment)
+	value.AutomaticReview = cloneAutomaticReview(value.AutomaticReview)
 	value.RequestedAt = value.RequestedAt.UTC()
 	value.FirstObservedAt = utcOrZero(value.FirstObservedAt)
 	value.LastObservedAt = utcOrZero(value.LastObservedAt)
@@ -811,10 +859,30 @@ func cloneDecision(value Decision) Decision {
 	value.Reason = cloneString(value.Reason)
 	value.RuleVersion = cloneUint64(value.RuleVersion)
 	value.FieldSnapshot = cloneApplicantFieldsPointer(value.FieldSnapshot)
+	value.ReviewSnapshot = cloneAutomaticReview(value.ReviewSnapshot)
 	value.StartedAt = value.StartedAt.UTC()
 	value.CompletedAt = cloneTime(value.CompletedAt)
 	value.ErrorCode = cloneString(value.ErrorCode)
 	return value
+}
+
+func cloneAutomaticReview(value *AutomaticReview) *AutomaticReview {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	result.Roster.DatasetVersion = cloneString(value.Roster.DatasetVersion)
+	if value.Evidence != nil {
+		evidence := *value.Evidence
+		evidence.MajorCounts = append([]MajorCount(nil), value.Evidence.MajorCounts...)
+		result.Evidence = &evidence
+	}
+	if value.Judgement != nil {
+		judgement := *value.Judgement
+		result.Judgement = &judgement
+	}
+	result.ReviewedAt = result.ReviewedAt.UTC()
+	return &result
 }
 
 func cloneDecisionResult(value DecisionResult) DecisionResult {

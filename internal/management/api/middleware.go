@@ -160,8 +160,8 @@ func (m *middleware) bodyBoundary(next http.Handler) http.Handler {
 		hasBody := r.ContentLength != 0 || len(r.TransferEncoding) > 0
 		if hasBody {
 			mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil || mediaType != "application/json" {
-				writeAPIError(w, r, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType, "请求体必须使用 application/json", nil, false)
+			if err != nil || mediaType != "application/json" && mediaType != "multipart/form-data" {
+				writeAPIError(w, r, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType, "请求体格式不受支持", nil, false)
 				return
 			}
 		}

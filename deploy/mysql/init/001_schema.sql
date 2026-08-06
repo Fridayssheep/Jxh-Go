@@ -343,6 +343,7 @@ CREATE TABLE `group_join_decisions` (
   `actor_display_name` varchar(100) DEFAULT NULL,
   `field_snapshot` json DEFAULT NULL,
   `validation_snapshot` json DEFAULT NULL,
+  `review_snapshot` json DEFAULT NULL,
   `rule_version` int unsigned DEFAULT NULL,
   `napcat_result` json DEFAULT NULL,
   `error_code` varchar(100) DEFAULT NULL,
@@ -416,6 +417,7 @@ CREATE TABLE `group_join_requests` (
   `ai_parse_attempts` int unsigned NOT NULL DEFAULT '0' COMMENT 'AI 解析尝试次数',
   `ai_error_code` varchar(100) DEFAULT NULL,
   `validation_snapshot` json DEFAULT NULL,
+  `automatic_review` json DEFAULT NULL,
   `requested_at` datetime(3) DEFAULT NULL COMMENT '申请时间',
   `processed_at` datetime(3) DEFAULT NULL COMMENT '首次观察到已处理状态的时间',
   `first_seen_at` datetime(3) DEFAULT NULL COMMENT '首次登记时间',
@@ -595,6 +597,95 @@ CREATE TABLE `system_operations` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
+CREATE TABLE `schema_migrations` (
+  `version` bigint unsigned NOT NULL,
+  `name` varchar(255) NOT NULL,
+  `applied_at` datetime(3) NOT NULL,
+  PRIMARY KEY (`version`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `join_approval_rule_state` (
+  `rule_version` int unsigned NOT NULL,
+  `status` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `evidence_version` bigint unsigned NOT NULL DEFAULT '0',
+  `activated_at` datetime(3) DEFAULT NULL,
+  `rebuilt_at` datetime(3) DEFAULT NULL,
+  `last_error_code` varchar(100) DEFAULT NULL,
+  `revision` int unsigned NOT NULL DEFAULT '1',
+  `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`rule_version`),
+  CONSTRAINT `chk_join_approval_rule_state_status` CHECK ((`status` in (_ascii'building',_ascii'ready',_ascii'failed'))),
+  CONSTRAINT `chk_join_approval_rule_state_revision` CHECK ((`revision` >= 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `join_major_code_samples` (
+  `sample_id` bigint unsigned NOT NULL AUTO_INCREMENT,
+  `enrollment_year` char(4) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `major_code` char(3) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `major_name` varchar(128) NOT NULL,
+  `normalized_major` varchar(128) NOT NULL,
+  `source_request_id` bigint unsigned NOT NULL,
+  `source_decision_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `approval_source` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `source_group_id` bigint NOT NULL,
+  `active` tinyint(1) NOT NULL DEFAULT '1',
+  `revision` int unsigned NOT NULL DEFAULT '1',
+  `corrected_by_type` varchar(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `corrected_by_user_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `corrected_by_display_name` varchar(100) DEFAULT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`sample_id`),
+  UNIQUE KEY `uq_join_major_code_samples_request` (`source_request_id`),
+  KEY `idx_join_major_code_samples_lookup` (`enrollment_year`,`major_code`,`active`,`normalized_major`),
+  KEY `idx_join_major_code_samples_decision` (`source_decision_id`),
+  CONSTRAINT `fk_join_major_code_samples_request` FOREIGN KEY (`source_request_id`) REFERENCES `group_join_requests` (`id`),
+  CONSTRAINT `fk_join_major_code_samples_decision` FOREIGN KEY (`source_decision_id`) REFERENCES `group_join_decisions` (`decision_id`),
+  CONSTRAINT `chk_join_major_code_samples_source` CHECK ((`approval_source` in (_ascii'manual',_ascii'automatic'))),
+  CONSTRAINT `chk_join_major_code_samples_revision` CHECK ((`revision` >= 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `admission_roster_versions` (
+  `version_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `idempotency_key` varchar(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `content_hash` char(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `file_name` varchar(255) NOT NULL,
+  `status` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `row_count` int unsigned NOT NULL DEFAULT '0',
+  `revision` int unsigned NOT NULL DEFAULT '1',
+  `imported_by_type` varchar(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `imported_by_user_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+  `imported_by_display_name` varchar(100) NOT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `activated_at` datetime(3) DEFAULT NULL,
+  `active_key` tinyint GENERATED ALWAYS AS ((case when (`status` = _ascii'active') then 1 else NULL end)) STORED,
+  PRIMARY KEY (`version_id`),
+  UNIQUE KEY `uq_admission_roster_versions_idempotency` (`idempotency_key`),
+  UNIQUE KEY `uq_admission_roster_versions_active` (`active_key`),
+  KEY `idx_admission_roster_versions_created` (`created_at`,`version_id`),
+  CONSTRAINT `chk_admission_roster_versions_status` CHECK ((`status` in (_ascii'active',_ascii'superseded'))),
+  CONSTRAINT `chk_admission_roster_versions_revision` CHECK ((`revision` >= 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `admission_roster_entries` (
+  `version_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `student_id` char(12) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `student_name` varchar(64) DEFAULT NULL,
+  `major` varchar(128) DEFAULT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`version_id`,`student_id`),
+  KEY `idx_admission_roster_entries_student` (`student_id`,`version_id`),
+  CONSTRAINT `fk_admission_roster_entries_version` FOREIGN KEY (`version_id`) REFERENCES `admission_roster_versions` (`version_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE `join_evidence_rebuild_operations` (
+  `actor_id` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `idempotency_key` varchar(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `result_json` json NOT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`actor_id`,`idempotency_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 -- Baseline rows required by runtime serialization and validation.
 INSERT INTO `feature_settings`
   (`setting_id`, `scope_type`, `group_id`, `settings_json`, `revision`, `updated_by_type`, `updated_by_user_id`, `updated_by_qq_user_id`, `updated_by_display_name`, `updated_by_role`)
@@ -605,6 +696,14 @@ INSERT INTO `student_id_rules`
   (`rule_id`, `config_json`, `revision`, `updated_by_type`, `updated_by_user_id`, `updated_by_qq_user_id`, `updated_by_display_name`, `updated_by_role`)
 VALUES
   ('student_id_rule', JSON_OBJECT('enabled', FALSE, 'student_id_length', 12, 'enrollment_year_segment', NULL, 'major_code_segment', NULL, 'mappings', JSON_ARRAY()), 1, 'system', NULL, NULL, 'system', NULL);
+
+INSERT INTO `join_approval_rule_state`
+  (`rule_version`, `status`, `evidence_version`, `activated_at`, `rebuilt_at`, `last_error_code`, `revision`)
+VALUES
+  (2, 'building', 0, NULL, NULL, NULL, 1);
+
+INSERT INTO `schema_migrations` (`version`, `name`, `applied_at`)
+VALUES (2, '002_join_approval_v2.sql', CURRENT_TIMESTAMP(3));
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;

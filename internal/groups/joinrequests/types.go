@@ -67,10 +67,7 @@ const (
 	ItemUnknown   ItemOutcome = "unknown"
 )
 
-const (
-	PolicyModeAIFieldsComplete = "ai_fields_complete"
-	AutoApprovalRuleVersion    = uint64(1)
-)
+const PolicyModeAIFieldsComplete = "ai_fields_complete"
 
 var requiredPolicyFields = [...]string{"student_id", "name", "major"}
 
@@ -111,6 +108,7 @@ type Request struct {
 	DecisionSource      *DecisionSource
 	AIParse             AIParseResult
 	StudentIDAssessment StudentIDAssessment
+	AutomaticReview     *AutomaticReview
 	RequestedAt         time.Time
 	Overdue             bool
 	Version             uint64
@@ -137,19 +135,20 @@ type PolicyPatch struct {
 }
 
 type Decision struct {
-	ID            string
-	RequestID     string
-	Action        Action
-	Source        DecisionSource
-	Status        AttemptStatus
-	Actor         *audit.Actor
-	Reason        *string
-	RuleVersion   *uint64
-	FieldSnapshot *ApplicantFields
-	StartedAt     time.Time
-	CompletedAt   *time.Time
-	ErrorCode     *string
-	TraceID       string
+	ID             string
+	RequestID      string
+	Action         Action
+	Source         DecisionSource
+	Status         AttemptStatus
+	Actor          *audit.Actor
+	Reason         *string
+	RuleVersion    *uint64
+	FieldSnapshot  *ApplicantFields
+	ReviewSnapshot *AutomaticReview
+	StartedAt      time.Time
+	CompletedAt    *time.Time
+	ErrorCode      *string
+	TraceID        string
 }
 
 type DecisionInput struct {
@@ -247,6 +246,7 @@ type BeginMutation struct {
 	PolicyRevision      *uint64
 	RuleVersion         *uint64
 	FieldSnapshots      map[string]ApplicantFields
+	ReviewSnapshots     map[string]AutomaticReview
 }
 
 type ReservedItem struct {

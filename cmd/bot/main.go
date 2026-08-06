@@ -119,7 +119,7 @@ type runtimeDependencies struct {
 
 func run(ctx context.Context, cfg config.Config, restartCoordinator *app.RestartCoordinator) error {
 	return runWithDependencies(ctx, cfg, runtimeDependencies{
-		openDatabase: openDatabaseResources,
+		openDatabase: openDatabaseResources, schemaAutomation: database.NewMigrator(),
 		buildApplication: func(ctx context.Context, cfg config.Config, database databaseResources) (applicationRunner, error) {
 			return buildApplication(ctx, cfg, database, restartCoordinator)
 		},
@@ -193,7 +193,7 @@ func buildApplication(
 
 	knowledgeIndex, knowledgeSync := initializeKnowledge(ctx, cfg.WPS, healthService)
 
-	aiSvc, applicantExtractor, err := newAIServices(ctx, cfg, knowledgeIndex)
+	aiSvc, applicantExtractor, majorCodeJudge, err := newAIServices(ctx, cfg, knowledgeIndex)
 	if err != nil {
 		log.Printf("ai service not available: %v", err)
 		healthService.SetAI(health.ComponentStatus{Available: false, Code: "unavailable", CheckedAt: time.Now().UTC(), LastErrorAt: time.Now().UTC()})
@@ -237,6 +237,7 @@ func buildApplication(
 			Context: ctx, Config: cfg, Store: store, Gateway: napcatGateway, Health: healthService,
 			SettingsRuntime: settingsRuntime, KnowledgeStore: knowledgeRuntime, KnowledgeReloader: knowledgeRuntime,
 			BotRestartScheduler: restartCoordinator, Location: location, Now: now, Logger: log.Default(),
+			MajorCodeJudge: majorCodeJudge,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("initialize management backend: %w", err)
@@ -660,9 +661,9 @@ func hasAIModelConfig(cfg config.AIConfig) bool {
 	}
 }
 
-func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.IndexRef) (*ai.Service, *ai.ApplicantExtractor, error) {
+func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.IndexRef) (*ai.Service, *ai.ApplicantExtractor, *ai.MajorCodeJudge, error) {
 	if !cfg.AI.Enabled || !hasAIModelConfig(cfg.AI) {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	chatModel, err := ai.NewEinoModel(ctx, ai.EinoModelConfig{
 		Provider: cfg.AI.Provider,
@@ -671,7 +672,7 @@ func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.Inde
 		Model:    cfg.AI.Model,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	reviewModel, err := ai.NewEinoModel(ctx, ai.EinoModelConfig{
 		Provider: cfg.AI.Provider,
@@ -681,7 +682,7 @@ func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.Inde
 		JSONOnly: true,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	service, err := ai.NewService(ctx, ai.Options{
 		Model:            chatModel,
@@ -691,9 +692,10 @@ func newAIServices(ctx context.Context, cfg config.Config, index *knowledge.Inde
 		MaxQuestionChars: cfg.AI.MaxQuestionChars,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return service, ai.NewApplicantExtractor(chatModel, time.Duration(cfg.AI.TimeoutSec)*time.Second), nil
+	timeout := time.Duration(cfg.AI.TimeoutSec) * time.Second
+	return service, ai.NewApplicantExtractor(chatModel, timeout), ai.NewMajorCodeJudge(reviewModel, timeout), nil
 }
 
 func applicationLocation(cfg config.Config) *time.Location {

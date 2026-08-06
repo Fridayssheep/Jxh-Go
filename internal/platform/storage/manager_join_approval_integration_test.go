@@ -42,8 +42,15 @@ VALUES (?, ?, 0, 500, 'admin', 'fresh', 1, ?, ?)`, 10001, "Integration Group", a
 	}
 
 	insertApprovedJoinRequest(t, db, "approved-manual", "302025315326", "计算机类", joinrequests.SourceManual, activation.Add(-24*time.Hour))
+	if err := db.Exec("UPDATE group_join_requests SET validation_snapshot = NULL WHERE flag = ?", "approved-manual").Error; err != nil {
+		t.Fatal(err)
+	}
 	insertApprovedJoinRequest(t, db, "approved-automatic", "302025315327", "计算机类", joinrequests.SourceAutomatic, activation.Add(-23*time.Hour))
 	insertApprovedJoinRequest(t, db, "approved-invalid-id", "30202531532", "计算机类", joinrequests.SourceManual, activation.Add(-22*time.Hour))
+	insertApprovedJoinRequest(t, db, "approved-invalid-fields", "302025315329", "计算机类", joinrequests.SourceManual, activation.Add(-22*time.Hour))
+	if err := db.Exec("UPDATE group_join_requests SET comment = ? WHERE flag = ?", "302025315329 测试同学", "approved-invalid-fields").Error; err != nil {
+		t.Fatal(err)
+	}
 	insertUnapprovedJoinRequest(t, db, "rejected-manual", "302025315328", "计算机类", activation.Add(-21*time.Hour), joinrequests.DecisionRejected)
 
 	rebuild, err := store.RebuildMajorEvidence(ctx, joinrequests.EvidenceRebuildMutation{Context: systemJoinMutation("integration-rebuild", activation)})

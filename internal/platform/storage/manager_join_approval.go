@@ -253,26 +253,35 @@ func normalizeEvidenceMajor(value string) string {
 }
 
 type approvedEvidenceSource struct {
-	RequestID      uint64 `gorm:"column:request_id"`
-	StudentID      string `gorm:"column:student_id"`
-	Major          string `gorm:"column:major"`
-	DecisionID     string `gorm:"column:decision_id"`
-	ApprovalSource string `gorm:"column:approval_source"`
-	GroupID        int64  `gorm:"column:group_id"`
+	RequestID           uint64 `gorm:"column:request_id"`
+	StudentID           string `gorm:"column:student_id"`
+	StudentName         string `gorm:"column:student_name"`
+	Major               string `gorm:"column:major"`
+	VerificationMessage string `gorm:"column:verification_message"`
+	DecisionID          string `gorm:"column:decision_id"`
+	ApprovalSource      string `gorm:"column:approval_source"`
+	GroupID             int64  `gorm:"column:group_id"`
 }
 
 func approvedEvidenceQuery(tx *gorm.DB) *gorm.DB {
-	return tx.Table("group_join_requests AS request").Select(`request.id AS request_id, request.student_id, request.major,
+	return tx.Table("group_join_requests AS request").Select(`request.id AS request_id, request.student_id, request.student_name,
+request.major, COALESCE(request.comment, '') AS verification_message,
 decision.decision_id, decision.source AS approval_source, request.group_id`).
 		Joins("JOIN group_join_decisions AS decision ON decision.decision_id = request.last_decision_id AND decision.request_id = request.id").
 		Where("request.decision_status = ? AND request.ai_parse_status = ? AND decision.status = ? AND decision.action = ? AND decision.source IN ?",
 			joinrequests.DecisionApproved, joinrequests.AIParseSucceeded, joinrequests.AttemptConfirmed, joinrequests.ActionApprove,
 			[]joinrequests.DecisionSource{joinrequests.SourceManual, joinrequests.SourceAutomatic}).
-		Where("request.student_id IS NOT NULL AND request.major IS NOT NULL AND request.group_id IS NOT NULL").
-		Where("JSON_EXTRACT(request.validation_snapshot, '$.valid') = TRUE")
+		Where("request.student_id IS NOT NULL AND request.student_name IS NOT NULL AND request.major IS NOT NULL AND request.group_id IS NOT NULL")
 }
 
 func insertEvidenceSource(tx *gorm.DB, source approvedEvidenceSource, now time.Time) (bool, error) {
+	studentID, studentName, major := source.StudentID, source.StudentName, source.Major
+	fields := joinrequests.ValidateApplicantFields(joinrequests.ApplicantFields{
+		StudentID: &studentID, Name: &studentName, Major: &major,
+	}, source.VerificationMessage)
+	if !fields.Valid {
+		return false, nil
+	}
 	check := joinrequests.CheckStudentID(source.StudentID, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
 	if !check.LengthValid || !check.Numeric || strings.TrimSpace(source.Major) == "" {
 		return false, nil

@@ -122,6 +122,12 @@ type reviewReasonProvider struct{}
 
 func (reviewReasonProvider) AutoRejectReason() string { return "legacy reason" }
 
+type injectedRosterReader struct{ record AdmissionRosterRecord }
+
+func (r injectedRosterReader) Lookup(context.Context, string) (AdmissionRosterRecord, error) {
+	return r.record, nil
+}
+
 func validReviewCandidate(now time.Time) AutoCandidate {
 	studentID, name, major := "302026315326", "测试同学", "计算机类"
 	fields := ApplicantFields{StudentID: &studentID, Name: &name, Major: &major, Valid: true}
@@ -302,5 +308,28 @@ func TestAutomaticDecisionRespectsIndependentPolicySwitches(t *testing.T) {
 	action, review, eligible, err = service.automaticDecision(context.Background(), invalid, rejectDisabled)
 	if err != nil || eligible || action != ActionReject || review.Outcome != ReviewRejected {
 		t.Fatalf("failed review must stay manual when rejection is disabled: action=%s eligible=%v review=%+v err=%v", action, eligible, review, err)
+	}
+}
+
+func TestAutomaticDecisionUsesInjectedRosterReader(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	candidate := validReviewCandidate(now)
+	store := &reviewStore{evidence: MajorEvidence{
+		EnrollmentYear: "2026", MajorCode: "315", TotalSamples: 3, Version: 2,
+		MajorCounts: []MajorCount{{Major: "计算机类", Count: 3}},
+	}}
+	service, err := NewService(Options{
+		Store: store, Approver: &reviewApprover{}, AutoRejectReasons: reviewReasonProvider{},
+		Now: func() time.Time { return now }, Location: time.UTC,
+		RosterReader: injectedRosterReader{record: AdmissionRosterRecord{Configured: true, DatasetVersion: "external-v1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	action, review, eligible, err := service.automaticDecision(context.Background(), candidate.Request, candidate.Policy)
+	if err != nil || action != ActionReject || !eligible || review.ReasonCode != "student_not_in_roster" ||
+		review.Roster.DatasetVersion == nil || *review.Roster.DatasetVersion != "external-v1" {
+		t.Fatalf("injected roster reader was not used: action=%s eligible=%v review=%+v err=%v", action, eligible, review, err)
 	}
 }

@@ -127,7 +127,7 @@ func (s *Service) ImportAdmissionRoster(ctx context.Context, principal auth.Prin
 		return AdmissionRosterStatus{}, err
 	}
 	digest := sha256.Sum256(data)
-	result, err := s.store.Import(ctx, AdmissionRosterImport{
+	result, err := s.rosterImporter.Import(ctx, AdmissionRosterImport{
 		Context: mutationContext(principal, request, s.now()), IdempotencyKey: idempotencyKey,
 		FileName: fileName, ContentHash: hex.EncodeToString(digest[:]), Entries: entries,
 	})

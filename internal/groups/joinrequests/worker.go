@@ -159,7 +159,7 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 	if !review.StudentID.YearValid {
 		return reject("enrollment_year_mismatch", fmt.Sprintf("学号中的入学年份为 %s，当前应为 %s。", review.StudentID.EnrollmentYear, review.StudentID.ExpectedYear))
 	}
-	roster, err := s.store.Lookup(ctx, studentID)
+	roster, err := s.rosterReader.Lookup(ctx, studentID)
 	if err != nil {
 		review.Outcome, review.Roster.Status, review.ReasonCode, review.Reason = ReviewDependencyPending, RosterUnavailable, "roster_unavailable", "录取名单服务暂时不可用，等待重试。"
 		return "", review, false, fmt.Errorf("lookup admission roster: %w", ErrDependencyUnavailable)

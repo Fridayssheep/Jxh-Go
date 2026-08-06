@@ -94,6 +94,8 @@ type Options struct {
 	PersistenceRetryDelay time.Duration
 	WorkerContext         context.Context
 	MajorCodeJudge        MajorCodeJudge
+	RosterReader          AdmissionRosterReader
+	RosterImporter        AdmissionRosterImporter
 	Location              *time.Location
 }
 
@@ -116,6 +118,8 @@ type Service struct {
 	wait               sync.WaitGroup
 	studentIDRule      atomic.Pointer[StudentIDRule]
 	majorCodeJudge     MajorCodeJudge
+	rosterReader       AdmissionRosterReader
+	rosterImporter     AdmissionRosterImporter
 	location           *time.Location
 }
 
@@ -147,6 +151,13 @@ func NewService(options Options) (*Service, error) {
 		overdueAfter: overdueAfter, decisionTimeout: decisionTimeout, processingLease: processingLease,
 		persistenceTimeout: persistenceTimeout, retryDelay: retryDelay, workerCtx: workerContext, cancel: cancel,
 		majorCodeJudge: options.MajorCodeJudge, location: options.Location,
+		rosterReader: options.RosterReader, rosterImporter: options.RosterImporter,
+	}
+	if service.rosterReader == nil {
+		service.rosterReader = options.Store
+	}
+	if service.rosterImporter == nil {
+		service.rosterImporter = options.Store
 	}
 	if service.location == nil {
 		service.location = time.Local

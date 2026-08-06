@@ -214,5 +214,9 @@ func ensureEntryIDs(entries []Entry) {
 }
 
 func normalizeLookup(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+	return strings.ToLower(strings.TrimSpace(foldFullwidthPercent(value)))
+}
+
+func foldFullwidthPercent(value string) string {
+	return strings.ReplaceAll(value, "\uFF05", "%")
 }

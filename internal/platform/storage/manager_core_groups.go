@@ -17,7 +17,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const managerGroupSyncOperation = "groups.sync"
+const (
+	managerGroupSyncOperation   = "groups.sync"
+	managerGroupNoticeOperation = "groups.notice.publish"
+)
 
 type managerSyncAuditMetadata struct {
 	Phase        string     `json:"phase"`
@@ -27,6 +30,13 @@ type managerSyncAuditMetadata struct {
 	RemovedCount uint64     `json:"removed_count"`
 	TotalCount   uint64     `json:"total_count"`
 	ErrorCode    string     `json:"error_code,omitempty"`
+}
+
+type managerNoticeAuditMetadata struct {
+	Phase     string                      `json:"phase"`
+	Targets   []groups.NoticeTarget       `json:"targets,omitempty"`
+	Result    *groups.NoticePublishResult `json:"result,omitempty"`
+	ErrorCode string                      `json:"error_code,omitempty"`
 }
 
 type managerRemoteGroup struct {
@@ -457,6 +467,186 @@ func (s *Store) RecoverInterruptedGroupSyncs(ctx context.Context, recoveredAt ti
 	return count, err
 }
 
+func (s *Store) BeginGroupNoticePublication(
+	ctx context.Context,
+	begin groups.BeginNoticePublication,
+) (reservation groups.NoticeReservation, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		requestedAt := begin.RequestedAt.UTC()
+		var existing managerIdempotencyKey
+		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+			"actor_type = ? AND actor_id = ? AND operation = ? AND idempotency_key = ?",
+			managerActorAdminUser, begin.Context.Actor.UserID, managerGroupNoticeOperation, begin.IdempotencyKey,
+		).Take(&existing).Error
+		if findErr == nil {
+			if !existing.ExpiresAt.After(requestedAt) && existing.State == managerIdempotencyCompleted {
+				if deleteErr := tx.Delete(&existing).Error; deleteErr != nil {
+					return deleteErr
+				}
+				findErr = gorm.ErrRecordNotFound
+			} else {
+				if existing.RequestHash != begin.RequestHash {
+					return groups.ErrIdempotencyConflict
+				}
+				var replayErr error
+				reservation, replayErr = managerNoticeReservation(tx, existing)
+				return replayErr
+			}
+		}
+		if !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return findErr
+		}
+
+		publicationID, idErr := newManagerID("gnp")
+		if idErr != nil {
+			return idErr
+		}
+		auditContext, contextErr := managerAuditContextForMutation(tx, begin.Context.Actor, begin.Context.Request)
+		if contextErr != nil {
+			return contextErr
+		}
+		resourceType := "group_notice_publication"
+		model := managerIdempotencyKey{
+			ActorType: managerActorAdminUser, ActorID: begin.Context.Actor.UserID, Operation: managerGroupNoticeOperation,
+			IdempotencyKey: begin.IdempotencyKey, RequestHash: begin.RequestHash, State: managerIdempotencyInProgress,
+			ResourceType: &resourceType, ResourceID: &publicationID, TraceID: &publicationID,
+			CreatedAt: requestedAt, ExpiresAt: requestedAt.Add(managerIdempotencyTTL),
+		}
+		if createErr := tx.Create(&model).Error; createErr != nil {
+			if isManagerDuplicateKey(createErr) {
+				return groups.ErrIdempotencyConflict
+			}
+			return createErr
+		}
+		if auditErr := insertManagerAudit(tx, managerAuditEntry{
+			Context: auditContext, OccurredAt: requestedAt, ScopeType: "groups", Action: managerGroupNoticeOperation,
+			TargetType: resourceType, TargetID: publicationID, Result: audit.ResultSuccess,
+			Metadata: managerNoticeAuditMetadata{Phase: "requested", Targets: append([]groups.NoticeTarget(nil), begin.Targets...)},
+		}); auditErr != nil {
+			return auditErr
+		}
+		reservation = groups.NoticeReservation{PublicationID: publicationID, Fresh: true, InProgress: true}
+		return nil
+	})
+	return reservation, err
+}
+
+func (s *Store) CompleteGroupNoticePublication(
+	ctx context.Context,
+	completion groups.CompleteNoticePublication,
+) (result groups.NoticePublishResult, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		idempotency, loadErr := loadManagerNoticeIdempotency(tx, completion.PublicationID)
+		if loadErr != nil {
+			return loadErr
+		}
+		if idempotency.State == managerIdempotencyCompleted {
+			reservation, replayErr := managerNoticeReservation(tx, idempotency)
+			if replayErr != nil {
+				return replayErr
+			}
+			if reservation.Result == nil {
+				return errManagerInvalidState
+			}
+			result = *reservation.Result
+			return nil
+		}
+		if idempotency.State != managerIdempotencyInProgress || completion.Result.PublicationID != completion.PublicationID {
+			return errManagerInvalidState
+		}
+		auditContext, contextErr := findManagerAuditContext(tx, managerGroupNoticeOperation, completion.PublicationID)
+		if contextErr != nil {
+			return contextErr
+		}
+		result = completion.Result
+		resultStatus, auditResult, errorCode := managerNoticeOutcome(result.Status)
+		completedAt := result.CompletedAt.UTC()
+		updates := map[string]any{
+			"state": managerIdempotencyCompleted, "result_status": resultStatus, "response_status": uint16(200),
+			"completed_at": completedAt,
+		}
+		if errorCode != "" {
+			updates["error_code"] = errorCode
+		}
+		update := tx.Model(&managerIdempotencyKey{}).
+			Where("idempotency_id = ? AND state = ?", idempotency.ID, managerIdempotencyInProgress).Updates(updates)
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected != 1 {
+			return groups.ErrConflict
+		}
+		resultCopy := result
+		return insertManagerAudit(tx, managerAuditEntry{
+			Context: auditContext, OccurredAt: completedAt, ScopeType: "groups", Action: managerGroupNoticeOperation,
+			TargetType: "group_notice_publication", TargetID: completion.PublicationID, Result: auditResult,
+			ErrorCode: errorCode, Metadata: managerNoticeAuditMetadata{Phase: "completed", Result: &resultCopy, ErrorCode: errorCode},
+		})
+	})
+	return result, err
+}
+
+func (s *Store) RecoverInterruptedGroupNoticePublications(ctx context.Context, recoveredAt time.Time) (count int, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var models []managerIdempotencyKey
+		if loadErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("operation = ? AND state = ?", managerGroupNoticeOperation, managerIdempotencyInProgress).
+			Order("idempotency_id ASC").Find(&models).Error; loadErr != nil {
+			return loadErr
+		}
+		completedAt := recoveredAt.UTC()
+		for _, model := range models {
+			if model.TraceID == nil || *model.TraceID == "" {
+				return errManagerInvalidState
+			}
+			publicationID := *model.TraceID
+			targets, loadErr := loadManagerNoticeTargets(tx, publicationID)
+			if loadErr != nil {
+				return loadErr
+			}
+			items := make([]groups.NoticePublishItem, len(targets))
+			for index, target := range targets {
+				items[index] = groups.NoticePublishItem{
+					Group: target, BotRole: groups.RoleUnknown, Status: groups.NoticeItemUnknown,
+					ErrorCode: "publication_interrupted",
+				}
+			}
+			result := groups.NoticePublishResult{
+				PublicationID: publicationID, Status: groups.NoticePublishUnknown,
+				RequestedCount: uint64(len(items)), UnknownCount: uint64(len(items)), Items: items, CompletedAt: completedAt,
+			}
+			auditContext, contextErr := findManagerAuditContext(tx, managerGroupNoticeOperation, publicationID)
+			if contextErr != nil {
+				return contextErr
+			}
+			status := "unknown"
+			code := "publication_interrupted"
+			update := tx.Model(&managerIdempotencyKey{}).
+				Where("idempotency_id = ? AND state = ?", model.ID, managerIdempotencyInProgress).
+				Updates(map[string]any{
+					"state": managerIdempotencyCompleted, "result_status": status, "response_status": uint16(500),
+					"error_code": code, "completed_at": completedAt,
+				})
+			if update.Error != nil {
+				return update.Error
+			}
+			if update.RowsAffected != 1 {
+				return groups.ErrConflict
+			}
+			if auditErr := insertManagerAudit(tx, managerAuditEntry{
+				Context: auditContext, OccurredAt: completedAt, ScopeType: "groups", Action: managerGroupNoticeOperation,
+				TargetType: "group_notice_publication", TargetID: publicationID, Result: audit.ResultUnknown,
+				ErrorCode: code, Metadata: managerNoticeAuditMetadata{Phase: "recovered", Result: &result, ErrorCode: code},
+			}); auditErr != nil {
+				return auditErr
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
 func loadManagerGroupOverrides(tx *gorm.DB, models []managerManagedGroup) (map[int64]settings.Overrides, error) {
 	result := make(map[int64]settings.Overrides)
 	if len(models) == 0 {
@@ -595,6 +785,84 @@ func loadManagerSyncIdempotency(tx *gorm.DB, executionID string) (managerIdempot
 	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where("operation = ? AND trace_id = ?", managerGroupSyncOperation, executionID).Take(&model).Error
 	return model, err
+}
+
+func loadManagerNoticeIdempotency(tx *gorm.DB, publicationID string) (managerIdempotencyKey, error) {
+	var model managerIdempotencyKey
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("operation = ? AND trace_id = ?", managerGroupNoticeOperation, publicationID).Take(&model).Error
+	return model, err
+}
+
+func managerNoticeReservation(tx *gorm.DB, model managerIdempotencyKey) (groups.NoticeReservation, error) {
+	if model.TraceID == nil || *model.TraceID == "" {
+		return groups.NoticeReservation{}, errManagerInvalidState
+	}
+	reservation := groups.NoticeReservation{PublicationID: *model.TraceID}
+	switch model.State {
+	case managerIdempotencyInProgress:
+		reservation.InProgress = true
+		return reservation, nil
+	case managerIdempotencyCompleted:
+		result, err := loadManagerNoticeResult(tx, *model.TraceID)
+		if err != nil {
+			return groups.NoticeReservation{}, err
+		}
+		reservation.Result = &result
+		return reservation, nil
+	default:
+		return groups.NoticeReservation{}, errManagerInvalidState
+	}
+}
+
+func loadManagerNoticeResult(tx *gorm.DB, publicationID string) (groups.NoticePublishResult, error) {
+	var logs []managerAdminAuditLog
+	if err := tx.Where("action = ? AND target_id = ?", managerGroupNoticeOperation, publicationID).
+		Order("occurred_at DESC").Order("audit_log_id DESC").Find(&logs).Error; err != nil {
+		return groups.NoticePublishResult{}, err
+	}
+	for _, log := range logs {
+		var metadata managerNoticeAuditMetadata
+		if err := json.Unmarshal(log.Metadata, &metadata); err != nil {
+			return groups.NoticePublishResult{}, fmt.Errorf("decode group notice result: %w", err)
+		}
+		if metadata.Result == nil || (metadata.Phase != "completed" && metadata.Phase != "recovered") {
+			continue
+		}
+		return *metadata.Result, nil
+	}
+	return groups.NoticePublishResult{}, errManagerInvalidState
+}
+
+func loadManagerNoticeTargets(tx *gorm.DB, publicationID string) ([]groups.NoticeTarget, error) {
+	var logs []managerAdminAuditLog
+	if err := tx.Where("action = ? AND target_id = ?", managerGroupNoticeOperation, publicationID).
+		Order("occurred_at ASC").Order("audit_log_id ASC").Find(&logs).Error; err != nil {
+		return nil, err
+	}
+	for _, log := range logs {
+		var metadata managerNoticeAuditMetadata
+		if err := json.Unmarshal(log.Metadata, &metadata); err != nil {
+			return nil, fmt.Errorf("decode group notice targets: %w", err)
+		}
+		if metadata.Phase == "requested" && len(metadata.Targets) > 0 {
+			return append([]groups.NoticeTarget(nil), metadata.Targets...), nil
+		}
+	}
+	return nil, errManagerInvalidState
+}
+
+func managerNoticeOutcome(status groups.NoticePublishStatus) (string, audit.Result, string) {
+	switch status {
+	case groups.NoticePublishSucceeded:
+		return "succeeded", audit.ResultSuccess, ""
+	case groups.NoticePublishPartial:
+		return "succeeded", audit.ResultSuccess, "partial"
+	case groups.NoticePublishFailed:
+		return "failed", audit.ResultFailed, "publication_failed"
+	default:
+		return "unknown", audit.ResultUnknown, "publication_unknown"
+	}
 }
 
 func managerGroupSyncReservation(tx *gorm.DB, model managerIdempotencyKey) (groups.SyncReservation, error) {

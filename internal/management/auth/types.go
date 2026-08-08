@@ -16,6 +16,7 @@ const (
 	PermissionOverviewRead       Permission = "overview:read"
 	PermissionGroupsRead         Permission = "groups:read"
 	PermissionGroupsSync         Permission = "groups:sync"
+	PermissionGroupNoticesWrite  Permission = "group_notices:write"
 	PermissionSettingsRead       Permission = "settings:read"
 	PermissionSettingsWrite      Permission = "settings:write"
 	PermissionJoinRequestsRead   Permission = "join_requests:read"

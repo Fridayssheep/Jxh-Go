@@ -17,6 +17,7 @@ type GroupOperations interface {
 	List(ctx context.Context, principal auth.Principal, query groups.ListQuery) (groups.Page, error)
 	Get(ctx context.Context, principal auth.Principal, id string) (groups.Group, error)
 	Sync(ctx context.Context, principal auth.Principal, idempotencyKey string, request auth.MutationContext) (groups.SyncResult, error)
+	PublishNotices(ctx context.Context, principal auth.Principal, input groups.NoticePublishInput, idempotencyKey string, request auth.MutationContext) (groups.NoticePublishResult, error)
 }
 
 type GroupHandlers struct {
@@ -38,6 +39,9 @@ func (h *GroupHandlers) Register(router *Router) error {
 		return err
 	}
 	if err := router.HandleFunc(http.MethodPost, "/api/admin/v1/groups/sync", mutationRoute(auth.PermissionGroupsSync), h.sync); err != nil {
+		return err
+	}
+	if err := router.HandleFunc(http.MethodPost, "/api/admin/v1/groups/notices", mutationRoute(auth.PermissionGroupNoticesWrite), h.publishNotices); err != nil {
 		return err
 	}
 	return router.HandleFunc(http.MethodGet, "/api/admin/v1/groups/{group_id}", RouteOptions{Permission: auth.PermissionGroupsRead}, h.get)
@@ -90,6 +94,26 @@ func (h *GroupHandlers) sync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mapGroupSyncResult(result))
 }
 
+func (h *GroupHandlers) publishNotices(w http.ResponseWriter, r *http.Request) {
+	idempotencyKey, ok := requiredIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var body groupNoticePublishRequestDTO
+	if !decodeRequestJSON(w, r, &body) {
+		return
+	}
+	identity, _ := AuthFromContext(r.Context())
+	result, err := h.service.PublishNotices(r.Context(), principalFromAuth(identity), groups.NoticePublishInput{
+		GroupIDs: append([]string(nil), body.GroupIDs...), Content: body.Content,
+	}, idempotencyKey, mutationContextFromRequest(r))
+	if err != nil {
+		h.writeServiceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mapGroupNoticePublishResult(result))
+}
+
 func (h *GroupHandlers) writeServiceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, groups.ErrForbidden):
@@ -102,6 +126,8 @@ func (h *GroupHandlers) writeServiceError(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, r, http.StatusConflict, "idempotency_key_reused", "idempotency key was used with different input", nil, false)
 	case errors.Is(err, groups.ErrConflict):
 		writeAPIError(w, r, http.StatusConflict, CodeConflict, "group synchronization is already in progress", nil, false)
+	case errors.Is(err, groups.ErrNoticeInProgress):
+		writeAPIError(w, r, http.StatusConflict, CodeConflict, "group notice publication is already in progress", nil, true)
 	case errors.Is(err, groups.ErrGatewayUnavailable):
 		w.Header().Set("Retry-After", "3")
 		writeAPIError(w, r, http.StatusServiceUnavailable, "dependency_unavailable", "NapCat is currently unavailable", nil, true)
@@ -202,6 +228,35 @@ type groupSyncResultDTO struct {
 	TotalCount   uint64    `json:"total_count"`
 }
 
+type groupNoticePublishRequestDTO struct {
+	GroupIDs []string `json:"group_ids"`
+	Content  string   `json:"content"`
+}
+
+type groupNoticePublishItemDTO struct {
+	Group     groupReferenceDTO       `json:"group"`
+	BotRole   groups.Role             `json:"bot_role"`
+	Status    groups.NoticeItemStatus `json:"status"`
+	ErrorCode string                  `json:"error_code,omitempty"`
+}
+
+type groupNoticePublishResultDTO struct {
+	PublicationID  string                      `json:"publication_id"`
+	Status         groups.NoticePublishStatus  `json:"status"`
+	RequestedCount uint64                      `json:"requested_count"`
+	PublishedCount uint64                      `json:"published_count"`
+	DeniedCount    uint64                      `json:"denied_count"`
+	FailedCount    uint64                      `json:"failed_count"`
+	UnknownCount   uint64                      `json:"unknown_count"`
+	Items          []groupNoticePublishItemDTO `json:"items"`
+	CompletedAt    time.Time                   `json:"completed_at"`
+}
+
+type groupReferenceDTO struct {
+	ID   string `json:"group_id"`
+	Name string `json:"name"`
+}
+
 func mapGroup(value groups.Group) groupDTO {
 	features := make([]groupFeatureDTO, len(value.Features))
 	for index, feature := range value.Features {
@@ -221,5 +276,20 @@ func mapGroupSyncResult(value groups.SyncResult) groupSyncResultDTO {
 	return groupSyncResultDTO{
 		SyncedAt: value.SyncedAt.UTC(), AddedCount: value.AddedCount, UpdatedCount: value.UpdatedCount,
 		RemovedCount: value.RemovedCount, TotalCount: value.TotalCount,
+	}
+}
+
+func mapGroupNoticePublishResult(value groups.NoticePublishResult) groupNoticePublishResultDTO {
+	items := make([]groupNoticePublishItemDTO, len(value.Items))
+	for index, item := range value.Items {
+		items[index] = groupNoticePublishItemDTO{
+			Group: groupReferenceDTO{ID: item.Group.GroupID, Name: item.Group.Name}, BotRole: item.BotRole,
+			Status: item.Status, ErrorCode: item.ErrorCode,
+		}
+	}
+	return groupNoticePublishResultDTO{
+		PublicationID: value.PublicationID, Status: value.Status, RequestedCount: value.RequestedCount,
+		PublishedCount: value.PublishedCount, DeniedCount: value.DeniedCount, FailedCount: value.FailedCount,
+		UnknownCount: value.UnknownCount, Items: items, CompletedAt: value.CompletedAt.UTC(),
 	}
 }

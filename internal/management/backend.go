@@ -213,6 +213,7 @@ func NewBackend(options Options) (*Backend, error) {
 	}
 	groupService, err = groups.NewService(groups.Options{
 		Store: options.Store, Gateway: options.Gateway, Events: hub, Now: options.Now, WorkerContext: options.Context,
+		IdempotencySecret: secrets.GroupOperation,
 	})
 	if err != nil {
 		return fail(fmt.Errorf("create group service: %w", err))
@@ -332,8 +333,8 @@ func loadRuntimeState(
 	if err := commands.LoadRegistry(ctx); err != nil {
 		return fmt.Errorf("load custom command registry: %w", err)
 	}
-	if _, err := groupsService.RecoverInterruptedSyncs(ctx); err != nil {
-		return fmt.Errorf("recover group syncs: %w", err)
+	if _, err := groupsService.RecoverInterruptedOperations(ctx); err != nil {
+		return fmt.Errorf("recover group operations: %w", err)
 	}
 	if err := joinRequestService.ReloadStudentIDRule(ctx); err != nil {
 		return fmt.Errorf("load student ID rule: %w", err)

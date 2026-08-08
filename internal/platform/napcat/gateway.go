@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,7 @@ func (e *OperationError) SafeFailureCode() string { return string(e.Code) }
 const (
 	maxGroupRequestFlagLength   = 512
 	maxGroupRequestReasonLength = 500
+	maxGroupNoticeContentLength = 5000
 	maxJSONSafeInteger          = 1<<53 - 1
 )
 
@@ -347,6 +349,35 @@ func (g *Gateway) SetGroupAddRequest(ctx context.Context, flag string, approve b
 		return safeOperationError("set_group_add_request", err)
 	}
 	return nil
+}
+
+func (g *Gateway) PublishGroupNotice(ctx context.Context, groupID int64, content string) error {
+	client, err := g.client()
+	if err != nil {
+		return err
+	}
+	content = strings.TrimSpace(content)
+	if groupID <= 0 || content == "" || !utf8.ValidString(content) ||
+		utf8.RuneCountInString(content) > maxGroupNoticeContentLength {
+		return fmt.Errorf("group notice input is invalid")
+	}
+	request := api.UnderscoreSendGroupNoticeRequest{
+		GroupID:         groupIDString(groupID),
+		Content:         content,
+		Pinned:          api.UnderscoreSendGroupNoticeRequestPinnedUnion{Raw: []byte("0")},
+		Type:            api.UnderscoreSendGroupNoticeRequestTypeUnion{Raw: []byte("1")},
+		ConfirmRequired: api.UnderscoreSendGroupNoticeRequestConfirmRequiredUnion{Raw: []byte("1")},
+		IsShowEditCard:  api.UnderscoreSendGroupNoticeRequestIsShowEditCardUnion{Raw: []byte("0")},
+		TipWindowType:   api.UnderscoreSendGroupNoticeRequestTipWindowTypeUnion{Raw: []byte("0")},
+	}
+	if _, err := client.UnderscoreSendGroupNotice(ctx, request); err != nil {
+		return safeOperationError("send_group_notice", err)
+	}
+	return nil
+}
+
+func groupIDString(groupID int64) string {
+	return strconv.FormatInt(groupID, 10)
 }
 
 func (g *Gateway) JoinRequestDecisionAvailable() bool {

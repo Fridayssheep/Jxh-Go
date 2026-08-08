@@ -24,6 +24,7 @@ var (
 	ErrConflict            = errors.New("group sync conflict")
 	ErrIdempotencyConflict = errors.New("group sync idempotency conflict")
 	ErrGatewayUnavailable  = errors.New("group gateway unavailable")
+	ErrNoticeInProgress    = errors.New("group notice publication is already in progress")
 )
 
 type Role string
@@ -166,6 +167,9 @@ type Store interface {
 	// last successful group directory snapshot.
 	FailGroupSync(ctx context.Context, failure FailSync) error
 	RecoverInterruptedGroupSyncs(ctx context.Context, recoveredAt time.Time) (int, error)
+	BeginGroupNoticePublication(ctx context.Context, begin BeginNoticePublication) (NoticeReservation, error)
+	CompleteGroupNoticePublication(ctx context.Context, completion CompleteNoticePublication) (NoticePublishResult, error)
+	RecoverInterruptedGroupNoticePublications(ctx context.Context, recoveredAt time.Time) (int, error)
 }
 
 type Gateway interface {
@@ -173,6 +177,7 @@ type Gateway interface {
 	GetGroupList(ctx context.Context) ([]napcat.GroupInfo, error)
 	GetLoginUserID(ctx context.Context) (int64, error)
 	GetGroupMemberRole(ctx context.Context, groupID, userID int64) (string, error)
+	PublishGroupNotice(ctx context.Context, groupID int64, content string) error
 }
 
 type EventPublisher interface {
@@ -189,6 +194,8 @@ type Options struct {
 	MaxRoleWorkers        int
 	WorkerContext         context.Context
 	PersistenceRetryDelay time.Duration
+	IdempotencySecret     []byte
+	MaxNoticeWorkers      int
 }
 
 type Service struct {
@@ -202,6 +209,8 @@ type Service struct {
 	workerCtx      context.Context
 	cancel         context.CancelFunc
 	retryDelay     time.Duration
+	idempotencyKey []byte
+	noticeWorkers  int
 	lifecycleMu    sync.Mutex
 	closed         bool
 	wait           sync.WaitGroup
@@ -214,7 +223,7 @@ var featureOrder = []FeatureKey{
 }
 
 func NewService(options Options) (*Service, error) {
-	if options.Store == nil || options.Gateway == nil || options.Now == nil {
+	if options.Store == nil || options.Gateway == nil || options.Now == nil || len(options.IdempotencySecret) < 32 {
 		return nil, ErrInvalidInput
 	}
 	if options.StaleAfter <= 0 {
@@ -229,6 +238,12 @@ func NewService(options Options) (*Service, error) {
 	if options.MaxRoleWorkers > 32 {
 		return nil, ErrInvalidInput
 	}
+	if options.MaxNoticeWorkers <= 0 {
+		options.MaxNoticeWorkers = 4
+	}
+	if options.MaxNoticeWorkers > 8 {
+		return nil, ErrInvalidInput
+	}
 	if options.PersistenceRetryDelay <= 0 {
 		options.PersistenceRetryDelay = time.Second
 	}
@@ -241,6 +256,7 @@ func NewService(options Options) (*Service, error) {
 		store: options.Store, gateway: options.Gateway, events: options.Events, now: options.Now,
 		staleAfter: options.StaleAfter, syncTimeout: options.SyncTimeout, maxRoleWorkers: options.MaxRoleWorkers,
 		workerCtx: workerContext, cancel: cancel, retryDelay: options.PersistenceRetryDelay,
+		idempotencyKey: append([]byte(nil), options.IdempotencySecret...), noticeWorkers: options.MaxNoticeWorkers,
 	}, nil
 }
 

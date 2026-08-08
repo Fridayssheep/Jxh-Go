@@ -16,6 +16,7 @@ type Secrets struct {
 	AdminMutation      []byte
 	SystemOperation    []byte
 	KnowledgeOperation []byte
+	GroupOperation     []byte
 	CommandArgument    []byte
 	TelemetryUser      []byte
 }
@@ -30,6 +31,7 @@ func DeriveSecrets(master []byte) (Secrets, error) {
 		AdminMutation:      derive(master, "admin-mutation"),
 		SystemOperation:    derive(master, "system-operation"),
 		KnowledgeOperation: derive(master, "knowledge-operation"),
+		GroupOperation:     derive(master, "group-operation"),
 		CommandArgument:    derive(master, "command-argument"),
 		TelemetryUser:      derive(master, "telemetry-user"),
 	}, nil

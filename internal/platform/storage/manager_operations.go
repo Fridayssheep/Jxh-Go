@@ -2545,11 +2545,11 @@ func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore tim
 		return nil
 	}
 	accumulators := make(map[string]*dailyAccumulator)
-	dates := make(map[string]time.Time)
+	dates := make(map[string]struct{})
 	for _, event := range events {
 		local := event.OccurredAt.In(location)
 		date := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
-		dates[date.Format("2006-01-02")] = date
+		dates[date.Format("2006-01-02")] = struct{}{}
 		groups := []int64{0}
 		if event.GroupID != nil && *event.GroupID != 0 {
 			groups = append(groups, *event.GroupID)
@@ -2613,18 +2613,22 @@ func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore tim
 		rows = append(rows, accumulator.row)
 	}
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		dateValues := make([]time.Time, 0, len(dates))
-		for _, date := range dates {
+		// bucket_date is DATE; date-only strings avoid DSN location conversion adding a time component.
+		dateValues := make([]string, 0, len(dates))
+		for date := range dates {
 			dateValues = append(dateValues, date)
 		}
+		sort.Strings(dateValues)
 		if err := tx.Where("timezone = ? AND bucket_date IN ?", timezone, dateValues).Delete(&telemetryDailyManagerRow{}).Error; err != nil {
 			return fmt.Errorf("delete existing telemetry daily rows for %d date(s): %w", len(dateValues), err)
 		}
 		if len(rows) == 0 {
 			return nil
 		}
-		if err := tx.Omit("UpdatedAt").CreateInBatches(rows, 500).Error; err != nil {
-			return fmt.Errorf("insert %d telemetry daily rows: %w", len(rows), err)
+		if err := tx.Clauses(clause.OnConflict{
+			DoUpdates: clause.AssignmentColumns([]string{"value_count", "value_sum", "sample_count"}),
+		}).Omit("UpdatedAt").CreateInBatches(rows, 500).Error; err != nil {
+			return fmt.Errorf("upsert %d telemetry daily rows: %w", len(rows), err)
 		}
 		return nil
 	})

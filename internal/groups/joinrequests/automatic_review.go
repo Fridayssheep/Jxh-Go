@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -96,9 +97,13 @@ type AutomaticReview struct {
 }
 
 type MajorCodeJudgeInput struct {
-	EnrollmentYear  string
-	MajorCode       string
-	ApplicantMajor  string
+	EnrollmentYear string
+	MajorCode      string
+	ApplicantMajor string
+	// RosterMajor is the admission roster's major for this student, set only when it
+	// disagrees textually with ApplicantMajor. It is authoritative evidence: the judge
+	// must decide whether the two names denote the same major.
+	RosterMajor     string
 	TotalSamples    uint64
 	MajorCounts     []MajorCount
 	EvidenceVersion uint64
@@ -252,12 +257,85 @@ func CheckStudentID(studentID string, now time.Time) StudentIDCheck {
 	return result
 }
 
-func normalizeMajor(value string) string {
-	value = strings.TrimSpace(value)
-	return strings.Map(func(character rune) rune {
-		if unicode.IsSpace(character) {
-			return -1
+// majorClassSuffixes are administrative cohort labels appended to a major name. They name
+// a teaching track inside one major, never a different major, so "计算机类卓越班" and
+// "计算机类" must fold to the same value and therefore to the same major code.
+var majorClassSuffixes = []string{
+	"卓越班", "卓越计划", "实验班", "创新班", "强化班", "拔尖班", "基地班", "定向班",
+	"中外合作办学", "中外合作", "国际班", "留学生班", "普通班", "本科班",
+}
+
+// majorNoiseSubstrings are decorations that carry no discriminating information.
+var majorNoiseSubstrings = []string{"专业", "方向"}
+
+// NormalizeMajor folds a major name to a comparison key by removing differences that are
+// purely presentational: width, whitespace, punctuation, bracketed asides, and cohort
+// labels. It deliberately stops there. Deciding whether two genuinely different names
+// ("计算机类" vs "计算机科学与技术") denote the same major code is a semantic question
+// answered by the evidence aggregate and the AI judge, not by string surgery here.
+func NormalizeMajor(value string) string {
+	var builder strings.Builder
+	depth := 0
+	for _, character := range value {
+		switch character {
+		case '(', '（', '[', '［', '【', '〔', '<', '《', '{', '｛':
+			depth++
+			continue
+		case ')', '）', ']', '］', '】', '〕', '>', '》', '}', '｝':
+			if depth > 0 {
+				depth--
+			}
+			continue
 		}
-		return character
-	}, value)
+		if depth > 0 || unicode.IsSpace(character) {
+			continue
+		}
+		// Fold full-width Latin letters and digits onto their ASCII forms so that
+		// width differences from IME input do not split otherwise equal names.
+		if character >= '！' && character <= '～' {
+			character = character - '！' + '!'
+		}
+		if unicode.IsPunct(character) || unicode.IsSymbol(character) {
+			continue
+		}
+		builder.WriteRune(unicode.ToLower(character))
+	}
+	result := builder.String()
+	for _, noise := range majorNoiseSubstrings {
+		result = strings.ReplaceAll(result, noise, "")
+	}
+	// Cohort labels can appear mid-string once brackets are stripped, so remove them
+	// wherever they land rather than only as a trailing suffix.
+	for _, suffix := range majorClassSuffixes {
+		result = strings.ReplaceAll(result, suffix, "")
+	}
+	return result
+}
+
+func normalizeMajor(value string) string {
+	return NormalizeMajor(value)
+}
+
+// majorNamesRelated reports whether two major names are mechanically consistent: equal
+// after folding, or one is a prefix of the other once the "类" category marker is dropped
+// ("计算机类" vs "计算机类工程"). The prefix arm requires a substantial shared head so
+// that short unrelated names do not collide.
+func majorNamesRelated(left, right string) bool {
+	left, right = NormalizeMajor(left), NormalizeMajor(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if left == right {
+		return true
+	}
+	left, right = strings.TrimSuffix(left, "类"), strings.TrimSuffix(right, "类")
+	if left == right {
+		return true
+	}
+	const minimumSharedPrefix = 3
+	shorter, longer := left, right
+	if utf8.RuneCountInString(longer) < utf8.RuneCountInString(shorter) {
+		shorter, longer = longer, shorter
+	}
+	return utf8.RuneCountInString(shorter) >= minimumSharedPrefix && strings.HasPrefix(longer, shorter)
 }

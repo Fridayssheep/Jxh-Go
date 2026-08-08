@@ -1,10 +1,13 @@
+-- MySQL does not support ADD COLUMN IF NOT EXISTS (that is MariaDB syntax), so these
+-- two statements are not self-guarding. The migrator tolerates "already exists" errors
+-- (1050/1060/1061/1826) so a partially applied migration converges when re-run.
 ALTER TABLE group_join_requests
   ADD COLUMN automatic_review JSON NULL AFTER validation_snapshot;
 
 ALTER TABLE group_join_decisions
   ADD COLUMN review_snapshot JSON NULL AFTER validation_snapshot;
 
-CREATE TABLE join_approval_rule_state (
+CREATE TABLE IF NOT EXISTS join_approval_rule_state (
   rule_version INT UNSIGNED NOT NULL,
   status VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   evidence_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -18,7 +21,7 @@ CREATE TABLE join_approval_rule_state (
   CONSTRAINT chk_join_approval_rule_state_revision CHECK (revision >= 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE join_major_code_samples (
+CREATE TABLE IF NOT EXISTS join_major_code_samples (
   sample_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   enrollment_year CHAR(4) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   major_code CHAR(3) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -45,7 +48,7 @@ CREATE TABLE join_major_code_samples (
   CONSTRAINT chk_join_major_code_samples_revision CHECK (revision >= 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE admission_roster_versions (
+CREATE TABLE IF NOT EXISTS admission_roster_versions (
   version_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   content_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -67,7 +70,7 @@ CREATE TABLE admission_roster_versions (
   CONSTRAINT chk_admission_roster_versions_revision CHECK (revision >= 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE join_evidence_rebuild_operations (
+CREATE TABLE IF NOT EXISTS join_evidence_rebuild_operations (
   actor_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   idempotency_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   result_json JSON NOT NULL,
@@ -75,7 +78,7 @@ CREATE TABLE join_evidence_rebuild_operations (
   PRIMARY KEY (actor_id, idempotency_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-CREATE TABLE admission_roster_entries (
+CREATE TABLE IF NOT EXISTS admission_roster_entries (
   version_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   student_id CHAR(12) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   student_name VARCHAR(64) NULL,
@@ -86,6 +89,8 @@ CREATE TABLE admission_roster_entries (
   CONSTRAINT fk_admission_roster_entries_version FOREIGN KEY (version_id) REFERENCES admission_roster_versions (version_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+-- Seed the rule state row idempotently
 INSERT INTO join_approval_rule_state
   (rule_version, status, evidence_version, activated_at, rebuilt_at, last_error_code, revision)
-VALUES (2, 'building', 0, NULL, NULL, NULL, 1);
+VALUES (2, 'building', 0, NULL, NULL, NULL, 1)
+ON DUPLICATE KEY UPDATE rule_version = rule_version;

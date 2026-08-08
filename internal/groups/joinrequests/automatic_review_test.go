@@ -217,7 +217,13 @@ func TestAutomaticDecisionRosterGates(t *testing.T) {
 		wantError   bool
 	}{
 		{name: "student missing", roster: AdmissionRosterRecord{Configured: true, DatasetVersion: "roster-1"}, wantCode: "student_not_in_roster", wantOutcome: ReviewRejected},
-		{name: "major mismatch", roster: AdmissionRosterRecord{Configured: true, Found: true, DatasetVersion: "roster-1", Major: "机械类"}, wantCode: "roster_major_mismatch", wantOutcome: ReviewRejected},
+		{
+			// No judge is configured here, so an unresolved roster disagreement must fail closed.
+			name:   "major mismatch without judge",
+			roster: AdmissionRosterRecord{Configured: true, Found: true, DatasetVersion: "roster-1", Major: "机械类"},
+			// Evidence is empty in this case, so the deterministic evidence gate fires first.
+			wantCode: "major_evidence_insufficient", wantOutcome: ReviewRejected,
+		},
 		{name: "dependency unavailable", rosterErr: errors.New("database unavailable"), wantCode: "roster_unavailable", wantOutcome: ReviewDependencyPending, wantError: true},
 	}
 	for _, test := range tests {
@@ -244,6 +250,142 @@ func TestAutomaticDecisionRosterGates(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNormalizeMajorFoldsCohortAndWidthVariants(t *testing.T) {
+	// Every spelling of the same major must collapse to one comparison key.
+	equivalent := []string{
+		"计算机类", "计算机类卓越班", "计算机类（卓越班）", "计算机类(卓越班)", " 计算机类 卓越班 ",
+		"计算机类【实验班】", "计算机类专业", "计算机类·卓越班", "计算机类　卓越班",
+	}
+	want := NormalizeMajor(equivalent[0])
+	if want == "" {
+		t.Fatal("normalizing a plain major must not produce an empty key")
+	}
+	for _, value := range equivalent[1:] {
+		if got := NormalizeMajor(value); got != want {
+			t.Errorf("NormalizeMajor(%q) = %q, want %q", value, got, want)
+		}
+	}
+	if NormalizeMajor("机械类") == want {
+		t.Error("a different discipline must not fold onto 计算机类")
+	}
+}
+
+func TestMajorNamesRelated(t *testing.T) {
+	related := [][2]string{
+		{"计算机类", "计算机类卓越班"},
+		{"计算机类", "计算机类（实验班）"},
+		{"计算机类", "计算机"},
+		{"计算机类", "计算机科学与技术"},
+		{"计算机类", "计算机 类"},
+	}
+	for _, pair := range related {
+		if !majorNamesRelated(pair[0], pair[1]) {
+			t.Errorf("majorNamesRelated(%q, %q) = false, want true", pair[0], pair[1])
+		}
+		if !majorNamesRelated(pair[1], pair[0]) {
+			t.Errorf("majorNamesRelated is not symmetric for (%q, %q)", pair[0], pair[1])
+		}
+	}
+	unrelated := [][2]string{
+		{"计算机类", "机械类"},
+		{"计算机类", "土木工程"},
+		{"计算机类", ""},
+		{"", ""},
+	}
+	for _, pair := range unrelated {
+		if majorNamesRelated(pair[0], pair[1]) {
+			t.Errorf("majorNamesRelated(%q, %q) = true, want false", pair[0], pair[1])
+		}
+	}
+}
+
+// TestAutomaticDecisionAcceptsMajorSpellingVariants pins the intended semantics: 计算机类,
+// its cohort variants, and the specific major 计算机科学与技术 all belong to major code 315.
+func TestAutomaticDecisionAcceptsMajorSpellingVariants(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	evidence := MajorEvidence{
+		EnrollmentYear: "2026", MajorCode: "315", TotalSamples: 5, Version: 2,
+		MajorCounts: []MajorCount{{Major: "计算机类", Count: 5}},
+	}
+	for _, major := range []string{"计算机类", "计算机类卓越班", "计算机类（卓越班）", "计算机科学与技术"} {
+		t.Run(major, func(t *testing.T) {
+			store := &reviewStore{
+				evidence: evidence,
+				roster:   AdmissionRosterRecord{Configured: true, Found: true, DatasetVersion: "roster-1", Major: "计算机类"},
+			}
+			service, err := NewService(Options{
+				Store: store, Approver: &reviewApprover{}, AutoRejectReasons: reviewReasonProvider{},
+				Now: func() time.Time { return now }, Location: time.UTC,
+				MajorCodeJudge: reviewJudge{result: MajorCodeJudgement{
+					Decision: MajorCodeMatch, Confidence: ConfidenceHigh, Reason: "同一专业的不同写法。",
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer service.Close()
+			candidate := validReviewCandidate(now)
+			value := major
+			candidate.Request.AIParse.Fields.Major = &value
+			action, review, eligible, err := service.automaticDecision(context.Background(), candidate.Request, candidate.Policy)
+			if err != nil || !eligible || action != ActionApprove || review.Outcome != ReviewPassed {
+				t.Fatalf("major %q should map to code 315: action=%s eligible=%v review=%+v err=%v", major, action, eligible, review, err)
+			}
+			if review.Roster.Status != RosterMatched {
+				t.Fatalf("approved review must not record a roster mismatch, got %s", review.Roster.Status)
+			}
+		})
+	}
+}
+
+// TestAutomaticDecisionDefersRosterMismatchToJudge proves the roster name difference is
+// handed to the judge rather than rejected outright, and that a judged mismatch still fails.
+func TestAutomaticDecisionDefersRosterMismatchToJudge(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	evidence := MajorEvidence{
+		EnrollmentYear: "2026", MajorCode: "315", TotalSamples: 5, Version: 2,
+		MajorCounts: []MajorCount{{Major: "计算机类", Count: 5}},
+	}
+	var seen MajorCodeJudgeInput
+	store := &reviewStore{
+		evidence: evidence,
+		roster:   AdmissionRosterRecord{Configured: true, Found: true, DatasetVersion: "roster-1", Major: "机械类"},
+	}
+	judge := &recordingJudge{result: MajorCodeJudgement{Decision: MajorCodeMismatch, Confidence: ConfidenceHigh, Reason: "学科门类不同。"}, seen: &seen}
+	service, err := NewService(Options{
+		Store: store, Approver: &reviewApprover{}, AutoRejectReasons: reviewReasonProvider{},
+		Now: func() time.Time { return now }, Location: time.UTC, MajorCodeJudge: judge,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	candidate := validReviewCandidate(now)
+	action, review, eligible, err := service.automaticDecision(context.Background(), candidate.Request, candidate.Policy)
+	if err != nil || !eligible || action != ActionReject {
+		t.Fatalf("judged mismatch must reject: action=%s eligible=%v err=%v", action, eligible, err)
+	}
+	if review.ReasonCode != "roster_major_mismatch" || review.Roster.Status != RosterMajorMismatch {
+		t.Fatalf("rejection must attribute the roster disagreement: %+v", review)
+	}
+	if seen.RosterMajor != "机械类" {
+		t.Fatalf("judge did not receive the roster major as context: %+v", seen)
+	}
+	if seen.ApplicantMajor != "计算机类" {
+		t.Fatalf("judge did not receive the applicant major: %+v", seen)
+	}
+}
+
+type recordingJudge struct {
+	result MajorCodeJudgement
+	seen   *MajorCodeJudgeInput
+}
+
+func (j *recordingJudge) Judge(_ context.Context, input MajorCodeJudgeInput) (MajorCodeJudgement, error) {
+	*j.seen = input
+	return j.result, nil
 }
 
 func TestAutomaticDecisionRejectsEveryNonHighMatch(t *testing.T) {

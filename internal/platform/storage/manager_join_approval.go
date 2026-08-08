@@ -109,21 +109,34 @@ func (s *Store) GetMajorEvidence(ctx context.Context, enrollmentYear, majorCode 
 	}
 	evidence := joinrequests.MajorEvidence{EnrollmentYear: enrollmentYear, MajorCode: majorCode, Version: state.EvidenceVersion}
 	type countRow struct {
-		Major string `gorm:"column:major"`
-		Count uint64 `gorm:"column:sample_count"`
+		NormalizedMajor string `gorm:"column:normalized_major"`
+		Major           string `gorm:"column:major"`
+		Count           uint64 `gorm:"column:sample_count"`
 	}
 	var rows []countRow
+	// Group by the normalized key so cohort/width/bracket variants of one major aggregate
+	// into a single count instead of splitting into several weak ones. The raw name kept
+	// for display is the most frequent spelling within the group.
 	err = s.db.WithContext(ctx).Table("join_major_code_samples").
-		Select("major_name AS major, COUNT(*) AS sample_count").
+		Select("normalized_major, major_name AS major, COUNT(*) AS sample_count").
 		Where("enrollment_year = ? AND major_code = ? AND active = TRUE", enrollmentYear, majorCode).
-		Group("major_name").Order("sample_count DESC").Order("major_name ASC").Scan(&rows).Error
+		Group("normalized_major, major_name").Order("sample_count DESC").Order("major_name ASC").Scan(&rows).Error
 	if err != nil {
 		return joinrequests.MajorEvidence{}, err
 	}
+	indexByKey := make(map[string]int, len(rows))
 	for _, row := range rows {
-		evidence.MajorCounts = append(evidence.MajorCounts, joinrequests.MajorCount{Major: row.Major, Count: row.Count})
 		evidence.TotalSamples += row.Count
+		if position, ok := indexByKey[row.NormalizedMajor]; ok {
+			evidence.MajorCounts[position].Count += row.Count
+			continue
+		}
+		indexByKey[row.NormalizedMajor] = len(evidence.MajorCounts)
+		evidence.MajorCounts = append(evidence.MajorCounts, joinrequests.MajorCount{Major: row.Major, Count: row.Count})
 	}
+	sort.SliceStable(evidence.MajorCounts, func(first, second int) bool {
+		return evidence.MajorCounts[first].Count > evidence.MajorCounts[second].Count
+	})
 	return evidence, nil
 }
 
@@ -248,8 +261,48 @@ func (s *Store) UpdateMajorEvidenceSample(ctx context.Context, mutation joinrequ
 	return result, err
 }
 
+// normalizeEvidenceMajor must stay identical to the comparison key used when reviewing a
+// request, so it delegates rather than reimplementing the rules.
 func normalizeEvidenceMajor(value string) string {
-	return strings.Join(strings.Fields(strings.TrimSpace(value)), "")
+	return joinrequests.NormalizeMajor(value)
+}
+
+// renormalizeEvidenceSamples recomputes normalized_major for stored rows. Normalization
+// runs in Go, not SQL, so rows written under older rules keep their old key until they are
+// rewritten; without this a rebuild would leave evidence grouped inconsistently.
+func renormalizeEvidenceSamples(tx *gorm.DB, now time.Time) error {
+	type sampleKey struct {
+		SampleID        uint64 `gorm:"column:sample_id"`
+		MajorName       string `gorm:"column:major_name"`
+		NormalizedMajor string `gorm:"column:normalized_major"`
+	}
+	const batchSize = 500
+	var lastID uint64
+	for {
+		var batch []sampleKey
+		if err := tx.Table("join_major_code_samples").
+			Select("sample_id, major_name, normalized_major").
+			Where("sample_id > ?", lastID).Order("sample_id ASC").Limit(batchSize).Scan(&batch).Error; err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, row := range batch {
+			lastID = row.SampleID
+			expected := normalizeEvidenceMajor(row.MajorName)
+			if expected == row.NormalizedMajor {
+				continue
+			}
+			if err := tx.Table("join_major_code_samples").Where("sample_id = ?", row.SampleID).
+				Updates(map[string]any{"normalized_major": expected, "updated_at": now.UTC()}).Error; err != nil {
+				return err
+			}
+		}
+		if len(batch) < batchSize {
+			return nil
+		}
+	}
 }
 
 type approvedEvidenceSource struct {
@@ -327,6 +380,9 @@ func (s *Store) RebuildMajorEvidence(ctx context.Context, mutation joinrequests.
 			if _, err := insertEvidenceSource(tx, source, context.OccurredAt); err != nil {
 				return err
 			}
+		}
+		if err := renormalizeEvidenceSamples(tx, context.OccurredAt); err != nil {
+			return err
 		}
 		activatedAt := state.ActivatedAt
 		if activatedAt == nil {

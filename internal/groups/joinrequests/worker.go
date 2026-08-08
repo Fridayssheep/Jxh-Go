@@ -143,6 +143,7 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 	}
 	studentID := optionalValue(request.AIParse.Fields.StudentID)
 	review.StudentID = CheckStudentID(studentID, now)
+	rosterMajor := ""
 	reject := func(code, reason string) (Action, AutomaticReview, bool, error) {
 		review.Outcome, review.ReasonCode, review.Reason = ReviewRejected, code, reason
 		return ActionReject, review, policy.AutoReject, nil
@@ -172,9 +173,14 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 			return reject("student_not_in_roster", "当前录取名单中未找到该学号。")
 		}
 		review.Roster.Status = RosterMatched
-		if roster.Major != "" && normalizeMajor(roster.Major) != normalizeMajor(optionalValue(request.AIParse.Fields.Major)) {
+		// A roster major that differs from what the applicant typed is not decisive on its
+		// own: the same major is written many ways ("计算机类", "计算机类卓越班",
+		// "计算机科学与技术"). Only mechanically equal names short-circuit here; anything
+		// else is recorded and handed to the AI judge below, which sees the roster major as
+		// authoritative context and decides whether the two names denote one major.
+		if roster.Major != "" && !majorNamesRelated(roster.Major, optionalValue(request.AIParse.Fields.Major)) {
 			review.Roster.Status = RosterMajorMismatch
-			return reject("roster_major_mismatch", "申请专业与录取名单中的专业不一致。")
+			rosterMajor = roster.Major
 		}
 	}
 	evidence, err := s.store.GetMajorEvidence(ctx, review.StudentID.EnrollmentYear, review.StudentID.MajorCode)
@@ -189,6 +195,11 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 		return reject("major_evidence_insufficient", judgement.Reason)
 	}
 	if s.majorCodeJudge == nil {
+		// Without the judge an unresolved roster disagreement has nothing left to resolve
+		// it, so fall back to the deterministic rejection rather than approving blindly.
+		if rosterMajor != "" {
+			return reject("roster_major_mismatch", "申请专业与录取名单中的专业不一致，且 AI 专业判断服务未配置。")
+		}
 		review.Outcome, review.ReasonCode, review.Reason = ReviewDependencyPending, "major_judge_unavailable", "AI 专业判断服务未配置，等待人工处理或服务恢复。"
 		return "", review, false, fmt.Errorf("judge major code: %w", ErrDependencyUnavailable)
 	}
@@ -196,6 +207,7 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 		EnrollmentYear: evidence.EnrollmentYear, MajorCode: evidence.MajorCode,
 		ApplicantMajor: optionalValue(request.AIParse.Fields.Major), TotalSamples: evidence.TotalSamples,
 		MajorCounts: append([]MajorCount(nil), evidence.MajorCounts...), EvidenceVersion: evidence.Version,
+		RosterMajor: rosterMajor,
 	})
 	if err != nil {
 		review.Outcome, review.ReasonCode, review.Reason = ReviewDependencyPending, "major_judge_unavailable", "AI 专业判断服务暂时不可用，等待重试。"
@@ -203,7 +215,15 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 	}
 	review.Judgement = &judgement
 	if judgement.Decision != MajorCodeMatch || judgement.Confidence != ConfidenceHigh {
+		if rosterMajor != "" {
+			return reject("roster_major_mismatch", judgement.Reason)
+		}
 		return reject("major_code_mismatch", judgement.Reason)
+	}
+	if rosterMajor != "" {
+		// The judge resolved the textual disagreement in the applicant's favour, so the
+		// roster is recorded as matched rather than leaving a mismatch on an approval.
+		review.Roster.Status = RosterMatched
 	}
 	review.Outcome, review.ReasonCode, review.Reason = ReviewPassed, "automatic_review_passed", judgement.Reason
 	return ActionApprove, review, policy.Enabled, nil

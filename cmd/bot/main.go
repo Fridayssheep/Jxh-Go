@@ -147,7 +147,7 @@ func runWithDependencies(ctx context.Context, cfg config.Config, dependencies ru
 	}()
 	if dependencies.schemaAutomation != nil {
 		if err := dependencies.schemaAutomation.Apply(ctx, resources.ORM); err != nil {
-			return errors.New("apply schema automation: database operation failed")
+			return fmt.Errorf("apply schema automation: %w", err)
 		}
 	}
 

@@ -112,7 +112,7 @@ func NewStager(localRoot, sharedRoot string) *Stager {
 
 func (s *Stager) Stage(ctx context.Context, source, name string) (string, error) {
 	if s == nil || s.client == nil {
-		return "", fmt.Errorf("flash file stager is not initialized")
+		return "", fmt.Errorf("group file stager is not initialized")
 	}
 	parsed, err := url.ParseRequestURI(source)
 	if err != nil {

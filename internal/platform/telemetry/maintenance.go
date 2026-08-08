@@ -66,11 +66,17 @@ func (m *Maintenance) runOnce(ctx context.Context) {
 	now := m.now().In(m.location)
 	completedBefore := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, m.location).UTC()
 	if err := m.store.AggregateTelemetryDaily(ctx, completedBefore, m.location.String()); err != nil {
-		m.logger.Printf("telemetry daily aggregation failed")
+		m.logger.Printf(
+			"telemetry daily aggregation failed completed_before=%s timezone=%q: %v",
+			completedBefore.Format(time.RFC3339), m.location.String(), err,
+		)
 		return
 	}
 	retentionCutoff := now.AddDate(0, 0, -m.retentionDays).UTC()
 	if _, err := m.store.PurgeTelemetryEvents(ctx, retentionCutoff); err != nil {
-		m.logger.Printf("telemetry retention purge failed")
+		m.logger.Printf(
+			"telemetry retention purge failed occurred_before=%s retention_days=%d: %v",
+			retentionCutoff.Format(time.RFC3339), m.retentionDays, err,
+		)
 	}
 }

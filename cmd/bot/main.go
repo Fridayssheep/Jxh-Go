@@ -25,7 +25,7 @@ import (
 	"github.com/zjutjh/jxh-go/internal/knowledge/triggerstats"
 	"github.com/zjutjh/jxh-go/internal/management"
 	"github.com/zjutjh/jxh-go/internal/management/settings"
-	"github.com/zjutjh/jxh-go/internal/messaging/flashfile"
+	groupfile "github.com/zjutjh/jxh-go/internal/messaging/flashfile"
 	"github.com/zjutjh/jxh-go/internal/messaging/linkcleaner"
 	"github.com/zjutjh/jxh-go/internal/messaging/quote"
 	"github.com/zjutjh/jxh-go/internal/platform/app"
@@ -230,7 +230,7 @@ func buildApplication(
 		Location:         location,
 		ExtractApplicant: extractApplicant,
 	})
-	napcatGateway := napcat.NewGateway(flashfile.NewStager("./data/flash", "/app/data/flash"))
+	napcatGateway := napcat.NewGateway(groupfile.NewStager("./data/flash", "/app/data/flash"))
 	var managementBackend *management.Backend
 	if adminHTTPConfigured(cfg.Admin) {
 		managementBackend, err = management.NewBackend(management.Options{

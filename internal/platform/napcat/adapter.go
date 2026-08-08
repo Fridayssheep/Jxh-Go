@@ -280,7 +280,7 @@ func (g *Gateway) SendGroupMessage(ctx context.Context, groupID int64, msg messa
 	return safeOperationError("send_group_message", err)
 }
 
-func (g *Gateway) SendGroupFlashFile(ctx context.Context, groupID int64, source, name string) error {
+func (g *Gateway) SendGroupFile(ctx context.Context, groupID int64, source, name string) error {
 	client, err := g.client()
 	if err != nil {
 		return err
@@ -290,103 +290,26 @@ func (g *Gateway) SendGroupFlashFile(ctx context.Context, groupID int64, source,
 	}
 	filePath := source
 	if strings.HasPrefix(strings.ToLower(source), "http://") || strings.HasPrefix(strings.ToLower(source), "https://") {
-		if g.flashFiles == nil {
-			return fmt.Errorf("flash file stager is not initialized")
+		if g.groupFiles == nil {
+			return fmt.Errorf("group file stager is not initialized")
 		}
-		staged, err := g.flashFiles.Stage(ctx, source, name)
+		staged, err := g.groupFiles.Stage(ctx, source, name)
 		if err != nil {
-			return safeOperationError("stage_flash_file", err)
+			return safeOperationError("stage_group_file", err)
 		}
 		filePath = staged
 	} else if path.Clean(source) != source || !strings.HasPrefix(source, "/app/jxh-media/") || path.Base(source) != name {
-		return fmt.Errorf("invalid local flash file source")
+		return fmt.Errorf("invalid local group file source")
 	}
 
-	files, err := json.Marshal(filePath)
-	if err != nil {
-		return operationFailure("create_flash_task", FailureInvalidResponse)
-	}
-	createResp, err := client.CreateFlashTask(ctx, api.CreateFlashTaskRequest{
-		Files: api.CreateFlashTaskRequestFilesUnion{Raw: files},
-		Name:  &name,
-	})
-	if err != nil {
-		return safeOperationError("create_flash_task", err)
-	}
-	fileSetID, err := decodeCreateFlashResponse(createResp)
-	if err != nil {
-		return operationFailure("create_flash_task", FailureInvalidResponse)
-	}
 	groupIDText := strconv.FormatInt(groupID, 10)
-	sendResp, err := client.SendFlashMsg(ctx, api.SendFlashMsgRequest{
-		FilesetID: fileSetID,
-		GroupID:   &groupIDText,
+	_, err = client.UploadGroupFile(ctx, api.UploadGroupFileRequest{
+		GroupID:    groupIDText,
+		File:       filePath,
+		Name:       name,
+		UploadFile: true,
 	})
-	if err != nil {
-		return safeOperationError("send_flash_message", err)
-	}
-	if err := validateSendFlashResponse(sendResp); err != nil {
-		return operationFailure("send_flash_message", FailureInvalidResponse)
-	}
-	return nil
-}
-
-func decodeCreateFlashResponse(value any) (string, error) {
-	var response struct {
-		Result                    *oneBotInt64 `json:"result"`
-		ErrMsg                    string       `json:"errMsg"`
-		CreateFlashTransferResult struct {
-			FileSetID string `json:"fileSetId"`
-		} `json:"createFlashTransferResult"`
-	}
-	if err := decodeDynamicValue(value, &response); err != nil {
-		return "", fmt.Errorf("decode create flash task response: %w", err)
-	}
-	if response.Result == nil {
-		return "", fmt.Errorf("create flash task response is missing result")
-	}
-	if *response.Result != 0 {
-		return "", fmt.Errorf("create flash task failed with result %d: %s", *response.Result, response.ErrMsg)
-	}
-	fileSetID := strings.TrimSpace(response.CreateFlashTransferResult.FileSetID)
-	if fileSetID == "" {
-		return "", fmt.Errorf("create flash task response is missing fileSetId")
-	}
-	return fileSetID, nil
-}
-
-func validateSendFlashResponse(value any) error {
-	var response struct {
-		ErrCode *oneBotInt64 `json:"errCode"`
-		ErrMsg  string       `json:"errMsg"`
-		Rsp     *struct {
-			SendStatus []struct {
-				Result *oneBotInt64 `json:"result"`
-				Msg    string       `json:"msg"`
-			} `json:"sendStatus"`
-		} `json:"rsp"`
-	}
-	if err := decodeDynamicValue(value, &response); err != nil {
-		return fmt.Errorf("decode send flash message response: %w", err)
-	}
-	if response.ErrCode == nil {
-		return fmt.Errorf("send flash message response is missing errCode")
-	}
-	if *response.ErrCode != 0 {
-		return fmt.Errorf("send flash message failed with errCode %d: %s", *response.ErrCode, response.ErrMsg)
-	}
-	if response.Rsp == nil || len(response.Rsp.SendStatus) == 0 {
-		return fmt.Errorf("send flash message response is missing sendStatus")
-	}
-	for i, status := range response.Rsp.SendStatus {
-		if status.Result == nil {
-			return fmt.Errorf("send flash message status %d is missing result", i+1)
-		}
-		if *status.Result != 0 {
-			return fmt.Errorf("send flash message status %d failed with result %d: %s", i+1, *status.Result, status.Msg)
-		}
-	}
-	return nil
+	return safeOperationError("upload_group_file", err)
 }
 
 func decodeDynamicValue(value, target any) error {

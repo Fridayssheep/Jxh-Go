@@ -82,7 +82,7 @@ func sendKeywordReply(ctx context.Context, sender Sender, groupID int64, sourceK
 			if err != nil || stop {
 				return err
 			}
-			if err := sender.SendGroupFlashFile(ctx, groupID, part.Value, part.Name); err != nil {
+			if err := sender.SendGroupFile(ctx, groupID, part.Value, part.Name); err != nil {
 				if isAmbiguousSendTimeout(err) {
 					return fmt.Errorf("keyword file send outcome unknown, source_key=%q: %w", sourceKey, err)
 				}

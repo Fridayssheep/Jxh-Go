@@ -2535,11 +2535,11 @@ func dailyAccumulatorKey(row telemetryDailyManagerRow) string {
 func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore time.Time, timezone string) error {
 	location, err := time.LoadLocation(timezone)
 	if err != nil {
-		return err
+		return fmt.Errorf("load telemetry aggregation timezone %q: %w", timezone, err)
 	}
 	var events []telemetryEventManagerRow
 	if err := s.db.WithContext(ctx).Where("occurred_at < ?", completedBefore.UTC()).Order("occurred_at ASC").Find(&events).Error; err != nil {
-		return err
+		return fmt.Errorf("load telemetry events completed before %s: %w", completedBefore.UTC().Format(time.RFC3339), err)
 	}
 	if len(events) == 0 {
 		return nil
@@ -2618,12 +2618,15 @@ func (s *Store) AggregateTelemetryDaily(ctx context.Context, completedBefore tim
 			dateValues = append(dateValues, date)
 		}
 		if err := tx.Where("timezone = ? AND bucket_date IN ?", timezone, dateValues).Delete(&telemetryDailyManagerRow{}).Error; err != nil {
-			return err
+			return fmt.Errorf("delete existing telemetry daily rows for %d date(s): %w", len(dateValues), err)
 		}
 		if len(rows) == 0 {
 			return nil
 		}
-		return tx.Omit("UpdatedAt").CreateInBatches(rows, 500).Error
+		if err := tx.Omit("UpdatedAt").CreateInBatches(rows, 500).Error; err != nil {
+			return fmt.Errorf("insert %d telemetry daily rows: %w", len(rows), err)
+		}
+		return nil
 	})
 }
 

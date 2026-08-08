@@ -12,7 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/zjutjh/jxh-go/internal/groups/joinrequests"
-	"github.com/zjutjh/jxh-go/internal/messaging/flashfile"
+	groupfile "github.com/zjutjh/jxh-go/internal/messaging/flashfile"
 	napcatsdk "github.com/zjutjh/napcat-sdk"
 	"github.com/zjutjh/napcat-sdk/api"
 )
@@ -88,13 +88,13 @@ type gatewayState struct {
 
 type Gateway struct {
 	state      atomic.Pointer[gatewayState]
-	flashFiles *flashfile.Stager
+	groupFiles *groupfile.Stager
 }
 
-func NewGateway(flashFiles ...*flashfile.Stager) *Gateway {
+func NewGateway(groupFiles ...*groupfile.Stager) *Gateway {
 	gateway := &Gateway{}
-	if len(flashFiles) > 0 {
-		gateway.flashFiles = flashFiles[0]
+	if len(groupFiles) > 0 {
+		gateway.groupFiles = groupFiles[0]
 	}
 	gateway.state.Store(&gatewayState{})
 	return gateway

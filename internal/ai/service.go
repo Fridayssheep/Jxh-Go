@@ -196,11 +196,12 @@ func (c *sourceCollector) add(sourceKey string, match ToolSearchMatch) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.seen[sourceKey]; ok {
-		return
+	if _, ok := c.seen[sourceKey]; !ok {
+		c.seen[sourceKey] = struct{}{}
+		c.order = append(c.order, sourceKey)
 	}
-	c.seen[sourceKey] = struct{}{}
-	c.order = append(c.order, sourceKey)
+	// Different conflicting rows may intentionally share a source key. Keep all
+	// evidence for answer review while source keys remain deduplicated for stats.
 	c.evidence = append(c.evidence, match)
 }
 

@@ -311,8 +311,8 @@ func runtimeIndexVersion(entries []knowledge.Entry) string {
 	})
 	hash := sha256.New()
 	for _, entry := range copyOfEntries {
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%t\x00%t\x00%t\n", entry.SourceKey, entry.Keyword, entry.Answer,
-			entry.Enabled, entry.ExactReply, entry.AIEnabled)
+		_, _ = fmt.Fprintf(hash, "%d\x00%s\x00%s\x00%s\x00%t\x00%t\x00%t\n", entry.SourceRow, entry.SourceKey, entry.Keyword,
+			entry.Answer, entry.Enabled, entry.ExactReply, entry.AIEnabled)
 	}
 	return "idx_" + hex.EncodeToString(hash.Sum(nil)[:12])
 }

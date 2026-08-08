@@ -19,14 +19,8 @@ func ReadRowsFromXLSX(r io.Reader, sheet string) ([][]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([][]string, 0, len(rows))
-	for _, row := range rows {
-		if rowIsEmpty(row) {
-			continue
-		}
-		out = append(out, row)
-	}
-	return out, nil
+	// Keep blank rows so ParseRows can report the original Excel row numbers.
+	return rows, nil
 }
 
 func rowIsEmpty(row []string) bool {

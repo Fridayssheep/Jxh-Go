@@ -189,6 +189,19 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		return nil
 	}
 	if p.knowledge != nil && p.featureEnabled(msg.GroupID, settings.FeatureKeywordReply) {
+		if conflict, ok := p.knowledge.LookupConflict(text); ok {
+			startedAt := time.Now()
+			err := sender.SendGroupText(ctx, msg.GroupID, formatKnowledgeConflictReply(conflict))
+			result := telemetry.ResultParseFailed
+			if err != nil {
+				result = telemetry.ResultFailed
+			}
+			p.recordTelemetry(telemetry.Observation{
+				Kind: telemetry.EventKeywordReply, GroupID: msg.GroupID, UserID: msg.UserID,
+				FeatureKey: string(settings.FeatureKeywordReply), Result: result, Duration: time.Since(startedAt),
+			})
+			return err
+		}
 		if entry, ok := p.knowledge.Lookup(text); ok {
 			startedAt := time.Now()
 			if err := sendKeywordReply(ctx, sender, msg.GroupID, entry.SourceKey, entry.Answer); err != nil {
@@ -214,6 +227,30 @@ func (p *Pipeline) HandleGroupMessage(ctx context.Context, msg GroupMessage) err
 		}
 	}
 	return nil
+}
+
+func formatKnowledgeConflictReply(conflict knowledge.ExactConflict) string {
+	var reply strings.Builder
+	reply.WriteString("这个词条冲突了呢，小弘不知道要告诉你那一条了啦，请告诉我们的客户学长学姐们解决啦：")
+	if key := strings.TrimSpace(conflict.Key); key != "" {
+		reply.WriteString("\n触发词条：")
+		reply.WriteString(key)
+	}
+	reply.WriteString("\n冲突词条：")
+	for _, entry := range conflict.Entries {
+		reply.WriteString("\n")
+		if entry.Row > 0 {
+			_, _ = fmt.Fprintf(&reply, "第 %d 行：", entry.Row)
+		} else {
+			reply.WriteString("未知行：")
+		}
+		keyword := strings.TrimSpace(entry.Keyword)
+		if keyword == "" {
+			keyword = entry.SourceKey
+		}
+		reply.WriteString(keyword)
+	}
+	return reply.String()
 }
 
 func (p *Pipeline) handleCustomCommand(ctx context.Context, msg GroupMessage, text string, sender Sender) (bool, error) {

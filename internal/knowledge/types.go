@@ -8,6 +8,7 @@ const (
 
 type Entry struct {
 	ID         string
+	SourceRow  int
 	SourceKey  string
 	Keyword    string
 	EntryType  string
@@ -19,6 +20,17 @@ type Entry struct {
 	Enabled    bool
 	ExactReply bool
 	AIEnabled  bool
+}
+
+type ExactConflictEntry struct {
+	Row       int
+	Keyword   string
+	SourceKey string
+}
+
+type ExactConflict struct {
+	Key     string
+	Entries []ExactConflictEntry
 }
 
 type ParseIssueReason string
@@ -51,7 +63,8 @@ type ParseConflict struct {
 type ParseResult struct {
 	// Entries includes every structurally valid row for management preview.
 	Entries []Entry
-	// ActiveEntries is the deterministic, conflict-safe runtime collection.
+	// ActiveEntries includes structurally valid rows used by runtime lookup and search.
+	// Exact lookup resolves ambiguous answers as conflicts; AI search keeps every row.
 	ActiveEntries    []Entry
 	Issues           []ParseIssue
 	Conflicts        []ParseConflict

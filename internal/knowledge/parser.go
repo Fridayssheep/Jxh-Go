@@ -38,6 +38,9 @@ func ParseRows(rows [][]string) ParseResult {
 	result := ParseResult{}
 	raws := make([]rawRow, 0, len(rows))
 	for index, row := range rows {
+		if rowIsEmpty(row) {
+			continue
+		}
 		r := rowToRaw(row, index+1)
 		if r.keyword == "" {
 			result.Issues = append(result.Issues, ParseIssue{Row: r.row, Reason: IssueMissingKeyword})
@@ -74,7 +77,7 @@ func ParseRows(rows [][]string) ParseResult {
 		}
 	}
 	if len(result.Issues) > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("%d rows were ignored or deduplicated", len(result.Issues)))
+		result.Warnings = append(result.Warnings, fmt.Sprintf("%d rows were ignored", len(result.Issues)))
 	}
 	if len(result.Conflicts) > 0 {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("%d conflicts require review", len(result.Conflicts)))
@@ -106,7 +109,7 @@ func resolveSourceConflicts(candidates []parsedCandidate) ([]Entry, []ParseConfl
 		}
 		bySource[candidate.entry.SourceKey] = append(bySource[candidate.entry.SourceKey], index)
 	}
-	active := make([]Entry, 0, len(order))
+	active := candidateEntries(candidates)
 	conflicts := make([]ParseConflict, 0)
 	issues := make([]ParseIssue, 0)
 	for _, sourceKey := range order {
@@ -121,19 +124,10 @@ func resolveSourceConflicts(candidates []parsedCandidate) ([]Entry, []ParseConfl
 					identical = false
 				}
 			}
-			if identical {
-				for _, index := range indices[1:] {
-					issues = append(issues, ParseIssue{Row: candidates[index].row, Reason: IssueDuplicateIdentical})
-				}
-			} else {
-				for _, index := range indices {
-					candidates[index].entry.AIEnabled = false
-				}
-				first.AIEnabled = false
+			if !identical {
 				conflicts = append(conflicts, ParseConflict{Type: ConflictSourceKey, Key: sourceKey, EntryIDs: ids})
 			}
 		}
-		active = append(active, first)
 	}
 	return active, conflicts, issues
 }
@@ -161,13 +155,17 @@ func resolveExactConflicts(result *ParseResult, active *[]Entry) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	allEntryIndex := make(map[string]int, len(result.Entries))
-	for index, entry := range result.Entries {
-		allEntryIndex[entry.ID] = index
-	}
 	for _, key := range keys {
 		candidates := byKey[key]
 		if len(candidates) < 2 {
+			continue
+		}
+		if exactCandidateAnswersIdentical(*active, candidates) {
+			continue
+		}
+		if exactCandidatesShareSource(*active, candidates) {
+			// The source-key conflict already describes these rows. Runtime lookup
+			// still detects the ambiguous answers for the triggering key.
 			continue
 		}
 		allAliases := true
@@ -175,10 +173,6 @@ func resolveExactConflicts(result *ParseResult, active *[]Entry) {
 		for index, candidate := range candidates {
 			allAliases = allAliases && candidate.alias
 			ids[index] = candidate.entryID
-			(*active)[candidate.entryIndex].ExactReply = false
-			if allIndex, exists := allEntryIndex[candidate.entryID]; exists {
-				result.Entries[allIndex].ExactReply = false
-			}
 		}
 		conflictType := ConflictKeyword
 		if allAliases {
@@ -186,6 +180,26 @@ func resolveExactConflicts(result *ParseResult, active *[]Entry) {
 		}
 		result.Conflicts = append(result.Conflicts, ParseConflict{Type: conflictType, Key: display[key], EntryIDs: ids})
 	}
+}
+
+func exactCandidateAnswersIdentical(entries []Entry, candidates []exactCandidate) bool {
+	answer := normalizeText(entries[candidates[0].entryIndex].Answer)
+	for _, candidate := range candidates[1:] {
+		if normalizeText(entries[candidate.entryIndex].Answer) != answer {
+			return false
+		}
+	}
+	return true
+}
+
+func exactCandidatesShareSource(entries []Entry, candidates []exactCandidate) bool {
+	sourceKey := entries[candidates[0].entryIndex].SourceKey
+	for _, candidate := range candidates[1:] {
+		if entries[candidate.entryIndex].SourceKey != sourceKey {
+			return false
+		}
+	}
+	return true
 }
 
 func addExactCandidate(byKey map[string][]exactCandidate, display map[string]string, value string, candidate exactCandidate) {
@@ -331,6 +345,7 @@ func enrich(raw rawRow, titles map[string]string, children map[string][]string, 
 	}
 	explicitAIUsage := raw.usage == "ai" || raw.usage == "both"
 	return Entry{
+		SourceRow:  raw.row,
 		SourceKey:  sourceKey,
 		Keyword:    raw.keyword,
 		EntryType:  entryType,

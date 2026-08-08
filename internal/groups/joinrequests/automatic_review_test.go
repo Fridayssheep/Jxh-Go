@@ -120,7 +120,9 @@ func (a *reviewApprover) DecideJoinRequest(_ context.Context, _ string, _ bool, 
 
 type reviewReasonProvider struct{}
 
-func (reviewReasonProvider) AutoRejectReason() string { return "legacy reason" }
+func (reviewReasonProvider) AutoRejectReason() string {
+	return "请核对申请信息后重新申请。"
+}
 
 type injectedRosterReader struct{ record AdmissionRosterRecord }
 
@@ -145,7 +147,7 @@ func validReviewCandidate(now time.Time) AutoCandidate {
 
 func timePointer(value time.Time) *time.Time { return &value }
 
-func TestAutomaticRejectKeepsReasonOutOfGateway(t *testing.T) {
+func TestAutomaticRejectSendsConfiguredMessageAndKeepsInternalReason(t *testing.T) {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	store := &reviewStore{candidate: validReviewCandidate(now), evidence: MajorEvidence{
 		EnrollmentYear: "2026", MajorCode: "315", TotalSamples: 2, Version: 1,
@@ -160,11 +162,44 @@ func TestAutomaticRejectKeepsReasonOutOfGateway(t *testing.T) {
 	if err := service.ProcessAutoApprovals(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if approver.reason != "" {
-		t.Fatalf("gateway received internal rejection reason %q", approver.reason)
+	if approver.reason != "请核对申请信息后重新申请。" {
+		t.Fatalf("gateway received rejection message %q, want configured global message", approver.reason)
 	}
-	if store.begin.Reason == nil || !strings.Contains(*store.begin.Reason, "少于最低要求") {
-		t.Fatalf("internal decision did not retain rejection reason: %+v", store.begin.Reason)
+	if store.begin.Reason == nil || *store.begin.Reason != "请核对申请信息后重新申请。" {
+		t.Fatalf("decision did not retain the message sent to the applicant: %+v", store.begin.Reason)
+	}
+	review, ok := store.begin.ReviewSnapshots[store.candidate.Request.ID]
+	if !ok || !strings.Contains(review.Reason, "少于最低要求") {
+		t.Fatalf("automatic review did not retain the internal rejection reason: %+v", review)
+	}
+}
+
+func TestAutomaticApproveDoesNotSendConfiguredRejectMessage(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	store := &reviewStore{candidate: validReviewCandidate(now), evidence: MajorEvidence{
+		EnrollmentYear: "2026", MajorCode: "315", TotalSamples: 3, Version: 1,
+		MajorCounts: []MajorCount{{Major: "计算机类", Count: 3}},
+	}}
+	approver := &reviewApprover{}
+	service, err := NewService(Options{
+		Store: store, Approver: approver, AutoRejectReasons: reviewReasonProvider{},
+		Now: func() time.Time { return now }, Location: time.UTC,
+		MajorCodeJudge: reviewJudge{result: MajorCodeJudgement{
+			Decision: MajorCodeMatch, Confidence: ConfidenceHigh, Reason: "专业代码与历史证据一致。",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	if err := service.ProcessAutoApprovals(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if approver.reason != "" {
+		t.Fatalf("automatic approval received reject message %q", approver.reason)
+	}
+	if store.begin.Reason == nil || *store.begin.Reason != "专业代码与历史证据一致。" {
+		t.Fatalf("automatic approval did not retain its internal review reason: %+v", store.begin.Reason)
 	}
 }
 
@@ -270,34 +305,8 @@ func TestNormalizeMajorFoldsCohortAndWidthVariants(t *testing.T) {
 	if NormalizeMajor("机械类") == want {
 		t.Error("a different discipline must not fold onto 计算机类")
 	}
-}
-
-func TestMajorNamesRelated(t *testing.T) {
-	related := [][2]string{
-		{"计算机类", "计算机类卓越班"},
-		{"计算机类", "计算机类（实验班）"},
-		{"计算机类", "计算机"},
-		{"计算机类", "计算机科学与技术"},
-		{"计算机类", "计算机 类"},
-	}
-	for _, pair := range related {
-		if !majorNamesRelated(pair[0], pair[1]) {
-			t.Errorf("majorNamesRelated(%q, %q) = false, want true", pair[0], pair[1])
-		}
-		if !majorNamesRelated(pair[1], pair[0]) {
-			t.Errorf("majorNamesRelated is not symmetric for (%q, %q)", pair[0], pair[1])
-		}
-	}
-	unrelated := [][2]string{
-		{"计算机类", "机械类"},
-		{"计算机类", "土木工程"},
-		{"计算机类", ""},
-		{"", ""},
-	}
-	for _, pair := range unrelated {
-		if majorNamesRelated(pair[0], pair[1]) {
-			t.Errorf("majorNamesRelated(%q, %q) = true, want false", pair[0], pair[1])
-		}
+	if NormalizeMajor("计算机科学与技术") == want {
+		t.Error("format normalization must not make semantic major equivalence decisions")
 	}
 }
 
@@ -311,6 +320,7 @@ func TestAutomaticDecisionAcceptsMajorSpellingVariants(t *testing.T) {
 	}
 	for _, major := range []string{"计算机类", "计算机类卓越班", "计算机类（卓越班）", "计算机科学与技术"} {
 		t.Run(major, func(t *testing.T) {
+			var seen MajorCodeJudgeInput
 			store := &reviewStore{
 				evidence: evidence,
 				roster:   AdmissionRosterRecord{Configured: true, Found: true, DatasetVersion: "roster-1", Major: "计算机类"},
@@ -318,7 +328,7 @@ func TestAutomaticDecisionAcceptsMajorSpellingVariants(t *testing.T) {
 			service, err := NewService(Options{
 				Store: store, Approver: &reviewApprover{}, AutoRejectReasons: reviewReasonProvider{},
 				Now: func() time.Time { return now }, Location: time.UTC,
-				MajorCodeJudge: reviewJudge{result: MajorCodeJudgement{
+				MajorCodeJudge: &recordingJudge{seen: &seen, result: MajorCodeJudgement{
 					Decision: MajorCodeMatch, Confidence: ConfidenceHigh, Reason: "同一专业的不同写法。",
 				}},
 			})
@@ -335,6 +345,9 @@ func TestAutomaticDecisionAcceptsMajorSpellingVariants(t *testing.T) {
 			}
 			if review.Roster.Status != RosterMatched {
 				t.Fatalf("approved review must not record a roster mismatch, got %s", review.Roster.Status)
+			}
+			if seen.RosterMajor != "计算机类" || seen.ApplicantMajor != major {
+				t.Fatalf("AI did not receive both major names for %q: %+v", major, seen)
 			}
 		})
 	}
@@ -375,6 +388,30 @@ func TestAutomaticDecisionDefersRosterMismatchToJudge(t *testing.T) {
 	}
 	if seen.ApplicantMajor != "计算机类" {
 		t.Fatalf("judge did not receive the applicant major: %+v", seen)
+	}
+}
+
+func TestAutomaticDecisionRosterMajorStillRequiresAI(t *testing.T) {
+	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	candidate := validReviewCandidate(now)
+	store := &reviewStore{
+		evidence: MajorEvidence{
+			EnrollmentYear: "2026", MajorCode: "315", TotalSamples: 3, Version: 2,
+			MajorCounts: []MajorCount{{Major: "计算机类", Count: 3}},
+		},
+		roster: AdmissionRosterRecord{Configured: true, Found: true, DatasetVersion: "roster-1", Major: "计算机类"},
+	}
+	service, err := NewService(Options{
+		Store: store, Approver: &reviewApprover{}, AutoRejectReasons: reviewReasonProvider{},
+		Now: func() time.Time { return now }, Location: time.UTC,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	action, review, eligible, decisionErr := service.automaticDecision(context.Background(), candidate.Request, candidate.Policy)
+	if !errors.Is(decisionErr, ErrDependencyUnavailable) || action != "" || eligible || review.Outcome != ReviewDependencyPending {
+		t.Fatalf("roster major must not bypass missing AI judge: action=%s eligible=%v review=%+v err=%v", action, eligible, review, decisionErr)
 	}
 }
 

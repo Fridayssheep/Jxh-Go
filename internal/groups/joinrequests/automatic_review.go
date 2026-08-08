@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 )
 
 const (
@@ -100,9 +99,9 @@ type MajorCodeJudgeInput struct {
 	EnrollmentYear string
 	MajorCode      string
 	ApplicantMajor string
-	// RosterMajor is the admission roster's major for this student, set only when it
-	// disagrees textually with ApplicantMajor. It is authoritative evidence: the judge
-	// must decide whether the two names denote the same major.
+	// RosterMajor is the admission roster's authoritative major for this student. When
+	// present, the judge must decide whether it and ApplicantMajor denote the same major;
+	// the backend does not make that semantic decision from string similarity.
 	RosterMajor     string
 	TotalSamples    uint64
 	MajorCounts     []MajorCount
@@ -310,32 +309,4 @@ func NormalizeMajor(value string) string {
 		result = strings.ReplaceAll(result, suffix, "")
 	}
 	return result
-}
-
-func normalizeMajor(value string) string {
-	return NormalizeMajor(value)
-}
-
-// majorNamesRelated reports whether two major names are mechanically consistent: equal
-// after folding, or one is a prefix of the other once the "类" category marker is dropped
-// ("计算机类" vs "计算机类工程"). The prefix arm requires a substantial shared head so
-// that short unrelated names do not collide.
-func majorNamesRelated(left, right string) bool {
-	left, right = NormalizeMajor(left), NormalizeMajor(right)
-	if left == "" || right == "" {
-		return false
-	}
-	if left == right {
-		return true
-	}
-	left, right = strings.TrimSuffix(left, "类"), strings.TrimSuffix(right, "类")
-	if left == right {
-		return true
-	}
-	const minimumSharedPrefix = 3
-	shorter, longer := left, right
-	if utf8.RuneCountInString(longer) < utf8.RuneCountInString(shorter) {
-		shorter, longer = longer, shorter
-	}
-	return utf8.RuneCountInString(shorter) >= minimumSharedPrefix && strings.HasPrefix(longer, shorter)
 }

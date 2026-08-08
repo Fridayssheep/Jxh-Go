@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/zjutjh/jxh-go/internal/management/audit"
@@ -56,6 +57,16 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 		if !eligible {
 			continue
 		}
+		externalReason := ""
+		decisionReason := review.Reason
+		if action == ActionReject {
+			externalReason = strings.TrimSpace(s.autoRejectReasons.AutoRejectReason())
+			if !validText(externalReason, 500, false) {
+				processErrors = append(processErrors, fmt.Errorf("load automatic rejection message: %w", ErrInvalidData))
+				continue
+			}
+			decisionReason = externalReason
+		}
 		fields := cloneApplicantFields(*request.AIParse.Fields)
 		ruleVersion := AutoApprovalRuleVersion
 		key := automaticDecisionKey(request.ID, request.Version, ruleVersion, action)
@@ -71,7 +82,7 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 				Request: auth.MutationContext{RequestID: key}, OccurredAt: startedAt,
 			},
 			GroupID: request.Group.ID, Items: []VersionedRequest{{ID: request.ID, Version: request.Version}},
-			Action: action, Source: SourceAutomatic, Reason: &review.Reason, IdempotencyKey: key,
+			Action: action, Source: SourceAutomatic, Reason: &decisionReason, IdempotencyKey: key,
 			ProcessingExpiresAt: startedAt.Add(s.processingLease), PolicyRevision: &policyRevision, RuleVersion: &ruleVersion,
 			FieldSnapshots:  map[string]ApplicantFields{request.ID: fields},
 			ReviewSnapshots: map[string]AutomaticReview{request.ID: review},
@@ -99,7 +110,7 @@ func (s *Service) ProcessAutoApprovals(ctx context.Context) error {
 			processErrors = append(processErrors, ErrInvalidData)
 			continue
 		}
-		if _, err := s.execute(ctx, item, ""); err != nil &&
+		if _, err := s.execute(ctx, item, externalReason); err != nil &&
 			!errors.Is(err, ErrExternalFailure) && !errors.Is(err, ErrDependencyUnavailable) {
 			processErrors = append(processErrors, err)
 		}
@@ -173,15 +184,10 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 			return reject("student_not_in_roster", "当前录取名单中未找到该学号。")
 		}
 		review.Roster.Status = RosterMatched
-		// A roster major that differs from what the applicant typed is not decisive on its
-		// own: the same major is written many ways ("计算机类", "计算机类卓越班",
-		// "计算机科学与技术"). Only mechanically equal names short-circuit here; anything
-		// else is recorded and handed to the AI judge below, which sees the roster major as
-		// authoritative context and decides whether the two names denote one major.
-		if roster.Major != "" && !majorNamesRelated(roster.Major, optionalValue(request.AIParse.Fields.Major)) {
-			review.Roster.Status = RosterMajorMismatch
-			rosterMajor = roster.Major
-		}
+		// A roster major is authoritative context for the AI, not a backend string-matching
+		// decision. Even textually equal names are passed through the same semantic judge so
+		// all equivalence and conflict decisions use one consistent policy.
+		rosterMajor = strings.TrimSpace(roster.Major)
 	}
 	evidence, err := s.store.GetMajorEvidence(ctx, review.StudentID.EnrollmentYear, review.StudentID.MajorCode)
 	if err != nil {
@@ -195,11 +201,6 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 		return reject("major_evidence_insufficient", judgement.Reason)
 	}
 	if s.majorCodeJudge == nil {
-		// Without the judge an unresolved roster disagreement has nothing left to resolve
-		// it, so fall back to the deterministic rejection rather than approving blindly.
-		if rosterMajor != "" {
-			return reject("roster_major_mismatch", "申请专业与录取名单中的专业不一致，且 AI 专业判断服务未配置。")
-		}
 		review.Outcome, review.ReasonCode, review.Reason = ReviewDependencyPending, "major_judge_unavailable", "AI 专业判断服务未配置，等待人工处理或服务恢复。"
 		return "", review, false, fmt.Errorf("judge major code: %w", ErrDependencyUnavailable)
 	}
@@ -215,15 +216,11 @@ func (s *Service) automaticDecision(ctx context.Context, request Request, policy
 	}
 	review.Judgement = &judgement
 	if judgement.Decision != MajorCodeMatch || judgement.Confidence != ConfidenceHigh {
-		if rosterMajor != "" {
+		if rosterMajor != "" && judgement.Decision == MajorCodeMismatch {
+			review.Roster.Status = RosterMajorMismatch
 			return reject("roster_major_mismatch", judgement.Reason)
 		}
 		return reject("major_code_mismatch", judgement.Reason)
-	}
-	if rosterMajor != "" {
-		// The judge resolved the textual disagreement in the applicant's favour, so the
-		// roster is recorded as matched rather than leaving a mismatch on an approval.
-		review.Roster.Status = RosterMatched
 	}
 	review.Outcome, review.ReasonCode, review.Reason = ReviewPassed, "automatic_review_passed", judgement.Reason
 	return ActionApprove, review, policy.Enabled, nil

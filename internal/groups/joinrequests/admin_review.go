@@ -207,14 +207,16 @@ func admissionEntriesFromRows(rows [][]string) ([]AdmissionRosterEntry, error) {
 		}
 		seen[studentID] = struct{}{}
 		entry := AdmissionRosterEntry{StudentID: studentID}
-		if index, exists := headers["name"]; exists {
-			entry.Name = rowValue(row, index)
+		// These are column indexes, deliberately not named "index" so they cannot be
+		// confused with the row index the loop above binds.
+		if column, exists := headers["name"]; exists {
+			entry.Name = rowValue(row, column)
 			if entry.Name != "" && utf8.RuneCountInString(entry.Name) > 64 {
 				return nil, rosterValidationError(rowNumber, "name", "姓名不能超过 64 个字符")
 			}
 		}
-		if index, exists := headers["major"]; exists {
-			entry.Major = rowValue(row, index)
+		if column, exists := headers["major"]; exists {
+			entry.Major = rowValue(row, column)
 			if entry.Major != "" && !validApplicantMajor(entry.Major) {
 				return nil, rosterValidationError(rowNumber, "major", "专业名称格式无效")
 			}

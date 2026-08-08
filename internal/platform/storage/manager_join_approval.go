@@ -108,12 +108,7 @@ func (s *Store) GetMajorEvidence(ctx context.Context, enrollmentYear, majorCode 
 		return joinrequests.MajorEvidence{}, joinrequests.ErrDependencyUnavailable
 	}
 	evidence := joinrequests.MajorEvidence{EnrollmentYear: enrollmentYear, MajorCode: majorCode, Version: state.EvidenceVersion}
-	type countRow struct {
-		NormalizedMajor string `gorm:"column:normalized_major"`
-		Major           string `gorm:"column:major"`
-		Count           uint64 `gorm:"column:sample_count"`
-	}
-	var rows []countRow
+	var rows []majorEvidenceCountRow
 	// Group by the normalized key so cohort/width/bracket variants of one major aggregate
 	// into a single count instead of splitting into several weak ones. The raw name kept
 	// for display is the most frequent spelling within the group.
@@ -124,20 +119,37 @@ func (s *Store) GetMajorEvidence(ctx context.Context, enrollmentYear, majorCode 
 	if err != nil {
 		return joinrequests.MajorEvidence{}, err
 	}
-	indexByKey := make(map[string]int, len(rows))
 	for _, row := range rows {
 		evidence.TotalSamples += row.Count
-		if position, ok := indexByKey[row.NormalizedMajor]; ok {
-			evidence.MajorCounts[position].Count += row.Count
+	}
+	evidence.MajorCounts = aggregateMajorCounts(rows)
+	return evidence, nil
+}
+
+type majorEvidenceCountRow struct {
+	EnrollmentYear  string `gorm:"column:enrollment_year"`
+	MajorCode       string `gorm:"column:major_code"`
+	NormalizedMajor string `gorm:"column:normalized_major"`
+	Major           string `gorm:"column:major"`
+	Count           uint64 `gorm:"column:sample_count"`
+}
+
+func aggregateMajorCounts(rows []majorEvidenceCountRow) []joinrequests.MajorCount {
+	counts := make([]joinrequests.MajorCount, 0, len(rows))
+	indexByKey := make(map[string]int, len(rows))
+	for _, row := range rows {
+		key := row.NormalizedMajor
+		if key == "" {
+			key = joinrequests.NormalizeMajor(row.Major)
+		}
+		if position, ok := indexByKey[key]; ok {
+			counts[position].Count += row.Count
 			continue
 		}
-		indexByKey[row.NormalizedMajor] = len(evidence.MajorCounts)
-		evidence.MajorCounts = append(evidence.MajorCounts, joinrequests.MajorCount{Major: row.Major, Count: row.Count})
+		indexByKey[key] = len(counts)
+		counts = append(counts, joinrequests.MajorCount{Major: row.Major, Count: row.Count})
 	}
-	sort.SliceStable(evidence.MajorCounts, func(first, second int) bool {
-		return evidence.MajorCounts[first].Count > evidence.MajorCounts[second].Count
-	})
-	return evidence, nil
+	return sortedMajorCounts(counts)
 }
 
 func (s *Store) ListMajorEvidence(ctx context.Context) ([]joinrequests.EvidenceSummary, joinrequests.RuleState, error) {
@@ -145,21 +157,20 @@ func (s *Store) ListMajorEvidence(ctx context.Context) ([]joinrequests.EvidenceS
 	if err != nil {
 		return nil, joinrequests.RuleState{}, err
 	}
-	type countRow struct {
-		EnrollmentYear string `gorm:"column:enrollment_year"`
-		MajorCode      string `gorm:"column:major_code"`
-		Major          string `gorm:"column:major"`
-		Count          uint64 `gorm:"column:sample_count"`
-	}
-	var rows []countRow
+	var rows []majorEvidenceCountRow
 	err = s.db.WithContext(ctx).Table("join_major_code_samples").
-		Select("enrollment_year, major_code, major_name AS major, COUNT(*) AS sample_count").Where("active = TRUE").
-		Group("enrollment_year, major_code, major_name").Order("enrollment_year DESC").Order("major_code ASC").Order("sample_count DESC").Scan(&rows).Error
+		Select("enrollment_year, major_code, normalized_major, major_name AS major, COUNT(*) AS sample_count").Where("active = TRUE").
+		Group("enrollment_year, major_code, normalized_major, major_name").Order("enrollment_year DESC").Order("major_code ASC").Order("sample_count DESC").Order("major_name ASC").Scan(&rows).Error
 	if err != nil {
 		return nil, joinrequests.RuleState{}, err
 	}
+	return aggregateEvidenceSummaries(rows), state, nil
+}
+
+func aggregateEvidenceSummaries(rows []majorEvidenceCountRow) []joinrequests.EvidenceSummary {
 	byKey := make(map[string]int)
-	result := make([]joinrequests.EvidenceSummary, 0)
+	byMajorKey := make([]map[string]int, 0)
+	result := make([]joinrequests.EvidenceSummary, 0, len(rows))
 	for _, row := range rows {
 		key := row.EnrollmentYear + ":" + row.MajorCode
 		index, ok := byKey[key]
@@ -167,11 +178,24 @@ func (s *Store) ListMajorEvidence(ctx context.Context) ([]joinrequests.EvidenceS
 			index = len(result)
 			byKey[key] = index
 			result = append(result, joinrequests.EvidenceSummary{EnrollmentYear: row.EnrollmentYear, MajorCode: row.MajorCode})
+			byMajorKey = append(byMajorKey, make(map[string]int))
 		}
-		result[index].MajorCounts = append(result[index].MajorCounts, joinrequests.MajorCount{Major: row.Major, Count: row.Count})
+		normalized := row.NormalizedMajor
+		if normalized == "" {
+			normalized = joinrequests.NormalizeMajor(row.Major)
+		}
+		if majorIndex, exists := byMajorKey[index][normalized]; exists {
+			result[index].MajorCounts[majorIndex].Count += row.Count
+		} else {
+			byMajorKey[index][normalized] = len(result[index].MajorCounts)
+			result[index].MajorCounts = append(result[index].MajorCounts, joinrequests.MajorCount{Major: row.Major, Count: row.Count})
+		}
 		result[index].TotalSamples += row.Count
 	}
-	return result, state, nil
+	for index := range result {
+		result[index].MajorCounts = sortedMajorCounts(result[index].MajorCounts)
+	}
+	return result
 }
 
 func (s *Store) ListMajorEvidenceSamples(ctx context.Context, query joinrequests.EvidenceListQuery) (joinrequests.Page[joinrequests.EvidenceSample], error) {
